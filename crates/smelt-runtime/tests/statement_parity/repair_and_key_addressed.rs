@@ -427,7 +427,7 @@ mutation_profile:
 
     let expected = emit_per_group_recompute(
         "main.customer_max_amount",
-        staged_relation,
+        &StagedRelation::session_temporary(staged_relation),
         &key,
         &affected_keys_select,
         candidate_select,
@@ -664,7 +664,7 @@ async fn key_addressed_model_edge_statements_come_from_the_emitter() {
 
     let expected = emit_per_group_recompute(
         "main.downstream",
-        staged_relation,
+        &StagedRelation::session_temporary(staged_relation),
         &key,
         &affected_keys_select,
         candidate_select,
@@ -908,7 +908,7 @@ mutation_profile:
     );
     let expected = emit_diff_patch(
         "main.customer_max_amount",
-        staged_relation,
+        &StagedRelation::session_temporary(staged_relation),
         &key,
         candidate_select,
         &["max_amount".to_string()],

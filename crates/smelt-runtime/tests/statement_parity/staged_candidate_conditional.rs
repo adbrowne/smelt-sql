@@ -280,7 +280,7 @@ async fn staged_candidate_conditional_statements_come_from_the_emitter() {
 
     let group = smelt_logical::maintenance::emit::emit_staged_candidate_conditional(
         "main.dim_users",
-        "__smelt_staged_dim_users",
+        &StagedRelation::session_temporary("__smelt_staged_dim_users"),
         &key,
         candidate_select,
         &compared_columns,
@@ -295,7 +295,7 @@ async fn staged_candidate_conditional_statements_come_from_the_emitter() {
     assert_eq!(recorded.len(), 1);
     let expected = smelt_logical::maintenance::emit::emit_staged_candidate_conditional(
         "main.dim_users",
-        "__smelt_staged_dim_users",
+        &StagedRelation::session_temporary("__smelt_staged_dim_users"),
         &key,
         candidate_select,
         &compared_columns,
@@ -422,7 +422,7 @@ async fn staged_candidate_conditional_recompute_deletes_departed_keys() {
 
     let group = emit_staged_candidate_conditional_recompute(
         "main.dim_users",
-        "__smelt_staged_dim_users",
+        &StagedRelation::session_temporary("__smelt_staged_dim_users"),
         &key,
         candidate_select,
         &compared_columns,
@@ -437,7 +437,7 @@ async fn staged_candidate_conditional_recompute_deletes_departed_keys() {
     assert_eq!(recorded.len(), 1);
     let expected = emit_staged_candidate_conditional_recompute(
         "main.dim_users",
-        "__smelt_staged_dim_users",
+        &StagedRelation::session_temporary("__smelt_staged_dim_users"),
         &key,
         candidate_select,
         &compared_columns,
@@ -523,7 +523,7 @@ async fn staged_candidate_interrupted_run_leaves_no_temp_relation_behind() {
     // the INSERT with a column-count mismatch mid-transaction.
     let mut group = smelt_logical::maintenance::emit::emit_staged_candidate_conditional(
         "main.dim_users",
-        "__smelt_staged_broken",
+        &StagedRelation::session_temporary("__smelt_staged_broken"),
         &["user_id".to_string()],
         "SELECT user_id, tier FROM (VALUES (1, 'bronze')) AS t(user_id, tier)",
         &["tier".to_string()],

@@ -64,7 +64,7 @@ use smelt_logical::maintenance::emit::{
     emit_delete_insert, emit_departed_key_delete, emit_diff_patch, emit_keyed_fold,
     emit_keyed_fold_suppressed, emit_per_group_recompute, emit_recurrence_bound_probe,
     emit_source_mutation_fingerprint, emit_staged_candidate_conditional_recompute,
-    MaintenanceDialect, Region, TargetSlicePredicate,
+    MaintenanceDialect, Region, StagedRelation, TargetSlicePredicate,
 };
 use smelt_logical::maintenance::locality::LocalitySlice;
 use smelt_planner::{

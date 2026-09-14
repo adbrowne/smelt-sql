@@ -461,6 +461,11 @@ documentation. Measured `✗`s:
 - `supports_alter_column_using` — no `ALTER COLUMN ... USING` type-changing syntax.
 - `supports_fingerprint_sidecar` — no delta-restriction admission over an external
   `mutable_snapshot` source's fingerprint diff.
+- `staged_relation_group_is_atomic` — no transactional write capability at all, not even
+  single-statement DDL inside an explicit transaction, so the staged-candidate conditional
+  DELETE+INSERT's staged relation is a real, explicitly-named, explicitly-dropped table in the
+  target's own schema (`staged_relation_residence = TargetSchema`) rather than a session temp
+  table, reclaimed with a leading `DROP ... IF EXISTS` before every run.
 
 Two gaps beyond the capability matrix: **no incremental/maintenance family runs on a `trino`
 target yet** — `maintenance_dialect` refuses `SqlDialect::Trino`, so a full refresh is the only

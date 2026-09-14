@@ -239,11 +239,24 @@ it, else a separately emitted scoped `DELETE` inside the same statement group.
 
 **The staged-candidate conditional DELETE+INSERT** is the merge-less realisation of the same
 licence — the keyed-shaped conditional write for a backend that cannot run `MERGE` at all (a
-documented gap: Spark-over-Parquet). One transaction: stage the candidate region into a temp
-relation; derive the changed/new/departed row sets against stored state by diff joins (keyed
-identity) or `EXCEPT ALL` both ways (whole-row identity); `DELETE` the changed-or-departed rows;
-`INSERT` the changed-or-new rows. Byte-equivalent to today's region DELETE+INSERT at fixed `S`,
-with the write physically restricted to the rows whose effect is not the identity.
+documented gap: Spark-over-Parquet). Stage the candidate region into a **staged relation**, whose
+residence is a backend capability (`multi_backend.md` §"Column-scoped merge and conditional-write
+capabilities" — `staged_relation_residence`): a session-temporary relation on every backend with a
+session temp namespace, or a real target-schema relation on one with none (Trino). Derive the
+changed/new/departed row sets against stored state by diff joins (keyed identity) or `EXCEPT ALL`
+both ways (whole-row identity); `DELETE` the changed-or-departed rows; `INSERT` the
+changed-or-new rows. Byte-equivalent to today's region DELETE+INSERT at fixed `S`, with the write
+physically restricted to the rows whose effect is not the identity.
+
+On a backend whose staged relation group cannot run as one atomic transaction
+(`staged_relation_group_is_atomic = false`), the one-transaction guarantee above is unavailable,
+so the group instead carries three recovery obligations: (a) every stage statement precedes any
+target mutation, so an interruption before the apply leaves the target byte-unchanged; (b) the
+relation's name is *derived*, deterministic per (purpose, target table), and prefixed so it can
+never collide with a user model; (c) the group reclaims its own relation with a leading `DROP ...
+IF EXISTS` and repopulates it before reading it, so an orphan relation left by an interrupted run
+is never adopted as live data by a later run. Concurrent runs of the same model are excluded by
+the state lock (`run_state.md`'s state locking), never by the relation's name.
 
 **The whole-row realisation is region-grained, not row-grained.** A keyless region (no declared
 `unique_key`, no proven grain key — `RowIdentity::WholeRow`) has no row address a multiset

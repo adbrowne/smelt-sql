@@ -12,7 +12,9 @@ mod printer;
 pub mod restructure;
 mod type_conformance;
 
-pub use dialect::{BackendCapabilities, NullSafeEqualitySpelling, SqlDialect};
+pub use dialect::{
+    BackendCapabilities, NullSafeEqualitySpelling, SqlDialect, StagedRelationResidence,
+};
 pub use emission_check::{unsupported_emissions, UnsupportedEmission};
 pub use emission_settle::settle_emissions;
 pub use position::classify as classify_position;

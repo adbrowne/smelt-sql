@@ -15,7 +15,7 @@ use smelt_logical::maintenance::emit::{
     emit_source_mutation_fingerprint, emit_staged_candidate_conditional,
     emit_staged_candidate_conditional_recompute, presentation_projection,
     state_augmented_projection, AppendOnlyBaselinePartition, MaintenanceDialect, PartitionBucket,
-    PresentationRefusal, Region, StateAugmentRefusal,
+    PresentationRefusal, Region, StagedRelation, StateAugmentRefusal,
 };
 use smelt_logical::{classify_cumulative, CrossPartitionCombiner, SourceTimeseriesMap};
 use std::collections::{BTreeMap, HashMap};
@@ -616,7 +616,7 @@ fn staged_candidate_conditional_recompute_adds_a_departed_key_delete() {
 
     let region_scoped = emit_staged_candidate_conditional(
         "main.dim_users",
-        "__smelt_staged_dim_users",
+        &StagedRelation::session_temporary("__smelt_staged_dim_users"),
         &key,
         candidate_select,
         &compared_columns,
@@ -624,7 +624,7 @@ fn staged_candidate_conditional_recompute_adds_a_departed_key_delete() {
     );
     let recompute = emit_staged_candidate_conditional_recompute(
         "main.dim_users",
-        "__smelt_staged_dim_users",
+        &StagedRelation::session_temporary("__smelt_staged_dim_users"),
         &key,
         candidate_select,
         &compared_columns,
@@ -660,7 +660,7 @@ fn staged_candidate_conditional_recompute_adds_a_departed_key_delete() {
 fn staged_candidate_conditional_recompute_panics_on_empty_key() {
     emit_staged_candidate_conditional_recompute(
         "main.t",
-        "__staged",
+        &StagedRelation::session_temporary("__staged"),
         &[],
         "SELECT 1",
         &["a".to_string()],

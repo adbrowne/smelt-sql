@@ -120,6 +120,21 @@ pub enum NullSafeEqualitySpelling {
     Spaceship,
 }
 
+/// Where a change-suppressed write group's staged relation lives while the
+/// group runs — the `supports_staged_relation_group` matrix cell's residence
+/// half (`docs/specs/multi_backend.md` §"Column-scoped merge and
+/// conditional-write capabilities").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StagedRelationResidence {
+    /// A session-scoped temp table, implicitly dropped with the session
+    /// (DuckDB). Emitted `CREATE TEMP TABLE`.
+    SessionTemporary,
+    /// A real, explicitly-named, explicitly-dropped table in the target's
+    /// own schema — for a backend with no session temp namespace
+    /// (Trino/Iceberg). Emitted `CREATE TABLE`.
+    TargetSchema,
+}
+
 /// Capabilities of a backend.
 ///
 /// Used to determine what SQL features can be used directly vs. need rewriting.
@@ -257,6 +272,18 @@ pub struct BackendCapabilities {
     /// dimension — the gap is declared, never a silent narrowing.
     /// `true` for DuckDB alone today.
     pub supports_fingerprint_sidecar: bool,
+
+    /// Where the change-suppressed write group's staged relation lives.
+    /// `SessionTemporary` on every backend with a session temp namespace
+    /// (DuckDB, Spark, BigQuery); `TargetSchema` on Trino, which has none.
+    pub staged_relation_residence: StagedRelationResidence,
+
+    /// Whether the staged relation group (`CREATE`, populate, use, `DROP`)
+    /// can run as one atomic backend transaction. `true` everywhere the
+    /// group is session-temporary; `false` on Trino, which has no
+    /// transactional write capability at all (`docs/outcomes/
+    /// 20260913-trino-ledger/phases/01-summary.md`).
+    pub staged_relation_group_is_atomic: bool,
 }
 
 impl BackendCapabilities {
@@ -291,6 +318,8 @@ impl BackendCapabilities {
             supports_pipe_set_drop_rename: true,
             null_safe_equality: NullSafeEqualitySpelling::IsNotDistinctFrom,
             supports_fingerprint_sidecar: true,
+            staged_relation_residence: StagedRelationResidence::SessionTemporary,
+            staged_relation_group_is_atomic: true,
         }
     }
 
@@ -333,6 +362,8 @@ impl BackendCapabilities {
             supports_pipe_set_drop_rename: false,
             null_safe_equality: NullSafeEqualitySpelling::Spaceship,
             supports_fingerprint_sidecar: false,
+            staged_relation_residence: StagedRelationResidence::SessionTemporary,
+            staged_relation_group_is_atomic: true,
         }
     }
 
@@ -368,6 +399,8 @@ impl BackendCapabilities {
             supports_pipe_set_drop_rename: false,
             null_safe_equality: NullSafeEqualitySpelling::Spaceship,
             supports_fingerprint_sidecar: false,
+            staged_relation_residence: StagedRelationResidence::SessionTemporary,
+            staged_relation_group_is_atomic: true,
         }
     }
 
@@ -439,6 +472,8 @@ impl BackendCapabilities {
             supports_pipe_set_drop_rename: false,
             null_safe_equality: NullSafeEqualitySpelling::IsNotDistinctFrom,
             supports_fingerprint_sidecar: false,
+            staged_relation_residence: StagedRelationResidence::SessionTemporary,
+            staged_relation_group_is_atomic: true,
         }
     }
 
@@ -536,6 +571,8 @@ impl BackendCapabilities {
             // today, so this is an implementation-scope fact rather than
             // something a live probe can measure.
             supports_fingerprint_sidecar: false,
+            staged_relation_residence: StagedRelationResidence::TargetSchema,
+            staged_relation_group_is_atomic: false,
         }
     }
 }

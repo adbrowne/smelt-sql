@@ -156,12 +156,33 @@ land near or above Delta's.
 | 4 | Wire the absence: Trino claims no correctness structure, availability resolution downgrades every dependent cell to its recompute equivalent with `MaintenanceStateDowngraded`, derived once by the pure resolver with the ideal plan still materialised | done |
 | 5 | The two invariants as standing tests: no execution path on Trino reaches a builder for an unclaimed structure (claim ⇒ builder), and no absence produces a refusal where the contract specifies a downgrade (absence ⇒ downgrade) | done |
 | 6 | `contract.deferral` refuses on Trino with `DeclaredContractRequiresState`; `frozen_horizon` and `retain_departed` follow the existing grain and posture rules with no new lattice point | done |
-| 7 | The staged relation group without temp tables: scratch-schema relation with a derived non-colliding name, owned lifecycle, proved cleanup after an interruption between stage and apply — or a by-name refusal if T1 measured the flag `false` | planned |
+| 7 | The staged relation group without temp tables: scratch-schema relation with a derived non-colliding name, owned lifecycle, proved cleanup after an interruption between stage and apply — or a by-name refusal if T1 measured the flag `false` | done |
 | 8 | Locking and versioning: two concurrent runs where exactly one proceeds, or a refusal naming the backend and the missing capability — never a lock that never locks | pending |
 | 9 | `.smelt/` is not correctness-bearing on Trino: delete-between-runs equality, and `state.mode: stateless` writing nothing while changing no maintained table's value | pending |
 | 10 | Surface and close: `smelt explain` rendering Trino's downgrades (text + `--json`), diagnostics catalogue and `examples/broken/` fixtures, `docs-site/` state page updated with what Trino costs and why, `verify-phase.sh` green with no baseline bumped | pending |
 
 ## Decision log
+
+- **2026-09-14 — phase 7 done: `StagedRelation` (residence, atomicity, derived name) lands as
+  capability data; four emitters re-keyed; live-proved on Trino.** `BackendCapabilities` gains
+  `staged_relation_residence`/`staged_relation_group_is_atomic` (Trino:
+  `TargetSchema`/`false`, every other backend `SessionTemporary`/`true`).
+  `emit_staged_candidate_conditional`, `_recompute`, `emit_per_group_recompute`, `emit_diff_patch`
+  now take `&StagedRelation` and derive their `CREATE` spelling, an optional leading reclaim
+  `DROP ... IF EXISTS`, and `StatementGroup::transactional` from it, rather than hardcoding
+  `CREATE TEMP TABLE`/`true` — DuckDB's byte-exact statements are unchanged (verified by the
+  existing regression tests, renamed to name the residence they now assert).
+  `emit_staged_candidate_conditional_keyless` was left untouched (out of the four-emitter scope;
+  no production Trino caller). Live proof
+  (`crates/smelt-backend-trino/tests/staged_relation_lifecycle.rs`) runs the lifecycle directly
+  through `TrinoBackend` (no `MaintenanceDialect::Trino` needed, per phase 4's standing decision):
+  an interruption between stage and apply leaves the target untouched with exactly one orphan
+  relation, and a recovered re-run's leading reclaim drops the orphan before its own `CREATE`,
+  landing the correct end state with no relation left behind. One process note: `large-file-check.sh
+  --update` was run bare once and silently dropped every prior phase's sign-off comment from the
+  baseline file; reverted via `git checkout` and the three regressed counts were hand-edited
+  instead, with history preserved — future phases should never run bare `--update`, only
+  hand-edit the specific baseline line(s). See `phases/07-summary.md`.
 
 - **2026-09-14 — phase 7 planning: no reshape; the branch is decided by T1's measurement, and the
   live proof sidesteps the write-path wall phase 6 hit.** The phase table is unchanged. Four facts

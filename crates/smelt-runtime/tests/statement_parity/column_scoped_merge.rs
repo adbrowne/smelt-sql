@@ -463,7 +463,7 @@ async fn delete_insert_suppressed_keyed_membership_statements_come_from_the_emit
 
     let expected = smelt_logical::maintenance::emit::emit_staged_candidate_conditional_recompute(
         "main.user_lifetime_status",
-        staged_relation,
+        &smelt_logical::maintenance::emit::StagedRelation::session_temporary(staged_relation),
         &["user_id".to_string()],
         candidate_select,
         &["event_count".to_string()],

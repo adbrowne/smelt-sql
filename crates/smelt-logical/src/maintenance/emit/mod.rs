@@ -31,6 +31,7 @@ mod probes;
 mod projection;
 mod recompute;
 mod staged;
+mod staged_relation;
 mod succession;
 mod types;
 
@@ -42,5 +43,6 @@ pub use probes::*;
 pub use projection::*;
 pub use recompute::*;
 pub use staged::*;
+pub use staged_relation::*;
 pub use succession::*;
 pub use types::*;

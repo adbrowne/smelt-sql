@@ -1,7 +1,9 @@
 use super::*;
 use anyhow::Result;
 use smelt_backend::{maintenance_dialect, Backend, ExecutionResult};
-use smelt_logical::maintenance::emit::{emit_per_group_recompute, MaintenanceDialect};
+use smelt_logical::maintenance::emit::{
+    emit_per_group_recompute, MaintenanceDialect, StagedRelation, StagedRelationResidence,
+};
 use std::time::Instant;
 
 /// The affected-key relation a repair reads: the distinct group keys present
@@ -201,18 +203,28 @@ pub async fn execute_per_group_recompute(
     })
 }
 
-/// The staged temp relation name a repair uses for `table` — one derivation,
-/// so a parity test (and the technique preview) can name the same relation
-/// the live run does without guessing.
-pub fn repair_staged_relation(table: &str) -> String {
-    format!("__smelt_repair_{table}")
+/// The staged relation a repair uses for `table` — one derivation, so a
+/// parity test (and the technique preview) can name the same relation the
+/// live run does without guessing.
+pub fn repair_staged_relation(table: &str) -> StagedRelation {
+    StagedRelation::derive(
+        "__smelt_repair_",
+        table,
+        StagedRelationResidence::SessionTemporary,
+        true,
+    )
 }
 
-/// The staged temp relation name a `diff_patch` write over a repair cell
-/// uses for `table` — a distinct prefix from [`repair_staged_relation`] so a
-/// parity test can name each group's own relation without ambiguity.
-pub fn diff_patch_staged_relation(table: &str) -> String {
-    format!("__smelt_diff_patch_{table}")
+/// The staged relation a `diff_patch` write over a repair cell uses for
+/// `table` — a distinct prefix from [`repair_staged_relation`] so a parity
+/// test can name each group's own relation without ambiguity.
+pub fn diff_patch_staged_relation(table: &str) -> StagedRelation {
+    StagedRelation::derive(
+        "__smelt_diff_patch_",
+        table,
+        StagedRelationResidence::SessionTemporary,
+        true,
+    )
 }
 
 /// The `diff_patch` slice restriction for a repair cell: the candidate's own

@@ -9,7 +9,9 @@
 
 use smelt_logical::analysis::walk::{ColumnComparability, Comparability};
 use smelt_logical::maintenance::diff_patch::{admit_diff_patch, DeleteLeg, DiffPatchRefusal};
-use smelt_logical::maintenance::emit::{emit_diff_patch, MaintenanceDialect, Region};
+use smelt_logical::maintenance::emit::{
+    emit_diff_patch, MaintenanceDialect, Region, StagedRelation,
+};
 use smelt_logical::maintenance::{
     admissible_write_patterns, lookup_write_pattern, BackendWriteCapabilities, ContractFact,
     OutputContractFacts, RowIdentity, RowIdentityVerdict, WriteCapability,
@@ -153,7 +155,7 @@ fn emit_diff_patch_stages_then_patches() {
                              >= '2026-01-01' AND event_date < '2026-01-02'";
     let group = emit_diff_patch(
         "main.customers",
-        "__smelt_staged",
+        &StagedRelation::session_temporary("__smelt_staged"),
         &["customer_id".to_string()],
         candidate_select,
         &["tier".to_string()],
@@ -209,7 +211,7 @@ fn emit_diff_patch_restricts_both_delete_legs_to_the_caller_slice_predicate() {
     let candidate_select = "SELECT customer_id, tier FROM main.stg_customers";
     let group = emit_diff_patch(
         "main.customers",
-        "__smelt_staged",
+        &StagedRelation::session_temporary("__smelt_staged"),
         &["customer_id".to_string()],
         candidate_select,
         &["tier".to_string()],
@@ -236,7 +238,7 @@ fn emit_diff_patch_comparison_is_null_safe() {
     let candidate_select = "SELECT customer_id, tier FROM main.stg_customers";
     let group = emit_diff_patch(
         "main.customers",
-        "__smelt_staged",
+        &StagedRelation::session_temporary("__smelt_staged"),
         &["customer_id".to_string()],
         candidate_select,
         &["tier".to_string()],
@@ -262,7 +264,7 @@ fn emit_diff_patch_omits_delete_leg_when_incomplete() {
 
     let complete_group = emit_diff_patch(
         "main.customers",
-        "__smelt_staged",
+        &StagedRelation::session_temporary("__smelt_staged"),
         &["customer_id".to_string()],
         candidate_select,
         &["tier".to_string()],
@@ -280,7 +282,7 @@ fn emit_diff_patch_omits_delete_leg_when_incomplete() {
 
     let omitted_group = emit_diff_patch(
         "main.customers",
-        "__smelt_staged",
+        &StagedRelation::session_temporary("__smelt_staged"),
         &["customer_id".to_string()],
         candidate_select,
         &["tier".to_string()],
@@ -315,7 +317,7 @@ fn emit_diff_patch_rejects_empty_key() {
     let result = std::panic::catch_unwind(|| {
         emit_diff_patch(
             "main.customers",
-            "__smelt_staged",
+            &StagedRelation::session_temporary("__smelt_staged"),
             &[],
             "SELECT customer_id, tier FROM main.stg_customers",
             &["tier".to_string()],

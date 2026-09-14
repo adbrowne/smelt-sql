@@ -432,6 +432,16 @@ tooling must be able to show what the project *would* get with state — the cou
 part of the product. An implementation that prunes state-requiring techniques during ideal
 derivation (early resolution) violates this spec even if it executes identical SQL.
 
+The same late-resolution discipline governs a statement *group* a backend cannot run atomically,
+not only a missing correctness structure: a staged-candidate write group whose target backend
+reports `staged_relation_group_is_atomic = false` (`multi_backend.md` §"Column-scoped merge and
+conditional-write capabilities") is emitted with `StatementGroup::transactional = false` and the
+non-atomic recovery obligations (`model_transforms.md` §"The staged-candidate conditional
+DELETE+INSERT"), never emitted `transactional = true` and silently executed one statement at a
+time by `Backend::execute_statement_group`'s default sequential implementation — a claim of
+atomicity a backend cannot honour is the same fail-loud failure shape as an unavailable
+correctness structure reaching an execution path that expects one.
+
 ### Declarations stay fail-loud
 
 Frontmatter declares facts about the model's output (`grain`, `timeseries:`, `unique_key:`,

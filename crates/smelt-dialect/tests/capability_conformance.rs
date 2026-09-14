@@ -8,7 +8,7 @@
 //!   - `supports_struct_field_ddl` / spark_parquet  — RESOLVED: false (W6·P2 live test)
 //!   - `supports_nested_array_ddl` / spark_delta    — RESOLVED: true (W7·P2 live Delta test)
 
-use smelt_dialect::{BackendCapabilities, NullSafeEqualitySpelling};
+use smelt_dialect::{BackendCapabilities, NullSafeEqualitySpelling, StagedRelationResidence};
 
 /// Assert every `BackendCapabilities` flag against the matrix in
 /// `docs/specs/multi_backend.md` §Surface.
@@ -269,6 +269,24 @@ fn every_flag_matches_matrix() {
     );
     cell!(bigquery, supports_fingerprint_sidecar, false, "BigQuery");
 
+    // staged_relation_residence / staged_relation_group_is_atomic — every
+    // backend with a session temp namespace is session-temporary and
+    // atomic; Trino, which has neither, is target-schema and non-atomic
+    // (`docs/outcomes/20260913-trino-ledger/phases/07-plan.md`).
+    for (caps, name) in [
+        (&duckdb, "DuckDB"),
+        (&delta, "Spark(Delta)"),
+        (&parquet, "Spark(Parquet)"),
+        (&bigquery, "BigQuery"),
+    ] {
+        assert_eq!(
+            caps.staged_relation_residence,
+            StagedRelationResidence::SessionTemporary,
+            "{name}"
+        );
+        assert!(caps.staged_relation_group_is_atomic, "{name}");
+    }
+
     // Databricks — equal to Spark (Delta) throughout (spec matrix: the
     // Databricks column matches Spark(Delta) in every flag). Not yet
     // independently live-verified against a Databricks workspace
@@ -322,6 +340,12 @@ fn every_flag_matches_matrix() {
         false,
         "Databricks"
     );
+    assert_eq!(
+        databricks.staged_relation_residence,
+        StagedRelationResidence::SessionTemporary,
+        "Databricks"
+    );
+    assert!(databricks.staged_relation_group_is_atomic, "Databricks");
 
     // Trino (Iceberg). Every cell below was established by executing the
     // statement the flag names against a live coordinator
@@ -359,6 +383,63 @@ fn every_flag_matches_matrix() {
         "Trino"
     );
     cell!(trino, supports_fingerprint_sidecar, false, "Trino");
+    // Trino has no session temp namespace and no transactional write
+    // capability at all (`docs/outcomes/20260913-trino-ledger/phases/
+    // 01-summary.md`), so its staged relation is a real target-schema
+    // table and the group that uses it cannot be atomic.
+    assert_eq!(
+        trino.staged_relation_residence,
+        StagedRelationResidence::TargetSchema,
+        "Trino"
+    );
+    assert!(!trino.staged_relation_group_is_atomic, "Trino");
+}
+
+/// Every capability profile declares a `staged_relation_residence` — the
+/// constructor list phase 5 of `20260913-trino-ledger` found `trino_iceberg()`
+/// missing from a different sidecar-capability loop; this one is exhaustive
+/// over every constructor rather than a hand-maintained subset.
+#[test]
+fn every_capability_profile_declares_a_staged_relation_residence() {
+    let profiles: Vec<(BackendCapabilities, &str, StagedRelationResidence, bool)> = vec![
+        (
+            BackendCapabilities::duckdb(),
+            "DuckDB",
+            StagedRelationResidence::SessionTemporary,
+            true,
+        ),
+        (
+            BackendCapabilities::spark_delta(),
+            "Spark(Delta)",
+            StagedRelationResidence::SessionTemporary,
+            true,
+        ),
+        (
+            BackendCapabilities::spark_parquet(),
+            "Spark(Parquet)",
+            StagedRelationResidence::SessionTemporary,
+            true,
+        ),
+        (
+            BackendCapabilities::bigquery(),
+            "BigQuery",
+            StagedRelationResidence::SessionTemporary,
+            true,
+        ),
+        (
+            BackendCapabilities::trino_iceberg(),
+            "Trino",
+            StagedRelationResidence::TargetSchema,
+            false,
+        ),
+    ];
+    for (caps, name, expected_residence, expected_atomic) in profiles {
+        assert_eq!(caps.staged_relation_residence, expected_residence, "{name}");
+        assert_eq!(
+            caps.staged_relation_group_is_atomic, expected_atomic,
+            "{name}"
+        );
+    }
 }
 
 /// Exhaustiveness guard: destructuring all `BackendCapabilities` fields triggers a
@@ -392,6 +473,8 @@ fn all_fields_destructured() {
         supports_pipe_set_drop_rename: _,
         null_safe_equality: _,
         supports_fingerprint_sidecar: _,
+        staged_relation_residence: _,
+        staged_relation_group_is_atomic: _,
     } = BackendCapabilities::duckdb();
     // Adding a field to BackendCapabilities without listing it here is a compile error.
     // When that happens: add the field above, add it to every_flag_matches_matrix(),

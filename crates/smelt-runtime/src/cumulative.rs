@@ -213,7 +213,12 @@ impl WindowedKeyedRule for CumulativeClassification {
                         delta_sql,
                         dialect,
                     );
-                let staged_relation = format!("__smelt_staged_{table}");
+                let staged_relation = smelt_logical::maintenance::emit::StagedRelation::derive(
+                    "__smelt_staged_",
+                    table,
+                    smelt_logical::maintenance::emit::StagedRelationResidence::SessionTemporary,
+                    true,
+                );
                 smelt_logical::maintenance::emit::emit_staged_candidate_conditional(
                     &schema_table,
                     &staged_relation,
@@ -2122,7 +2127,7 @@ mod tests {
     fn staged_candidate_pin_selects_the_staged_candidate_group() {
         use smelt_logical::maintenance::choice::KeyedWriteMechanism;
         use smelt_logical::maintenance::emit::{
-            emit_staged_candidate_conditional, keyed_fold_candidate_select,
+            emit_staged_candidate_conditional, keyed_fold_candidate_select, StagedRelation,
         };
 
         let classification = CumulativeClassification {
@@ -2165,7 +2170,7 @@ mod tests {
         );
         let expected = emit_staged_candidate_conditional(
             "main.device_daily",
-            "__smelt_staged_device_daily",
+            &StagedRelation::session_temporary("__smelt_staged_device_daily"),
             &classification.unique_key,
             &candidate_select,
             &compared_columns,

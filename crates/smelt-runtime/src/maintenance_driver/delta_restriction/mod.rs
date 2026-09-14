@@ -8,7 +8,7 @@ use smelt_logical::maintenance::diff_patch::DeleteLeg;
 use smelt_logical::maintenance::emit::{
     emit_count_preservation_probe_from_body, emit_delete_insert,
     emit_delete_insert_delta_restricted, emit_diff_patch, MaintenanceDialect, Region,
-    StatementGroup,
+    StagedRelation, StagedRelationResidence, StatementGroup,
 };
 use smelt_logical::maintenance::{RowPreservation, SkeletonSourceClosure};
 
@@ -68,11 +68,15 @@ pub fn build_delete_insert_group_dispatched(
             }) => {
                 // `table` here is already schema-qualified (`emit_delete_insert`'s
                 // own convention for this function's `table` parameter) —
-                // `diff_patch_staged_relation` assumes a bare table name, so a
-                // qualified name is sanitised inline rather than reused
-                // verbatim: an embedded `.` would otherwise parse as a second
-                // schema qualifier on the staged temp relation's own name.
-                let staged_relation = format!("__smelt_diff_patch_{}", table.replace('.', "_"));
+                // `StagedRelation::derive` flattens the embedded `.` so it
+                // never parses as a second schema qualifier on the staged
+                // relation's own name.
+                let staged_relation = StagedRelation::derive(
+                    "__smelt_diff_patch_",
+                    table,
+                    StagedRelationResidence::SessionTemporary,
+                    true,
+                );
                 let slice_predicate = region.predicate(Some(table), partition_col);
                 emit_diff_patch(
                     table,

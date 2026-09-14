@@ -847,7 +847,7 @@ async fn staged_candidate_keyed_fold_statements_come_from_the_emitter() {
     );
     let expected_group = smelt_logical::maintenance::emit::emit_staged_candidate_conditional(
         "main.device_user_edges",
-        "__smelt_staged_device_user_edges",
+        &StagedRelation::session_temporary("__smelt_staged_device_user_edges"),
         &["device_id".to_string()],
         &expected_candidate_select,
         &["first_seen".to_string(), "last_seen".to_string()],

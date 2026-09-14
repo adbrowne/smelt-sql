@@ -51,6 +51,8 @@ owners: [andrew]
   | `supports_column_scoped_merge` | ✓ | ✓ | ✗ | ✓ | ✓ | ✓ |
   | `supports_merge_not_matched_by_source` (spec-only; no struct field yet — §Known Divergences) | ✗ | ✓ | ✗ | ✓ | ✓ | ✗ |
   | `supports_staged_relation_group` (temp-relation-backed statement group, for the merge-less conditional write; spec-only — §Known Divergences) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+  | `staged_relation_residence` (`SessionTemporary` / `TargetSchema`) | SessionTemporary | SessionTemporary | SessionTemporary | SessionTemporary | SessionTemporary | TargetSchema |
+  | `staged_relation_group_is_atomic` | ✓ | ✓ | ✓ | ✓ | ✓ | ✗ |
   | `supports_pivot` | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
   | `supports_date_literal` | ✓ | ✗ | ✗ | ✓ | ✗ | ✓ |
   | `supports_concat_operator` (`\|\|`) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
@@ -963,15 +965,45 @@ set is never offered that technique, at plan time, not surfaced as a runtime err
   statement inside the same statement group instead of a `MERGE` clause (the dialect split the
   transform's licence names).
 - **`supports_staged_relation_group`** — the backend can execute a statement group built around a
-  named temporary relation (`CREATE` the staged relation, populate it, run dependent statements
-  against it, `DROP` it), transactional as a unit. Gates the staged-candidate conditional
-  DELETE+INSERT — the merge-less realisation of change-suppressed writes, and the only conditional
-  write path available to a backend with `supports_merge = false` (Spark-over-Parquet).
+  named staged relation (`CREATE` it, populate it, run dependent statements against it, `DROP`
+  it). Gates the staged-candidate conditional DELETE+INSERT — the merge-less realisation of
+  change-suppressed writes, and the only conditional write path available to a backend with
+  `supports_merge = false` (Spark-over-Parquet). This flag conflated two distinct facts until
+  `20260913-trino-ledger` split them, once a backend existed (Trino/Iceberg) whose answer to each
+  differed from every prior backend's:
+  - **`staged_relation_residence`** (`StagedRelationResidence::SessionTemporary` |
+    `TargetSchema`) — where the staged relation lives. `SessionTemporary` on every backend with a
+    session temp namespace (DuckDB, both Spark profiles, BigQuery, Databricks): `CREATE TEMP
+    TABLE`, implicitly dropped with the session. `TargetSchema` on Trino, which has none: a real,
+    explicitly-named, explicitly-dropped table in the target's own schema, carrying the same
+    `__smelt_staged_`/`__smelt_diff_patch_`/`__smelt_repair_` name prefixes the session-temporary
+    form uses, derived once by `StagedRelation::derive` (`smelt-logical`) rather than re-spelled
+    per emitter.
+  - **`staged_relation_group_is_atomic`** — whether the group (`CREATE`, populate, use, `DROP`)
+    can run as one atomic backend transaction. `true` everywhere the relation is session-temporary;
+    `false` on Trino, which has no transactional write capability at all, not even single-statement
+    DDL inside an explicit transaction (`docs/outcomes/20260913-trino-ledger/phases/01-summary.md`
+    — every write form Trino's Iceberg connector was probed with refused with "Catalog only
+    supports writes using autocommit"). A group built for a non-atomic capability is emitted with
+    `StatementGroup::transactional = false`; `Backend::execute_statement_group`'s default
+    (sequential, uncoordinated) implementation is the correct execution shape for it, not a silent
+    downgrade.
+
+  A non-atomic group carries three recovery obligations no session-temporary group needs, since
+  the one-transaction guarantee that would otherwise make them moot is unavailable
+  (`model_transforms.md` §"The staged-candidate conditional DELETE+INSERT" states the full
+  contract): every stage statement precedes any target mutation; the relation's name is derived,
+  deterministic per (purpose, target table), and prefixed so it can never collide with a user
+  model; and the group reclaims its own relation with a leading `DROP ... IF EXISTS` before its
+  own `CREATE`, so an orphan left by a run interrupted between the stage and the apply is never
+  adopted as live data by a later run. Concurrent runs of the same model are excluded by the state
+  lock (`run_state.md`'s state locking), never by the relation's name.
 
 These flags live in `BackendCapabilities` itself, queried by admission exactly like every other
-capability flag above — never re-derived by a consumer. `supports_column_scoped_merge` is a
-struct field; `supports_merge_not_matched_by_source` and `supports_staged_relation_group` are
-specified ahead of their own struct fields (see §Known Divergences).
+capability flag above — never re-derived by a consumer. `supports_column_scoped_merge`,
+`staged_relation_residence` and `staged_relation_group_is_atomic` are struct fields;
+`supports_merge_not_matched_by_source` and `supports_staged_relation_group` are specified ahead of
+their own struct fields (see §Known Divergences).
 
 ### The fingerprint sidecar capability
 
@@ -1164,7 +1196,13 @@ refuses with `DeclaredContractRequiresState` on Trino exactly as on Spark, while
 `contract.frozen_horizon` and `contract.retain_departed` are statements about the model's own
 SQL and stay admitted — `frozen_horizon`'s late-arrival verification probe is simply skipped
 with a run-time warning where Trino has no `MaintenanceDialect` to render it in
-(`docs/specs/state.md` §"Declarations stay fail-loud").
+(`docs/specs/state.md` §"Declarations stay fail-loud"). The staged-candidate conditional
+DELETE+INSERT's staged relation is realised too, over a non-temp, non-atomic residence
+(`staged_relation_residence = TargetSchema`, `staged_relation_group_is_atomic = false` — §"Column-
+scoped merge and conditional-write capabilities" above): a real, explicitly-named,
+explicitly-dropped table in the target's own schema, reclaimed with a leading `DROP ... IF EXISTS`
+before every run so an orphan left by an interruption between the stage and the apply is never
+adopted as live data by a later run.
 
 ## Design
 

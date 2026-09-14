@@ -88,7 +88,9 @@ async fn keyed_pool_t1_t2_and_full_refresh_agree_at_fixed_s() {
                                 d.device_id UNION ALL SELECT 4, 6, 'run2'";
     let t2_group = smelt_logical::maintenance::emit::emit_staged_candidate_conditional(
         "main.t2_target",
-        "__smelt_staged_t2_target",
+        &smelt_logical::maintenance::emit::StagedRelation::session_temporary(
+            "__smelt_staged_t2_target",
+        ),
         &key,
         t2_candidate_select,
         &compared_columns,

@@ -354,7 +354,7 @@ async fn region_conditional_write_matches_the_emitted_group_byte_for_byte() {
     let slice_predicate = region.predicate(Some("main.regions"), "region_date");
     let expected = emit_diff_patch(
         "main.regions",
-        "__smelt_diff_patch_main_regions",
+        &StagedRelation::session_temporary("__smelt_diff_patch_main_regions"),
         &["region_id".to_string()],
         body,
         &["amount".to_string()],

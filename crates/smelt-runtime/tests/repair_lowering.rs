@@ -688,7 +688,9 @@ fn diff_patch_compared_columns_include_hidden_state() {
 
     let statements = smelt_logical::maintenance::emit::emit_diff_patch(
         table,
-        "__smelt_diff_patch_customer_max_amount",
+        &smelt_logical::maintenance::emit::StagedRelation::session_temporary(
+            "__smelt_diff_patch_customer_max_amount",
+        ),
         &key,
         "SELECT customer_id, 1 AS max_val, 1 AS max_val__v, DATE '2025-01-01' AS max_val__o",
         &compared_columns,

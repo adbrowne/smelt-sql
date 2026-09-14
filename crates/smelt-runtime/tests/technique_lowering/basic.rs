@@ -737,13 +737,15 @@ pub(super) async fn staged_candidate_affected_row_counts(
     candidate_select: &str,
     compared: &[&str],
 ) -> (i64, i64) {
-    use smelt_logical::maintenance::emit::{emit_staged_candidate_conditional, MaintenanceDialect};
+    use smelt_logical::maintenance::emit::{
+        emit_staged_candidate_conditional, MaintenanceDialect, StagedRelation,
+    };
 
     let key_owned: Vec<String> = key.iter().map(|s| s.to_string()).collect();
     let compared_owned: Vec<String> = compared.iter().map(|s| s.to_string()).collect();
     let group = emit_staged_candidate_conditional(
         target,
-        staged_relation,
+        &StagedRelation::session_temporary(staged_relation),
         &key_owned,
         candidate_select,
         &compared_owned,

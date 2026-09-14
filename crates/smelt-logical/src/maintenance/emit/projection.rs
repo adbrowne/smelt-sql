@@ -524,6 +524,7 @@ fn expand_bare_wildcard(
 #[cfg(test)]
 mod keyed_fold_candidate_select_tests {
     use super::super::staged::emit_staged_candidate_conditional;
+    use super::super::staged_relation::StagedRelation;
     use super::*;
 
     fn folds() -> Vec<(String, String)> {
@@ -585,7 +586,7 @@ mod keyed_fold_candidate_select_tests {
 
         let group = emit_staged_candidate_conditional(
             "main.user_stats",
-            "__smelt_staged_user_stats",
+            &StagedRelation::session_temporary("__smelt_staged_user_stats"),
             &["user_id".to_string()],
             &candidate_select,
             &["event_count".to_string()],

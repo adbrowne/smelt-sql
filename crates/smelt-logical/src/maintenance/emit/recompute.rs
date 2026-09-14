@@ -3,6 +3,7 @@
 //! per-group recompute, and the `diff_patch` write pattern.
 
 use super::fingerprint::key_expr_for_columns;
+use super::staged_relation::StagedRelation;
 use super::types::*;
 use crate::maintenance::diff_patch::DeleteLeg;
 
@@ -145,7 +146,7 @@ pub fn emit_delete_insert_delta_restricted(
 /// group key to restrict its writes to.
 pub fn emit_per_group_recompute(
     table: &str,
-    staged_relation: &str,
+    staged_relation: &StagedRelation,
     key: &[String],
     affected_keys_select: &str,
     candidate_select: &str,
@@ -156,16 +157,17 @@ pub fn emit_per_group_recompute(
         "emit_per_group_recompute requires a non-empty row identity (key) for {table}"
     );
 
+    let name = &staged_relation.name;
     let affected_relation = format!(
         "(SELECT DISTINCT delta_key FROM ({affected_keys_select}) AS __smelt_affected_src) AS \
          __smelt_affected"
     );
 
     let create = format!(
-        "CREATE TEMP TABLE {staged_relation} AS SELECT * FROM ({candidate_select}) AS \
-         __smelt_staged_shape LIMIT 0"
+        "{} {name} AS SELECT * FROM ({candidate_select}) AS __smelt_staged_shape LIMIT 0",
+        staged_relation.create_prefix()
     );
-    let insert_candidates = format!("INSERT INTO {staged_relation} {candidate_select}");
+    let insert_candidates = format!("INSERT INTO {name} {candidate_select}");
 
     let table_key_columns: Vec<String> = key.iter().map(|k| format!("{table}.{k}")).collect();
     let table_key_expr = key_expr_for_columns(&table_key_columns, dialect);
@@ -177,21 +179,25 @@ pub fn emit_per_group_recompute(
     let staged_key_columns: Vec<String> = key.iter().map(|k| format!("s.{k}")).collect();
     let staged_key_expr = key_expr_for_columns(&staged_key_columns, dialect);
     let insert = format!(
-        "INSERT INTO {table} SELECT s.* FROM {staged_relation} AS s JOIN {affected_relation} ON \
+        "INSERT INTO {table} SELECT s.* FROM {name} AS s JOIN {affected_relation} ON \
          {staged_key_expr} = __smelt_affected.delta_key"
     );
 
-    let drop = format!("DROP TABLE {staged_relation}");
+    let mut statements = Vec::new();
+    if let Some(reclaim) = staged_relation.reclaim_statement() {
+        statements.push(MaintenanceStatement::new(reclaim));
+    }
+    statements.extend([
+        MaintenanceStatement::new(create),
+        MaintenanceStatement::new(insert_candidates),
+        MaintenanceStatement::new(delete),
+        MaintenanceStatement::new(insert),
+        MaintenanceStatement::new(staged_relation.drop_statement()),
+    ]);
 
     StatementGroup {
-        statements: vec![
-            MaintenanceStatement::new(create),
-            MaintenanceStatement::new(insert_candidates),
-            MaintenanceStatement::new(delete),
-            MaintenanceStatement::new(insert),
-            MaintenanceStatement::new(drop),
-        ],
-        transactional: true,
+        statements,
+        transactional: staged_relation.atomic,
     }
 }
 
@@ -263,7 +269,7 @@ pub fn emit_per_group_recompute(
 #[allow(clippy::too_many_arguments)]
 pub fn emit_diff_patch(
     table: &str,
-    staged_relation: &str,
+    staged_relation: &StagedRelation,
     key: &[String],
     candidate_select: &str,
     compared_columns: &[String],
@@ -280,9 +286,10 @@ pub fn emit_diff_patch(
         "emit_diff_patch requires a non-empty compared-column set for {table}"
     );
 
+    let name = &staged_relation.name;
     let key_join_table_staged = key
         .iter()
-        .map(|k| format!("{table}.{k} = {staged_relation}.{k}"))
+        .map(|k| format!("{table}.{k} = {name}.{k}"))
         .collect::<Vec<_>>()
         .join(" AND ");
     let key_join_t_s = key
@@ -297,45 +304,48 @@ pub fn emit_diff_patch(
         .join(" AND ");
     let suppression = compared_columns
         .iter()
-        .map(|c| format!("{table}.{c} IS DISTINCT FROM {staged_relation}.{c}"))
+        .map(|c| format!("{table}.{c} IS DISTINCT FROM {name}.{c}"))
         .collect::<Vec<_>>()
         .join(" OR ");
 
     let create = format!(
-        "CREATE TEMP TABLE {staged_relation} AS SELECT * FROM ({candidate_select}) AS \
-         __smelt_staged_shape LIMIT 0"
+        "{} {name} AS SELECT * FROM ({candidate_select}) AS __smelt_staged_shape LIMIT 0",
+        staged_relation.create_prefix()
     );
-    let insert_candidates = format!("INSERT INTO {staged_relation} {candidate_select}");
+    let insert_candidates = format!("INSERT INTO {name} {candidate_select}");
     let delete_changed = format!(
-        "DELETE FROM {table} USING {staged_relation} WHERE {key_join_table_staged} AND \
-         ({suppression}) AND {slice_predicate}"
+        "DELETE FROM {table} USING {name} WHERE {key_join_table_staged} AND ({suppression}) AND \
+         {slice_predicate}"
     );
     let insert = format!(
-        "INSERT INTO {table} SELECT s.* FROM {staged_relation} AS s WHERE NOT EXISTS (SELECT 1 \
-         FROM {table} AS t WHERE {key_join_t_s})"
+        "INSERT INTO {table} SELECT s.* FROM {name} AS s WHERE NOT EXISTS (SELECT 1 FROM \
+         {table} AS t WHERE {key_join_t_s})"
     );
-    let drop = format!("DROP TABLE {staged_relation}");
 
-    let mut statements = vec![
+    let mut statements = Vec::new();
+    if let Some(reclaim) = staged_relation.reclaim_statement() {
+        statements.push(MaintenanceStatement::new(reclaim));
+    }
+    statements.extend([
         MaintenanceStatement::new(create),
         MaintenanceStatement::new(insert_candidates),
         MaintenanceStatement::new(delete_changed),
-    ];
+    ]);
 
     if let DeleteLeg::Complete = delete_leg {
         let delete_departed = format!(
-            "DELETE FROM {table} WHERE {slice_predicate} AND NOT EXISTS (SELECT 1 FROM \
-             {staged_relation} AS s WHERE {key_join_table_s_departed})"
+            "DELETE FROM {table} WHERE {slice_predicate} AND NOT EXISTS (SELECT 1 FROM {name} \
+             AS s WHERE {key_join_table_s_departed})"
         );
         statements.push(MaintenanceStatement::new(delete_departed));
     }
 
     statements.push(MaintenanceStatement::new(insert));
-    statements.push(MaintenanceStatement::new(drop));
+    statements.push(MaintenanceStatement::new(staged_relation.drop_statement()));
 
     StatementGroup {
         statements,
-        transactional: true,
+        transactional: staged_relation.atomic,
     }
 }
 
@@ -443,7 +453,7 @@ mod per_group_recompute_tests {
     fn emit_per_group_recompute_deletes_affected_keys_and_inserts_slice_recompute() {
         let group = emit_per_group_recompute(
             "main.customer_totals",
-            "__staged",
+            &StagedRelation::session_temporary("__staged"),
             &key(),
             "SELECT customer_id FROM delta",
             "SELECT customer_id, SUM(amount) AS total FROM orders_slice GROUP BY customer_id",
@@ -471,7 +481,7 @@ mod per_group_recompute_tests {
     fn emit_per_group_recompute_is_key_restricted() {
         let group = emit_per_group_recompute(
             "main.customer_totals",
-            "__staged",
+            &StagedRelation::session_temporary("__staged"),
             &key(),
             "SELECT customer_id FROM delta",
             "SELECT customer_id, SUM(amount) AS total FROM orders_slice GROUP BY customer_id",
@@ -501,7 +511,7 @@ mod per_group_recompute_tests {
         let build = || {
             emit_per_group_recompute(
                 "main.customer_totals",
-                "__staged",
+                &StagedRelation::session_temporary("__staged"),
                 &key(),
                 "SELECT customer_id FROM delta",
                 "SELECT customer_id, SUM(amount) AS total FROM orders_slice GROUP BY customer_id",
@@ -516,7 +526,7 @@ mod per_group_recompute_tests {
     fn emit_per_group_recompute_panics_on_empty_key() {
         emit_per_group_recompute(
             "main.customer_totals",
-            "__staged",
+            &StagedRelation::session_temporary("__staged"),
             &[],
             "SELECT customer_id FROM delta",
             "SELECT customer_id FROM orders_slice",

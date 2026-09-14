@@ -2,6 +2,7 @@
 //! merge-less realisation of the no-op-write-elimination licence, in keyed,
 //! recompute and keyless shapes.
 
+use super::staged_relation::StagedRelation;
 use super::types::*;
 
 /// The staged-candidate conditional `DELETE`+`INSERT` (T2, `docs/specs/
@@ -49,7 +50,7 @@ use super::types::*;
 /// ([`emit_delete_insert`]) instead of reaching this emitter).
 pub fn emit_staged_candidate_conditional(
     table: &str,
-    staged_relation: &str,
+    staged_relation: &StagedRelation,
     key: &[String],
     candidate_select: &str,
     compared_columns: &[String],
@@ -63,9 +64,10 @@ pub fn emit_staged_candidate_conditional(
         !compared_columns.is_empty(),
         "emit_staged_candidate_conditional requires a non-empty compared-column set for {table}"
     );
+    let name = &staged_relation.name;
     let key_join_table_staged = key
         .iter()
-        .map(|k| format!("{table}.{k} = {staged_relation}.{k}"))
+        .map(|k| format!("{table}.{k} = {name}.{k}"))
         .collect::<Vec<_>>()
         .join(" AND ");
     let key_join_t_s = key
@@ -75,32 +77,35 @@ pub fn emit_staged_candidate_conditional(
         .join(" AND ");
     let suppression = compared_columns
         .iter()
-        .map(|c| format!("{table}.{c} IS DISTINCT FROM {staged_relation}.{c}"))
+        .map(|c| format!("{table}.{c} IS DISTINCT FROM {name}.{c}"))
         .collect::<Vec<_>>()
         .join(" OR ");
     let create = format!(
-        "CREATE TEMP TABLE {staged_relation} AS SELECT * FROM ({candidate_select}) AS \
-         __smelt_staged_shape LIMIT 0"
+        "{} {name} AS SELECT * FROM ({candidate_select}) AS __smelt_staged_shape LIMIT 0",
+        staged_relation.create_prefix()
     );
-    let insert_candidates = format!("INSERT INTO {staged_relation} {candidate_select}");
+    let insert_candidates = format!("INSERT INTO {name} {candidate_select}");
     let delete = format!(
-        "DELETE FROM {table} USING {staged_relation} WHERE {key_join_table_staged} AND \
-         ({suppression})"
+        "DELETE FROM {table} USING {name} WHERE {key_join_table_staged} AND ({suppression})"
     );
     let insert = format!(
-        "INSERT INTO {table} SELECT s.* FROM {staged_relation} AS s WHERE NOT EXISTS (SELECT 1 \
-         FROM {table} AS t WHERE {key_join_t_s})"
+        "INSERT INTO {table} SELECT s.* FROM {name} AS s WHERE NOT EXISTS (SELECT 1 FROM \
+         {table} AS t WHERE {key_join_t_s})"
     );
-    let drop = format!("DROP TABLE {staged_relation}");
+    let mut statements = Vec::new();
+    if let Some(reclaim) = staged_relation.reclaim_statement() {
+        statements.push(MaintenanceStatement::new(reclaim));
+    }
+    statements.extend([
+        MaintenanceStatement::new(create),
+        MaintenanceStatement::new(insert_candidates),
+        MaintenanceStatement::new(delete),
+        MaintenanceStatement::new(insert),
+        MaintenanceStatement::new(staged_relation.drop_statement()),
+    ]);
     StatementGroup {
-        statements: vec![
-            MaintenanceStatement::new(create),
-            MaintenanceStatement::new(insert_candidates),
-            MaintenanceStatement::new(delete),
-            MaintenanceStatement::new(insert),
-            MaintenanceStatement::new(drop),
-        ],
-        transactional: true,
+        statements,
+        transactional: staged_relation.atomic,
     }
 }
 
@@ -178,7 +183,7 @@ pub fn emit_staged_candidate_conditional(
 /// or `compared_columns` is empty.
 pub fn emit_staged_candidate_conditional_recompute(
     table: &str,
-    staged_relation: &str,
+    staged_relation: &StagedRelation,
     key: &[String],
     candidate_select: &str,
     compared_columns: &[String],
@@ -194,9 +199,10 @@ pub fn emit_staged_candidate_conditional_recompute(
         "emit_staged_candidate_conditional_recompute requires a non-empty compared-column set \
          for {table}"
     );
+    let name = &staged_relation.name;
     let key_join_table_staged = key
         .iter()
-        .map(|k| format!("{table}.{k} = {staged_relation}.{k}"))
+        .map(|k| format!("{table}.{k} = {name}.{k}"))
         .collect::<Vec<_>>()
         .join(" AND ");
     let key_join_t_s = key
@@ -211,37 +217,40 @@ pub fn emit_staged_candidate_conditional_recompute(
         .join(" AND ");
     let suppression = compared_columns
         .iter()
-        .map(|c| format!("{table}.{c} IS DISTINCT FROM {staged_relation}.{c}"))
+        .map(|c| format!("{table}.{c} IS DISTINCT FROM {name}.{c}"))
         .collect::<Vec<_>>()
         .join(" OR ");
     let create = format!(
-        "CREATE TEMP TABLE {staged_relation} AS SELECT * FROM ({candidate_select}) AS \
-         __smelt_staged_shape LIMIT 0"
+        "{} {name} AS SELECT * FROM ({candidate_select}) AS __smelt_staged_shape LIMIT 0",
+        staged_relation.create_prefix()
     );
-    let insert_candidates = format!("INSERT INTO {staged_relation} {candidate_select}");
+    let insert_candidates = format!("INSERT INTO {name} {candidate_select}");
     let delete_changed = format!(
-        "DELETE FROM {table} USING {staged_relation} WHERE {key_join_table_staged} AND \
-         ({suppression})"
+        "DELETE FROM {table} USING {name} WHERE {key_join_table_staged} AND ({suppression})"
     );
     let delete_departed = format!(
-        "DELETE FROM {table} WHERE NOT EXISTS (SELECT 1 FROM {staged_relation} AS s WHERE \
+        "DELETE FROM {table} WHERE NOT EXISTS (SELECT 1 FROM {name} AS s WHERE \
          {key_join_table_s_departed})"
     );
     let insert = format!(
-        "INSERT INTO {table} SELECT s.* FROM {staged_relation} AS s WHERE NOT EXISTS (SELECT 1 \
-         FROM {table} AS t WHERE {key_join_t_s})"
+        "INSERT INTO {table} SELECT s.* FROM {name} AS s WHERE NOT EXISTS (SELECT 1 FROM \
+         {table} AS t WHERE {key_join_t_s})"
     );
-    let drop = format!("DROP TABLE {staged_relation}");
+    let mut statements = Vec::new();
+    if let Some(reclaim) = staged_relation.reclaim_statement() {
+        statements.push(MaintenanceStatement::new(reclaim));
+    }
+    statements.extend([
+        MaintenanceStatement::new(create),
+        MaintenanceStatement::new(insert_candidates),
+        MaintenanceStatement::new(delete_changed),
+        MaintenanceStatement::new(delete_departed),
+        MaintenanceStatement::new(insert),
+        MaintenanceStatement::new(staged_relation.drop_statement()),
+    ]);
     StatementGroup {
-        statements: vec![
-            MaintenanceStatement::new(create),
-            MaintenanceStatement::new(insert_candidates),
-            MaintenanceStatement::new(delete_changed),
-            MaintenanceStatement::new(delete_departed),
-            MaintenanceStatement::new(insert),
-            MaintenanceStatement::new(drop),
-        ],
-        transactional: true,
+        statements,
+        transactional: staged_relation.atomic,
     }
 }
 
@@ -357,10 +366,10 @@ mod staged_candidate_conditional_tests {
     /// DELETE+INSERT reading the staged relation with an `IS DISTINCT FROM`
     /// restriction, DROP — flagged one-transaction.
     #[test]
-    fn staged_group_emits_ordered_statements_as_one_transaction() {
+    fn session_temporary_residence_emits_create_temp_table() {
         let group = emit_staged_candidate_conditional(
             "main.dim_users",
-            "__smelt_staged_dim_users",
+            &StagedRelation::session_temporary("__smelt_staged_dim_users"),
             &["user_id".to_string()],
             "SELECT user_id, tier, email FROM source_delta",
             &["tier".to_string(), "email".to_string()],
@@ -401,7 +410,7 @@ mod staged_candidate_conditional_tests {
     fn staged_group_panics_on_empty_key() {
         emit_staged_candidate_conditional(
             "main.dim_users",
-            "__smelt_staged_dim_users",
+            &StagedRelation::session_temporary("__smelt_staged_dim_users"),
             &[],
             "SELECT user_id, tier FROM source_delta",
             &["tier".to_string()],
@@ -414,7 +423,7 @@ mod staged_candidate_conditional_tests {
     fn staged_group_panics_on_empty_compare_set() {
         emit_staged_candidate_conditional(
             "main.dim_users",
-            "__smelt_staged_dim_users",
+            &StagedRelation::session_temporary("__smelt_staged_dim_users"),
             &["user_id".to_string()],
             "SELECT user_id, tier FROM source_delta",
             &[],

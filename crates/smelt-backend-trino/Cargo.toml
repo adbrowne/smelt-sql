@@ -41,3 +41,4 @@ tracing.workspace = true
 [dev-dependencies]
 axum = "0.8"
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+smelt-logical = { path = "../smelt-logical" }

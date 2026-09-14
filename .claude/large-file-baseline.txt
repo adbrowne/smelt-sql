@@ -8,6 +8,14 @@
 # smaller files are left unconstrained (see BASELINE_MIN_LINES in the script).
 # Regenerate with: .claude/scripts/large-file-check.sh --update
 #
+# 2026-09-14 (docs/outcomes/20260913-trino-ledger phase 07, sign-off: Andrew
+# Browne): cumulative.rs 2178 -> 2183, repair_lowering.rs 1570 -> 1572,
+# technique_lowering/basic.rs 1120 -> 1122 — re-keying each file's staged
+# relation call sites from an ad hoc `&str` name to `&StagedRelation`
+# (residence/atomicity capability data), each a one-to-three-line wrap at an
+# existing call site, not a new abstraction — grown in place rather than
+# split.
+#
 # 2026-09-14 (docs/outcomes/20260913-trino-emission phase 9, sign-off: Andrew
 # Browne): type_property_tests.rs 1744 -> 1910 and divergences.rs newly
 # crossing the 1000-line floor at 1170, adding the Trino leg (oracle,
@@ -137,7 +145,7 @@ crates/smelt-parser/src/parser/smelt_ext.rs 1798
 crates/smelt-parser/src/parser/tests.rs 10461
 crates/smelt-parser/src/parser/types.rs 1086
 crates/smelt-runtime/src/compile.rs 4273
-crates/smelt-runtime/src/cumulative.rs 2178
+crates/smelt-runtime/src/cumulative.rs 2183
 crates/smelt-runtime/src/execute/project/mod.rs 5098
 crates/smelt-runtime/src/meta_eval.rs 2180
 crates/smelt-runtime/src/transformer.rs 1174
@@ -146,9 +154,9 @@ crates/smelt-runtime/tests/contract_deferral_skip_e2e.rs 1061
 crates/smelt-runtime/tests/fingerprint_sidecar.rs 1717
 crates/smelt-runtime/tests/key_addressed_model_edge_lowering.rs 1201
 crates/smelt-runtime/tests/observed_delta/main.rs 1066
-crates/smelt-runtime/tests/repair_lowering.rs 1570
+crates/smelt-runtime/tests/repair_lowering.rs 1572
 crates/smelt-runtime/tests/since_upstream_propagation.rs 2326
-crates/smelt-runtime/tests/technique_lowering/basic.rs 1120
+crates/smelt-runtime/tests/technique_lowering/basic.rs 1122
 crates/smelt-runtime/tests/windowing_parity.rs 1150
 crates/smelt-state/src/ddl_duckdb.rs 1883
 crates/smelt-state/src/ddl_spark.rs 1708

@@ -1,7 +1,9 @@
 use super::*;
 use anyhow::Result;
 use smelt_backend::{maintenance_dialect, Backend, ExecutionResult, PartitionRange};
-use smelt_logical::maintenance::emit::emit_staged_candidate_conditional_recompute;
+use smelt_logical::maintenance::emit::{
+    emit_staged_candidate_conditional_recompute, StagedRelation, StagedRelationResidence,
+};
 use std::time::Instant;
 
 /// Execute a live, membership-sensitive `Technique::DeleteInsert` cell
@@ -45,7 +47,12 @@ pub async fn execute_staged_membership_recompute(
     let start = Instant::now();
     let full_table = format!("{schema}.{table}");
     let dialect = maintenance_dialect(backend.dialect())?;
-    let staged_relation = format!("__smelt_staged_{table}");
+    let staged_relation = StagedRelation::derive(
+        "__smelt_staged_",
+        table,
+        StagedRelationResidence::SessionTemporary,
+        true,
+    );
     let group = emit_staged_candidate_conditional_recompute(
         &full_table,
         &staged_relation,
