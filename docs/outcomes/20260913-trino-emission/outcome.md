@@ -1,7 +1,7 @@
 # Outcome: Every built-in's Trino spelling is a stated, probed verdict — no built-in reaches Trino on an implicit `Native`
 
 **Created:** 2026-09-13
-**Status:** active
+**Status:** done
 **Driver:** loop. Docker only, no credential, no human gate. The audit's live legs must emit
 `<<PHASE_BLOCKED>>` when the coordinator is unreachable, **never skip green** — an audit that
 skips is indistinguishable from an audit that passes, which is the precise failure this outcome
@@ -424,5 +424,28 @@ including its null-safe join spelling.
   `verify-phase.sh` and the full live sweep (`dialect_audit`, `smelt-backend-trino`,
   `type_property_tests`, `emission_ownership`, `dialect_seam`, `projection_dialect_invariance`)
   are all green; no baseline changed. This outcome is ready to be marked `done`.
+
+- **2026-09-14 — outcome closed `done`; all 12 success criteria met with evidence.** Every phase
+  row 1–10 is `done`. The per-criterion evidence table in `phases/10-summary.md` maps each
+  criterion to the gate that proves it: criterion 1 to `census::tests::no_dialect_has_unverified_pairs`
+  (green; `.claude/trino-emission-census.txt` deleted, not grandfathered), 2 to `registry_totality::*`,
+  3 to phase 4's `UNPIVOT` compile-path refusal (`PIVOT` measured `Native` on live Trino), 4 to the
+  live `trino::schema_leg_trino` + `trino::value_leg_trino` legs, 5 to `ledger_gates::*` plus the
+  two-sided Trino rows and the `dialect_gaps_trino` metric (ratcheted 58 → 50 across phases 7/9,
+  never up), 6 to `coverage_table::the_coverage_table_matches_the_registry` (a `SMELT_REGEN_DOCS=1`
+  run produced no diff), 7 to `emission_ownership` (11/11, with the dialect-branch gate rewritten in
+  phase 8 to parse the `SqlDialect` enum rather than restate a three-name list), 8 to `dialect_seam`
+  (25/25, incl. function-body refusals), 9 to `projection_dialect_invariance`'s four-way byte
+  identity, 10 to phase 7's measured negative result (Trino accepts `MAX_BY`/`MIN_BY`/`approx_distinct`
+  in every position, so no `Restructure` was needed — recorded in the spec, with
+  `registry_coverage::trino_restructure_pairs_with_a_window_refusal` as the forward-guard), 11 to the
+  landed type-oracle leg (`type_property_tests` 93/93, deferral explicitly declined in phase 9), and
+  12 to a green `verify-phase.sh` with all four baseline files unchanged. Re-verified in this closing
+  step: the census file is absent, the working tree is clean, `emission_ownership` 11/11 and the
+  `census` gates 5/5 pass offline. Residue handed on, none of it this outcome's scope: the
+  `build_column` `DataType::List` cell-decode gap (narrowed §Known Divergences entry + live
+  regression test, no owning outcome yet), the `#209` gap ledger (lowering registered gaps is
+  explicitly out of scope), and `capability_probes.rs`'s pre-existing parallelism flakiness against
+  the shared Iceberg REST catalog (candidate fix for T4/T5).
 
 ## Blocked
