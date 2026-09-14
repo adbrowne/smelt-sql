@@ -136,6 +136,20 @@ asked for. Full semantics: [`docs/specs/sources.md`
 `smelt explain <model>` renders both the bound and the required reach for every declared-`retention:`
 source under `Retention:` (`--json`: the `retention` array) — see [`smelt explain`](smelt-explain.md).
 
+## State residency
+
+Not every target backend can host every correctness structure a maintenance technique needs
+(the transactional merge ledger, the reconciliation ledger, observed output deltas, the
+fingerprint sidecar, the tombstone ledger) — see [State & Recovery §"Which backends realise
+these structures"](state.md#which-backends-realise-these-structures) for the full per-backend
+table. An absence downgrades the affected cell rather than refusing the run, with one named
+exception for a declaration that is itself a statement about state.
+
+| Code | Severity | Trigger |
+|---|---|---|
+| `MaintenanceStateDowngraded` | Warning | A cell's derived technique requires a state structure with no available realisation on the target backend (no ledger builder, `state.warehouse_tables: none`, or a posture that excludes it); the cell was downgraded to its recompute-family equivalent. Printed by `smelt explain`. |
+| `DeclaredContractRequiresState` | Error | A declared contract point whose semantics require a state structure (e.g. `contract.deferral`'s ledger-measured lag) is declared in a project whose posture, backend, or `state.warehouse_tables: none` opt-out cannot supply it. |
+
 ## Succession grain
 
 The [succession grain](../guide/scd2-succession.md) is recognised from a model's SQL shape, never

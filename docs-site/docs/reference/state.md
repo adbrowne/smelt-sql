@@ -95,6 +95,48 @@ Two operations act on the ledger: **fold** (extend an entry with a new delta, re
 
 This ledger is distinct from the interval ledger (`intervals.json`) above: intervals are project-wide observability ("what has this project run, and where are the gaps") that a `state.mode: stateless` project can forgo entirely; the reconciliation ledger is required correctness structure for every plan-managed `grain: key` model whenever its technique is available, independent of `state.mode`.
 
+## Which backends realise these structures
+
+Not every backend can host the five correctness structures above. `state.mode` and
+`.smelt/` are always the same everywhere; what differs is whether the *target backend* can
+host a transactional merge ledger, a reconciliation ledger (frontier record), observed
+output deltas, a fingerprint sidecar, and a tombstone ledger:
+
+| Structure | DuckDB | BigQuery | Spark (Delta) | Trino (Iceberg) |
+|---|---|---|---|---|
+| Transactional merge ledger | yes | yes | **no** | **no** |
+| Reconciliation ledger (frontier record) | yes | yes | **no** | **no** |
+| Observed output deltas | yes | yes | **no** | **no** |
+| Fingerprint sidecar | yes | not yet | **no** | **no** |
+| Tombstone ledger (succession grain) | yes | yes | **no** | **no** |
+
+Spark (Delta) and Trino (Iceberg) both read **no** across the board, and it is the same
+reason on both: Delta and Iceberg each give per-table atomic commits and no cross-table
+transaction, so a ledger write and the data write it protects can never be made atomic, and
+the additive fold's never-fold-twice refusal has no sound realisation there. On Trino this
+was measured directly against a live coordinator, not assumed from Spark's shape: every
+write — DML or DDL, same-table or cross-table — is refused inside an explicit
+`START TRANSACTION`, with the connector answering verbatim
+`Catalog only supports writes using autocommit: iceberg`.
+`START TRANSACTION`/`COMMIT`/`ROLLBACK` parse and can wrap read-only statements, but no write
+ever commits inside one.
+
+This absence is **permanent**, not "not yet" — no capability probe on either connector can
+flip it, because the limitation is structural (per-table commit, no cross-table transaction)
+rather than a gap smelt could close with more work.
+
+An absence never means a refusal. Every maintenance cell whose ideal technique would have
+used one of these structures instead resolves to its cheapest recompute-family equivalent —
+the technique that preserves the same result without needing the missing structure — and
+carries a recorded `MaintenanceStateDowngraded` diagnostic naming the cell, the original
+technique, and the missing structure. The downgrade is always visible in `smelt explain`
+(text and `--json`), never a silent substitution.
+
+The one exception is a declaration whose semantics are themselves a statement about state:
+`contract.deferral` promises a ledger-measured lag, so on a backend with no ledger it fails
+loudly with `DeclaredContractRequiresState` instead of silently downgrading — there is no
+recompute-family equivalent for a bound smelt cannot measure.
+
 ## Recovery playbook
 
 **`.smelt/` is lost (deleted, never backed up, new environment).** Deleting `.smelt/` never changes what a maintained model computes -- the reconciliation ledger and the transactional merge ledger are engine-resident, not `.smelt/`-resident, so no correctness state is lost. What *is* lost is observability bookkeeping: an incremental model's interval ledger rebuilds from a full re-run over the model's complete history, and there is no data loss to the warehouse tables themselves, only a loss of the record that lets *future* runs skip already-covered work. Re-run the affected selection with a full time range (or the whole project) to rebuild coverage from scratch.

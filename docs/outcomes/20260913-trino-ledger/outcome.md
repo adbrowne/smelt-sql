@@ -160,9 +160,21 @@ land near or above Delta's.
 | 8 | Locking and versioning: two concurrent runs where exactly one proceeds, or a refusal naming the backend and the missing capability — never a lock that never locks | done |
 | 9 | `.smelt/` is not correctness-bearing on Trino: delete-between-runs equality, and `state.mode: stateless` writing nothing while changing no maintained table's value | done |
 | 10 | The keyless staged emitter's sentinel: `emit_staged_candidate_conditional_keyless`'s hardcoded `CREATE TEMP TABLE` either takes phase 7's residence/atomicity treatment, or a standing test proves no Trino execution path reaches it — a temp-table spelling on a backend with no temp tables is exactly the claim-without-builder failure criterion 3 excludes | done |
-| 11 | Surface and close: `smelt explain` rendering Trino's downgrades (text + `--json`), diagnostics catalogue and `examples/broken/` fixtures, `docs-site/` state page updated with what Trino costs and why, `verify-phase.sh` green with no baseline bumped | planned |
+| 11 | Surface and close: `smelt explain` rendering Trino's downgrades (text + `--json`), diagnostics catalogue and `examples/broken/` fixtures, `docs-site/` state page updated with what Trino costs and why, `verify-phase.sh` green with no baseline bumped | done |
 
 ## Decision log
+
+- **2026-09-14 — phase 11 done: user docs published, gated against the spec.** New
+  `## Which backends realise these structures` section in `docs-site/docs/reference/state.md`
+  (measured autocommit refusal quoted verbatim, permanence stated), a new `## State residency`
+  table in `docs-site/docs/reference/diagnostics.md` for `MaintenanceStateDowngraded` and
+  `DeclaredContractRequiresState`, a pointer paragraph in `targets.md`'s Trino section, and
+  `smelt-explain.md`'s downgrade paragraph corrected to distinguish pending from permanent
+  absence. `git diff fe6154346^ HEAD -- crates/smelt-db/src/diagnostics_types/` confirmed no new
+  `DiagnosticCode` landed this outcome, so criterion 11's fixture clause is satisfied vacuously —
+  no `examples/broken/` work needed. Five new tests in `state_docs_freshness.rs`, all parsing the
+  spec rather than restating it. `verify-phase.sh` ALL GREEN, no baseline bumped. This was the
+  outcome's last `planned` row. See `phases/11-summary.md`.
 
 - **2026-09-14 — phase 10 planned; no reshape.** Phase 9's summary deferred nothing and
   changed no downstream scope, so the remaining rows stand as written. The phase resolves the

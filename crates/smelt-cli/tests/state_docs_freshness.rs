@@ -164,3 +164,174 @@ fn spec_references_are_live() {
         "docs/specs/state.md §References cites paths that do not exist on disk: {missing:?}"
     );
 }
+
+/// Extracts the correctness-structure names whose Trino column reads `**no**`
+/// in `docs/specs/state.md`'s realisability table (`§"Which dialects realise
+/// which structure"`), by parsing the table rather than restating it.
+fn trino_unrealisable_structures() -> Vec<String> {
+    let text = fs::read_to_string(repo_root().join("docs/specs/state.md")).unwrap();
+
+    let header_start = text
+        .find("| Structure | DuckDB |")
+        .expect("docs/specs/state.md has no realisability table header");
+    let header_line_end = text[header_start..]
+        .find('\n')
+        .map(|i| header_start + i)
+        .expect("realisability table header has no line end");
+    let header = &text[header_start..header_line_end];
+    let header_cols: Vec<&str> = header.split('|').map(str::trim).collect();
+    let trino_idx = header_cols
+        .iter()
+        .position(|c| c.contains("Trino"))
+        .expect("realisability table header has no Trino column");
+
+    let mut structures = Vec::new();
+    for line in text[header_line_end + 1..].lines() {
+        if !line.trim_start().starts_with('|') {
+            break;
+        }
+        if line.contains("---") {
+            continue;
+        }
+        let cols: Vec<&str> = line.split('|').map(str::trim).collect();
+        if cols.len() <= trino_idx {
+            continue;
+        }
+        if !cols[trino_idx].contains("no") {
+            continue;
+        }
+        structures.push(cols[1].to_string());
+    }
+
+    assert!(
+        !structures.is_empty(),
+        "found the realisability table but extracted no `**no**` Trino structures from it"
+    );
+    structures
+}
+
+/// `docs/outcomes/20260913-trino-ledger` phase 11: every structure the spec's
+/// realisability table marks unrealisable on Trino must be named in the
+/// docs-site state reference, so a Trino user can learn what Trino costs.
+#[test]
+fn docs_site_names_every_unrealisable_trino_structure() {
+    let text = fs::read_to_string(docs_site_dir().join("reference/state.md")).unwrap();
+    let structures = trino_unrealisable_structures();
+
+    let missing: Vec<&String> = structures
+        .iter()
+        .filter(|s| !text.contains(s.as_str()))
+        .collect();
+
+    assert!(
+        missing.is_empty(),
+        "docs-site/docs/reference/state.md does not name every Trino-unrealisable structure \
+         from docs/specs/state.md's realisability table: {missing:?}"
+    );
+}
+
+/// The docs-site state page must state the measured reason (autocommit-only
+/// Iceberg writes), quote the connector's own words, and say the absence is
+/// permanent rather than "not yet" — the distinction a user acts on.
+#[test]
+fn docs_site_states_the_trino_reason_and_its_permanence() {
+    let text = fs::read_to_string(docs_site_dir().join("reference/state.md")).unwrap();
+
+    assert!(
+        text.contains("autocommit"),
+        "docs-site/docs/reference/state.md does not state that Iceberg writes are autocommit-only"
+    );
+    assert!(
+        text.contains("Catalog only supports writes using autocommit: iceberg"),
+        "docs-site/docs/reference/state.md does not quote the connector's verbatim autocommit \
+         refusal"
+    );
+    assert!(
+        text.contains("permanent"),
+        "docs-site/docs/reference/state.md does not state that Trino's absence is permanent, \
+         not \"not yet\""
+    );
+}
+
+/// The page must name what the absence costs (the recompute-family downgrade,
+/// `MaintenanceStateDowngraded`, `smelt explain`) and the one declaration that
+/// refuses instead of downgrading (`DeclaredContractRequiresState`).
+#[test]
+fn docs_site_states_what_the_absence_costs_and_what_replaces_it() {
+    let text = fs::read_to_string(docs_site_dir().join("reference/state.md")).unwrap();
+
+    for needle in [
+        "recompute",
+        "MaintenanceStateDowngraded",
+        "smelt explain",
+        "DeclaredContractRequiresState",
+    ] {
+        assert!(
+            text.contains(needle),
+            "docs-site/docs/reference/state.md does not mention `{needle}`"
+        );
+    }
+}
+
+/// The new section must cover Spark (Delta) alongside Trino (Iceberg) rather
+/// than reading as a Trino-only special case — guards against the out-of-scope
+/// item "tightening Spark's column is not this outcome's business" leaving the
+/// user docs looking narrower than the spec table.
+#[test]
+fn spark_column_is_not_silently_narrower_than_trinos() {
+    let text = fs::read_to_string(docs_site_dir().join("reference/state.md")).unwrap();
+
+    assert!(
+        text.contains("Spark") && text.contains("Delta"),
+        "docs-site/docs/reference/state.md's new state-residency section does not cover \
+         Spark (Delta) alongside Trino (Iceberg)"
+    );
+}
+
+/// `docs/specs/diagnostics.md` documents `MaintenanceStateDowngraded` (Warning)
+/// and `DeclaredContractRequiresState` (Error); the docs-site diagnostics
+/// reference must carry a row for each with a matching severity, parsed from
+/// the spec rather than restated.
+#[test]
+fn docs_site_diagnostics_page_lists_the_state_codes() {
+    let spec = fs::read_to_string(repo_root().join("docs/specs/diagnostics.md")).unwrap();
+
+    let severity_of = |code: &str| -> String {
+        let marker = format!("| `{code}` |");
+        let line_start = spec
+            .find(&marker)
+            .unwrap_or_else(|| panic!("docs/specs/diagnostics.md has no `{code}` row"));
+        let line_end = spec[line_start..]
+            .find('\n')
+            .map(|i| line_start + i)
+            .unwrap_or(spec.len());
+        let line = &spec[line_start..line_end];
+        let cols: Vec<&str> = line.split('|').map(str::trim).collect();
+        cols[2].to_string()
+    };
+
+    let doc = fs::read_to_string(docs_site_dir().join("reference/diagnostics.md")).unwrap();
+
+    for code in [
+        "MaintenanceStateDowngraded",
+        "DeclaredContractRequiresState",
+    ] {
+        let severity = severity_of(code);
+        let row_marker = format!("`{code}`");
+        assert!(
+            doc.contains(&row_marker),
+            "docs-site/docs/reference/diagnostics.md has no row for `{code}`"
+        );
+        let row_start = doc.find(&row_marker).unwrap();
+        let row_end = doc[row_start..]
+            .find('\n')
+            .map(|i| row_start + i)
+            .unwrap_or(doc.len());
+        let row = &doc[row_start..row_end];
+        assert!(
+            row.contains(&severity),
+            "docs-site/docs/reference/diagnostics.md's `{code}` row does not state severity \
+             `{severity}` (from docs/specs/diagnostics.md)"
+        );
+    }
+}

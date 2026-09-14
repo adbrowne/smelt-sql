@@ -479,6 +479,13 @@ state anywhere outside the warehouse, so there is nothing on disk for a delete t
 `state.mode: stateless` is fully supported, writing nothing under `.smelt/` while producing the
 same table values as `state.mode: intervals` for the same project.
 
+Trino's Iceberg connector also cannot host any of the five correctness structures
+[State & Recovery](../reference/state.md#which-backends-realise-these-structures) describes
+(transactional merge ledger, reconciliation ledger, observed output deltas, fingerprint
+sidecar, tombstone ledger) — a permanent absence, not a gap smelt will close, and every
+affected maintenance cell downgrades to a recompute-family equivalent rather than refusing.
+See that page for what the absence costs and why.
+
 ## Switching targets
 
 Use the `--target` flag on any command:
