@@ -139,10 +139,15 @@ if [[ "${SUBCOMMAND}" == "seed" ]]; then
   # against CLI v1.16.1, phase 11c).
   VOLUME_PATH="dbfs:/Volumes/${CATALOG}/${SCHEMA}/${VOLUME}/project"
 
-  # Only these two names are copied — .smelt/ (the run-state ledger) is
-  # deliberately absent from this list, so re-running seed against an
-  # already-deployed project can never clobber it.
-  SEED_ITEMS=(smelt.yml models)
+  # .smelt/ (the run-state ledger) is deliberately absent from this list, so
+  # re-running seed against an already-deployed project can never clobber it.
+  # `functions/` is a project-root convention directory discovered
+  # independently of `paths:` (smelt-core/src/workspace.rs), not merely
+  # anything reachable under `models/` — omitting it here left
+  # `silver.actor_sessions`'s `smelt.functions.sessionize` call unresolved on
+  # the deployed Volume (measured phase 11m: `UnknownSmeltFn`), a copy-paste
+  # gap from phase 03's original `SEED_ITEMS`, never a real absence locally.
+  SEED_ITEMS=(smelt.yml models functions)
 
   # `fs cp` refuses to create the destination directory implicitly when
   # copying a file into it, so the project/ directory must exist first — a

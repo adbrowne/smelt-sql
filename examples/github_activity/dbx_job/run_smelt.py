@@ -29,6 +29,19 @@ This wrapper only supplies the Volume-resident project directory (so
 `.smelt/` persists between scheduled runs) and the ambient `databricks_job`
 target (`examples/github_activity/smelt.yml`), which carries no token: the
 job's own environment supplies Databricks credentials.
+
+3. Once the smelt binary actually reaches `create_backend`'s Databricks arm,
+   its embedded PyO3 interpreter imports `smelt.databricks_adapter`
+   (`python/smelt/databricks_adapter.py`) exactly like the local dev
+   environment does via `scripts/dbx-dogfood-env.sh`'s PYTHONPATH — but
+   nothing set PYTHONPATH for this deployed binary's own child process,
+   so the import failed with `ModuleNotFoundError: No module named 'smelt'`
+   (measured phase 11m). `databricks.yml`'s `sync.paths` already syncs the
+   repo's `python/` directory alongside this bundle root (for
+   `load_next_day.py`'s own import of the same module) — computed relative
+   to this file's own deployed location rather than hardcoded, since
+   `${workspace.file_path}` is a bundle YAML variable with no equivalent at
+   Python runtime.
 """
 
 import os
@@ -76,6 +89,30 @@ def main():
     env = os.environ.copy()
     existing = env.get("LD_LIBRARY_PATH", "")
     env["LD_LIBRARY_PATH"] = f"{libs_dir}:{existing}" if existing else libs_dir
+
+    # This file deploys to `<sync-root>/examples/github_activity/dbx_job/`;
+    # `<sync-root>/python` is the repo's `python/` directory, synced by
+    # `databricks.yml`'s `sync.paths` alongside the bundle root. Four
+    # `dirname` calls walk dbx_job -> github_activity -> examples -> the sync
+    # root itself (measured phase 11m: three landed one level short, at
+    # `.../files/examples`, not `.../files`). `__file__` is unavailable — the
+    # `spark_python_task` launcher runs this script via
+    # `exec(compile(f.read(), filename, "exec"))` rather than a normal module
+    # import (`NameError: name '__file__' is not defined`), so the deployed
+    # absolute path is recovered from the current frame's own `co_filename`
+    # instead, which `compile()` stamped from that same `filename`.
+    this_file = sys._getframe().f_code.co_filename
+    sync_root = os.path.dirname(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(this_file))))
+    )
+    python_dir = os.path.join(sync_root, "python")
+    if not os.path.isdir(python_dir):
+        raise SystemExit(
+            f"expected {python_dir} (the synced python/ directory) to exist — "
+            "databricks.yml's sync.paths may have changed"
+        )
+    existing_pythonpath = env.get("PYTHONPATH", "")
+    env["PYTHONPATH"] = f"{python_dir}:{existing_pythonpath}" if existing_pythonpath else python_dir
 
     # `smelt.yml` interpolates every target's env-var references eagerly at
     # load time, not just the selected one (fail-loud discipline: an

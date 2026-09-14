@@ -748,12 +748,23 @@ fn smelt_env_dependencies_are_arch_scoped() {
 
     assert_eq!(
         deps.len(),
-        2,
-        "smelt_env.dependencies must be exactly two entries, one per architecture: {deps:?}"
+        4,
+        "smelt_env.dependencies must be exactly two arch-scoped wheel entries plus \
+         databricks-connect and pyarrow (needed by the embedded PyO3 interpreter's \
+         `smelt.databricks_adapter` import once it reaches the Databricks backend — \
+         measured phase 11m): {deps:?}"
     );
     assert!(
         !deps.iter().any(|d| d == "../../../dist/*.whl"),
         "smelt_env.dependencies must not contain the old unscoped glob: {deps:?}"
+    );
+    assert!(
+        deps.iter().any(|d| d == "databricks-connect==15.4.5"),
+        "smelt_env.dependencies must pin databricks-connect the same way loader_env does: {deps:?}"
+    );
+    assert!(
+        deps.iter().any(|d| d == "pyarrow"),
+        "smelt_env.dependencies must include pyarrow: {deps:?}"
     );
 
     // The glob disambiguates by the wheel filename's own trailing arch

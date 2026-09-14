@@ -1,16 +1,18 @@
 # Outcome: The GitHub-activity pipeline runs on Databricks Free Edition and DuckDB, and the numbers agree
 
 **Created:** 2026-09-12
-**Status:** active
-**Blocked summary:** (resolved 2026-09-14) every phase row was `done` or `blocked` on the
-dogfood Databricks credential having expired; the credential has now been refreshed by a human
-and `bash scripts/dbx-verify.sh` is green (reachability, both schemas, out-of-scope refusal).
-Row 11m flipped `blocked` -> `pending` -> `planned`; resumes from `phases/11m-summary.md`'s
-documented prerequisite. Re-measured 2026-09-14 22:36: the credential is `oauth-m2m` with a
-**one-hour** token, so the human's 21:28 mint has already lapsed — but the gpg passphrase is
-cached in `gpg-agent`, making a headless re-mint possible; `phases/11m-plan.md` §Prerequisites
-carries the probe-then-auth recipe and the mid-phase refresh discipline. Criteria 1-10 remain met; criterion 11 is what 11m closes. See the 2026-09-14
-entries at the top of `## Blocked`.
+**Status:** blocked
+**Blocked summary:** (2026-09-14) row 11m's implement step ran to completion with a live,
+reachable credential — no credential gate this time. Four real infra defects were found and
+fixed in-pass (bundle seed missing `functions/`, wheel build missing `--features databricks`,
+aarch64 cross-compile missing a target `libpython`, `smelt_env` missing
+`PYTHONPATH`/`databricks-connect`/`pyarrow`), each verified live. The smoke run (task 4) still
+cannot complete, though: the deployed binary's subprocess cannot use the serverless job's ambient
+Spark Connect channel (`SPARK_REMOTE` holds a `unix://` socket path only Databricks' own patched
+client understands, not an `sc://` URL). This is a genuine architectural gap in the "ambient, no
+host/token" design (phase 11d), not a one-line fix — three candidate routes are recorded in
+`phases/11m-summary.md` and the newest `## Blocked` entry, none attempted. Criteria 1-10 remain
+met; criterion 11 is still open and needs a dedicated planning pass, not a resume.
 **Driver:** split. Phases 1–3, 4a and 10 are loop-grindable (no workspace, no credentials) and
 this outcome sits in `.claude/outcome-backlog` for them. Phase 4b is **human-gated** — it runs
 the provisioning wizard 4a authors, creating the workspace objects and minting the credential.
@@ -197,9 +199,27 @@ of the models or the tooling.
 | 11j | Bootstrap tooling, offline: a `smelt state seed-interval` command that writes one model's interval directly into `.smelt/targets/<target>/intervals.json` using the model's real current hash, so a target with no local run history (the Volume-resident `databricks_job` store) can be seeded from data already known to be ingested, gated with no workspace | done |
 | 11k | **[live]** Resume 11i under the 11j seed tool: query the schema's real ingestion frontier, seed `databricks_job`'s Volume intervals file for every model via one scoped `databricks fs cp`, redeploy, one manual smoke run confirming `--auto` now picks a window, compressed-cadence redeploy, **three consecutive scheduled runs** completing, run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, compute consumed recorded against criterion 4's quotas, the `volume_probe` verdict written up in `docs-site/`, and the committed daily cadence restored — closes criterion 11 | blocked |
 | 11l | Give external steps an explicit, opt-in freshness carve-out, offline: `ExecuteRequest::assume_external_steps_fresh` + `smelt run --skip-external-steps` (declines to invoke a reached step and records it `RunOutcomeKind::Skipped` in the manifest rather than refusing with `ExternalStepNotInvocable`), `docs/specs/sources.md` §Semantics 12 and `docs/specs/run_state.md` updated, `run_smelt.py`'s `smelt_run` task wired to pass the flag (trusting `smelt_run`'s `depends_on: load_next_day` job-task ordering as the freshness guarantee) — gated by a new offline `external_step_invocation.rs` case and the existing `databricks_bundle` structural suite, no workspace needed | done |
-| 11m | **[live]** Resume 11k under the 11l flag: redeploy (wheel + bundle), one manual smoke run confirming `smelt_run` no longer tries to invoke `sources.raw.github_loader`'s DuckDB-CLI dev-target loader and instead proceeds against what `load_next_day` just landed, compressed-cadence redeploy, **three consecutive scheduled runs** completing, run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, compute consumed recorded against criterion 4's quotas, the `volume_probe` verdict written up in `docs-site/`, and the committed daily cadence restored — closes criterion 11 | planned |
+| 11m | **[live]** Resume 11k under the 11l flag: redeploy (wheel + bundle), one manual smoke run confirming `smelt_run` no longer tries to invoke `sources.raw.github_loader`'s DuckDB-CLI dev-target loader and instead proceeds against what `load_next_day` just landed, compressed-cadence redeploy, **three consecutive scheduled runs** completing, run reports pulled from the Volume, the resulting state compared against a full-refresh oracle exactly as criterion 8 checks, compute consumed recorded against criterion 4's quotas, the `volume_probe` verdict written up in `docs-site/`, and the committed daily cadence restored — closes criterion 11 | blocked |
 
 ## Blocked
+
+- **2026-09-14 — phase 11m: four real infra defects found and fixed (functions/ omitted from
+  bundle seed, wheel build missing `--features databricks`, aarch64 cross-compile missing a
+  target `libpython`, `smelt_env` missing `PYTHONPATH`/`databricks-connect`/`pyarrow`), but the
+  smoke run (task 4) still cannot complete: the deployed binary's subprocess cannot use the
+  serverless job's ambient Spark Connect channel at all.** `SPARK_REMOTE` reaches the subprocess
+  but holds a `unix:///da...` socket path — Databricks' own internal IPC channel to the notebook
+  kernel's already-established session — not an `sc://host:port` URL `databricks-connect`'s public
+  client can parse. `load_next_day.py` works because it runs *inside* the task's own Python kernel
+  process (where the internal ambient-session machinery is reachable); `run_smelt.py` shells out to
+  a separately-compiled binary, whose subprocess only inherits environment variables, and the one
+  set is in a scheme only Databricks' own patched client understands. This is a genuine
+  architectural gap in the "ambient, no host/token" design (11d), not a one-line fix — three
+  candidate routes (run in-process instead of shelling out; find and bridge the internal
+  `_try_get_notebook_session()` mechanism; revisit whether ambient-only is right for a spawned
+  subprocess at all) are recorded in `phases/11m-summary.md` with none attempted. Every landed fix
+  this phase stays committed regardless of how this is eventually resolved. Criterion 11 remains
+  open.
 
 - **2026-09-14 — human unblock: dogfood credential refreshed, row 11m reopened.** Andrew ran
   `bash scripts/dbx-auth.sh` (gpg passphrase supplied interactively) and

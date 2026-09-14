@@ -9,7 +9,13 @@
 # `libduckdb.so` needs at most GLIBC_2.25/GLIBCXX_3.4.22, so only the
 # locally-linked `smelt` binary forces the floor up) and refuses to leave a
 # wheel tagged above that floor, or an unrepaired plain `linux_*` wheel, on
-# disk for `bundle deploy` to upload.
+# disk for `bundle deploy` to upload. Every `maturin build` invocation here
+# passes `--features databricks` — `smelt-cli`'s default feature set has no
+# Databricks backend at all (`crates/smelt-cli/Cargo.toml`), a gap every
+# earlier live phase's `cargo build -p smelt-cli --features databricks`
+# masked because none of them ran the *wheel* path; the deployed bundle
+# task failed with "Databricks backend not available" until this script
+# started passing the flag (measured phase 11m).
 #
 #     bash scripts/dbx-wheel-build.sh                        # build all (default): x86_64 + aarch64, writes dist/, verifies output
 #     bash scripts/dbx-wheel-build.sh build [x86_64|aarch64|all]
@@ -239,6 +245,76 @@ ensure_aarch64_duckdb_lib() {
   echo "${cache_dir}"
 }
 
+# Makes sure an aarch64 CPython 3.11 shared library (plus its sysconfigdata)
+# is cached on disk, and prints the cached directory on stdout — the
+# PYO3_CROSS_LIB_DIR pyo3-build-config's cross-compile path needs.
+#
+# `smelt-cli`'s pyo3 dependency uses `abi3-py39` (`Cargo.toml`): when
+# maturin cannot execute a foreign-arch interpreter to introspect it (there
+# is no aarch64 Python on this x86_64 host), pyo3-build-config's
+# `default_cross_compile` derives the link-time library name from the abi3
+# *floor* version alone — `python3.9` — regardless of which real interpreter
+# is targeted (`pyo3-build-config-0.28.3/src/impl_.rs::default_lib_name_for_target`).
+# The linker resolves `-lpython3.9` by filename in `PYO3_CROSS_LIB_DIR`, but
+# what ends up in the built binary's `DT_NEEDED` is the *target file's own*
+# ELF SONAME, not the symlink name used to find it — so a `libpython3.9.so`
+# symlink pointing at the real cpython-3.11 shared object makes the linker
+# happy while the produced binary correctly declares a dependency on
+# `libpython3.11.so.1.0` (verified with `readelf -d`, phase 11m). This is
+# safe under abi3: a newer CPython's shared library is a superset of the
+# 3.9 stable-ABI symbol table by construction. The resulting binary is not
+# bundled with its own libpython (manylinux's repair step excludes
+# `libpython*` from external-library bundling on purpose — the wheel
+# consumer's own Python provides it) — same trust boundary as any wheel
+# generally.
+ensure_aarch64_python_lib() {
+  local cache_dir="${REPO_ROOT}/target/python-lib/aarch64"
+  local abi3_floor_name="libpython3.9.so"
+  if [[ -e "${cache_dir}/${abi3_floor_name}" ]]; then
+    echo "${cache_dir}"
+    return 0
+  fi
+  mkdir -p "${cache_dir}/lib/python3.11"
+  echo "aarch64 CPython 3.11 shared library not cached — downloading (one-time)" >&2
+  local release_asset
+  release_asset="$(curl -sL --fail "https://api.github.com/repos/astral-sh/python-build-standalone/releases/latest" \
+    | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+for asset in data.get('assets', []):
+    name = asset['name']
+    if 'cpython-3.11' in name and 'aarch64-unknown-linux-gnu' in name and name.endswith('install_only_stripped.tar.gz'):
+        print(asset['browser_download_url'])
+        break
+")"
+  if [[ -z "${release_asset}" ]]; then
+    echo "ERROR: could not find an aarch64-unknown-linux-gnu cpython-3.11 asset in python-build-standalone's latest release" >&2
+    exit 1
+  fi
+  local tar_path
+  tar_path="$(mktemp)"
+  if ! curl -sL --fail "${release_asset}" -o "${tar_path}"; then
+    rm -f "${tar_path}"
+    echo "ERROR: failed to download aarch64 cpython-3.11 from ${release_asset}" >&2
+    exit 1
+  fi
+  if ! tar xzf "${tar_path}" -C "${cache_dir}" --strip-components=2 \
+    python/lib/libpython3.11.so python/lib/libpython3.11.so.1.0; then
+    rm -f "${tar_path}"
+    echo "ERROR: failed to extract libpython3.11.so from ${tar_path}" >&2
+    exit 1
+  fi
+  if ! tar xzf "${tar_path}" -C "${cache_dir}/lib/python3.11" --strip-components=3 \
+    python/lib/python3.11/_sysconfigdata__linux_aarch64-linux-gnu.py; then
+    rm -f "${tar_path}"
+    echo "ERROR: failed to extract _sysconfigdata from ${tar_path}" >&2
+    exit 1
+  fi
+  rm -f "${tar_path}"
+  ln -sf libpython3.11.so.1.0 "${cache_dir}/${abi3_floor_name}"
+  echo "${cache_dir}"
+}
+
 clean_stale_build_artifacts() {
   rm -rf \
     "${REPO_ROOT}/target/release/build/libduckdb-sys-"* \
@@ -258,6 +334,8 @@ build_with_zig() {
     ensure_aarch64_target
     local aarch64_duckdb_lib
     aarch64_duckdb_lib="$(ensure_aarch64_duckdb_lib)"
+    local aarch64_python_lib
+    aarch64_python_lib="$(ensure_aarch64_python_lib)"
     # maturin cross-compiling a foreign target cannot execute a
     # target-architecture Python to discover it (there isn't one on this
     # host), so the interpreter must be named explicitly. The host's own
@@ -270,12 +348,13 @@ build_with_zig() {
       cd "${REPO_ROOT}"
       export DUCKDB_LIB_DIR="${aarch64_duckdb_lib}"
       export LD_LIBRARY_PATH="${DUCKDB_LIB_DIR}:${LD_LIBRARY_PATH:-}"
-      maturin build --release --zig --target aarch64-unknown-linux-gnu --compatibility "${MANYLINUX_FLOOR}" --interpreter "${venv_dir}/bin/python3.11" --out "${DIST_DIR}"
+      export PYO3_CROSS_LIB_DIR="${aarch64_python_lib}"
+      maturin build --release --zig --target aarch64-unknown-linux-gnu --compatibility "${MANYLINUX_FLOOR}" --interpreter "${venv_dir}/bin/python3.11" --out "${DIST_DIR}" --features databricks
     )
   else
     (
       cd "${REPO_ROOT}"
-      maturin build --release --zig --compatibility "${MANYLINUX_FLOOR}" --out "${DIST_DIR}"
+      maturin build --release --zig --compatibility "${MANYLINUX_FLOOR}" --out "${DIST_DIR}" --features databricks
     )
   fi
 }
@@ -318,7 +397,7 @@ build_with_docker() {
       export DUCKDB_LIB_DIR=/tmp/duckdb-lib
       export LD_LIBRARY_PATH=\"\${DUCKDB_LIB_DIR}:\${LD_LIBRARY_PATH:-}\"
       rm -rf target/release/build/libduckdb-sys-* target/release/deps/libduckdb_sys-* target/release/deps/libduckdb-*.rlib target/release/deps/smelt-* target/release/smelt target/maturin
-      maturin build --release --compatibility '${MANYLINUX_FLOOR}' --out dist
+      maturin build --release --compatibility '${MANYLINUX_FLOOR}' --out dist --features databricks
     "
 }
 

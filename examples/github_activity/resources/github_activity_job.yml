@@ -53,6 +53,17 @@ resources:
         - environment_key: smelt_env
           spec:
             client: "2"
+            # The deployed `smelt` binary's embedded PyO3 interpreter reaches
+            # `smelt.databricks_adapter` (`docs/outcomes/
+            # 20260912-databricks-dogfood-spine/phases/11m-summary.md`) the
+            # same way `run_smelt.py` does locally — a bare PYTHONPATH entry
+            # (`run_smelt.py` sets it from the bundle's own synced `python/`
+            # directory) — but `databricks_adapter.py` itself needs
+            # `databricks-connect` and `pyarrow` importable too. `loader_env`
+            # above already declares them for `load_next_day.py`'s own
+            # Databricks Connect session; `smelt_env` never had, because
+            # every run through this environment before 11l's carve-out
+            # refused before reaching the Databricks backend at all.
             # Serverless compute can land this task on either architecture
             # with no pinning mechanism on the platform side, and it can
             # change between runs (docs.databricks.com/compute/serverless/
@@ -81,6 +92,8 @@ resources:
             dependencies:
               - ${workspace.file_path}/examples/github_activity/dist/${var.x86_64_wheel_name}; platform_machine == "x86_64"
               - ${workspace.file_path}/examples/github_activity/dist/${var.aarch64_wheel_name}; platform_machine == "aarch64"
+              - databricks-connect==15.4.5
+              - pyarrow
 
     # A one-off job, run manually (`scripts/dbx-bundle.sh run volume_probe`),
     # never scheduled — it measures the deployed Volume's FUSE-layer
