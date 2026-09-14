@@ -273,3 +273,43 @@ fn docs_site_trino_scripts_exist() {
          `{default_port}` from scripts/trino-env.sh"
     );
 }
+
+/// `docs/outcomes/20260913-trino-ledger/outcome.md` phase 1: the state-residency
+/// posture is measured against a live coordinator, not read from documentation.
+/// `scripts/trino-probe-state.sh` is the measurement script; it must exist and
+/// be executable, alongside the tier's other `scripts/trino-*` entry points.
+#[test]
+fn probe_state_script_exists_and_is_executable() {
+    let path = repo_root().join("scripts/trino-probe-state.sh");
+    assert!(
+        path.exists(),
+        "scripts/trino-probe-state.sh does not exist — the measured-not-read posture probe \
+         for docs/outcomes/20260913-trino-ledger is missing"
+    );
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(&path)
+            .unwrap_or_else(|e| panic!("stat {path:?}: {e}"))
+            .permissions()
+            .mode();
+        assert!(
+            mode & 0o111 != 0,
+            "scripts/trino-probe-state.sh is not executable (mode {mode:o})"
+        );
+    }
+}
+
+/// `scripts/README-trino.md` must name the state-residency probe so the
+/// measured-not-read discipline is discoverable from the tier's own docs,
+/// not just from the outcome directory.
+#[test]
+fn readme_documents_the_state_probe() {
+    let path = repo_root().join("scripts/README-trino.md");
+    let readme = fs::read_to_string(&path).unwrap_or_else(|e| panic!("read {path:?}: {e}"));
+    assert!(
+        readme.contains("trino-probe-state.sh"),
+        "scripts/README-trino.md does not mention scripts/trino-probe-state.sh"
+    );
+}

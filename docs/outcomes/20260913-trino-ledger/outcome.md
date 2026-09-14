@@ -150,7 +150,7 @@ land near or above Delta's.
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Confirm the posture: `scripts/trino-probe-state.sh` runs the cross-table `START TRANSACTION` candidates (including a failing second statement) against the live tier and prints Trino's answers verbatim; escalate in the decision log if genuine cross-table atomicity is found, since that would change this outcome | planned |
+| 1 | Confirm the posture: `scripts/trino-probe-state.sh` runs the cross-table `START TRANSACTION` candidates (including a failing second statement) against the live tier and prints Trino's answers verbatim; escalate in the decision log if genuine cross-table atomicity is found, since that would change this outcome | done |
 | 2 | Spec delta: `state.md`'s realisability table gains a Trino column reading `no` five times with Spark's reason stated as permanent, `multi_backend.md` §"Incremental & schema evolution per backend" states it for the target, and the diagnostics the degradation needs are named | pending |
 | 3 | Schema-evolution DDL: `ddl_trino/` as a module directory with the measured `SchemaOperation` → Trino/Iceberg mapping table in its header, type spellings derived from what the server accepted, and T1's five schema-related capability cells confirmed or corrected back into the spec table | pending |
 | 4 | Wire the absence: Trino claims no correctness structure, availability resolution downgrades every dependent cell to its recompute equivalent with `MaintenanceStateDowngraded`, derived once by the pure resolver with the ideal plan still materialised | pending |
@@ -162,6 +162,54 @@ land near or above Delta's.
 | 10 | Surface and close: `smelt explain` rendering Trino's downgrades (text + `--json`), diagnostics catalogue and `examples/broken/` fixtures, `docs-site/` state page updated with what Trino costs and why, `verify-phase.sh` green with no baseline bumped | pending |
 
 ## Decision log
+
+- **2026-09-14 — phase 1 result: measured, not assumed — Iceberg refuses ALL writes inside an
+  explicit transaction, not just cross-table ones. Criteria 2–5's Spark-shaped assumption holds;
+  no escalation.** `scripts/trino-probe-state.sh` run against the live tier (`trinodb/trino:483`,
+  `apache/iceberg-rest-fixture:1.10.1`), full output in `phases/01-summary.md`. Two protocol facts
+  had to be discovered before the atomicity question was even askable, both now baked into the
+  script: (1) Trino refuses `START TRANSACTION` outright with `Client does not support
+  transactions` unless **every** request, including the first transaction-less one, carries
+  `X-Trino-Transaction-Id: NONE` — a client that never sends the header at all is assumed
+  incapable of reading back `X-Trino-Started-Transaction-Id` and threading it forward, so the
+  server won't open a transaction it can never learn was committed; (2) the target schema does not
+  pre-exist and must be created (`CREATE SCHEMA IF NOT EXISTS iceberg.smelt_dev`) before any
+  case — smelt's own backend does this itself (`crates/smelt-backend-trino/src/backend.rs:315`).
+  With both fixed, every case's verdict:
+  - **A (baseline, autocommit)** — ACCEPTED. `CREATE TABLE` + `INSERT` outside any transaction
+    land normally; row count 1.
+  - **B (bare `START TRANSACTION`/`COMMIT`)** — both ACCEPTED, confirming the SQL syntax itself
+    parses and a transaction can be opened and closed — the refusal below is connector-level, not
+    a grammar rejection.
+  - **C (cross-table happy path)** — `START TRANSACTION` ACCEPTED; the first `INSERT` REFUSED
+    verbatim `Catalog only supports writes using autocommit: iceberg`; the second `INSERT` and the
+    `COMMIT` REFUSED because the transaction was already aborted by the first failure. Both
+    tables' row counts: 0.
+  - **D (cross-table, second statement fails)** — identical shape to C: the *first* write already
+    refuses, so the type-mismatch second statement never even runs. t1's row count: 0 — it never
+    landed, because it was never accepted in the first place.
+  - **E (explicit rollback)** — `START TRANSACTION` ACCEPTED, `INSERT` REFUSED (same autocommit
+    message), `ROLLBACK` ACCEPTED (rolling back nothing). t1 row count: 0.
+  - **F (DDL in a transaction — the cell T1 measured through the wrong client)** — `START
+    TRANSACTION` ACCEPTED, `CREATE TABLE` REFUSED with the *same* autocommit message (DDL is a
+    write too, not a special case), `ROLLBACK` ACCEPTED, table does not exist afterward. This
+    directly answers the hand-forward's flagged cell: `supports_transactional_ddl = false` is
+    confirmed correct even measured through a client that *does* hold a real session — T1's
+    verdict was right, for a reason one layer deeper than "the client had no session": the
+    connector itself refuses DDL as a transactional write, full stop.
+  - **G (same-table, two writes)** — same autocommit refusal on the *first* `INSERT`. This settles
+    the question the case was designed to separate: the connector's restriction is not "no
+    *cross*-table transaction" but "no multi-statement transactional write at all, same table or
+    not." Iceberg's per-table atomic commit model has no place to hang a second pending write
+    while a first is uncommitted, so the connector refuses the second write's *precondition*
+    (being inside an open transaction) rather than attempting and rolling back a torn commit.
+  **Verdict:** Spark's shape is confirmed and, if anything, understated — Trino/Iceberg has no
+  transactional write capability whatsoever (not even single-table), only autocommit writes and a
+  syntactically-real but write-inert `START TRANSACTION`/`COMMIT`/`ROLLBACK` pair (useful only for
+  read-only statements, e.g. consistent multi-query snapshots — not probed here, out of scope for
+  this outcome). Criteria 2–5's assumption — Trino claims none of the five correctness structures
+  for exactly Spark's reason — holds and is now measured rather than inherited. No genuine
+  cross-table atomicity was found; nothing here escalates or changes the outcome's scope.
 
 - **2026-09-14 — phase 1 planning: the probe must carry its own transaction session.** T1's
   `supports_transactional_ddl = false` measured smelt's stateless `/v1/statement` client, not the

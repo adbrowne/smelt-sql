@@ -76,6 +76,22 @@ cargo test -p smelt-backend-trino               # backend integration tests
 With `SMELT_TRINO_URL` unset, the same commands compile and pass with all
 Trino-targeted tests skipped.
 
+## Measuring the state-residency posture
+
+`docs/outcomes/20260913-trino-ledger/outcome.md` needs one fact measured
+against the live coordinator rather than assumed from Spark: whether Iceberg
+gives Trino cross-table transaction atomicity, despite Trino having explicit
+`START TRANSACTION`/`COMMIT` syntax. `scripts/trino-probe-state.sh` speaks the
+`/v1/statement` protocol directly (threading the coordinator's own
+transaction id across statements, unlike smelt's stateless backend client)
+and prints each candidate's verdict plus the server's own error text:
+
+```bash
+bash scripts/trino-up.sh
+source scripts/trino-env.sh
+bash scripts/trino-probe-state.sh
+```
+
 ## In CI
 
 The `trino-integration` job in `.github/workflows/compat.yml` brings up the
