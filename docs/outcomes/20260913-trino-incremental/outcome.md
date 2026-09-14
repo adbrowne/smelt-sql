@@ -148,6 +148,10 @@ approximated.
 | 1 | Characterise Iceberg `MERGE` by execution: each clause form run against the live tier, the three merge capability flags confirmed or corrected in the spec matrix, measured errors quoted | done |
 | 2 | Spec delta: `multi_backend.md` §"Whole-row MERGE" / §"Column-scoped merge and conditional-write capabilities" / §"Incremental & schema evolution per backend" stated for Trino, including which families are reachable and which take T3's downgrade, plus the refusal diagnostics any absent clause needs | done |
 | 3 | The append and whole-row-`MERGE` upsert families executing end-to-end through `execute_project` — including landing `maintenance_dialect` for `SqlDialect::Trino`, which returns `Err` today and blocks every family — with their `statement_parity` executed-vs-emitted legs | blocked |
+| 3a | Real (non-dry-run) execution resolves each model's run window and every batch `TimeRange` in that model's OWN partition axis (gap 2), so an integer-axis model's injected predicates render bare rather than quoted | planned |
+| 3b | Typed ANSI partition literals (`DATE '…'` / `TIMESTAMP '…'`) from the single `partition_literal` owner, so a calendar-axis predicate type-checks on a strict engine (gap 1) | pending |
+| 3c | A `ColumnScopedMerge` cell downgraded to `PerGroupRecompute` for an `UpstreamMutation`-triggered (unclocked) cell resolves `key_scope: None` — the full-scan recompute the reachable row already promises — instead of demanding a `ScanClamp` that cannot exist (gap 3) | pending |
+| 3d | Phase 3's deferred live legs, now unblocked: the append and whole-row-`MERGE` upsert families end-to-end through `execute_project` on Trino, plus `statement_parity`'s Trino executed-vs-emitted leg | pending |
 | 4 | The emulated delete-and-insert window: `DELETE` range exactly covering the insert's write window, asserted directly and under out-of-order and repeated application | pending |
 | 5 | The merge-less conditional write over T3's staged relation (the departed-row delete as a separate scoped `DELETE`, since `WHEN NOT MATCHED BY SOURCE` is absent), and the column-scoped merge — executing where its cell needs no merge ledger, taking T3's `MaintenanceStateDowngraded` route where it does, per Spark's precedent | pending |
 | 6 | The degraded routes: per-group recompute, the succession grain's full rebuild in place of the patch route (presented table row- and column-identical to the ledger-bearing rebuild's presented arm), and the sidecar-less key-addressed downgrade — each recorded on the cell and explain-visible | pending |
@@ -157,6 +161,32 @@ approximated.
 | 10 | Mid-stream schema evolution under maintenance, still oracle-equal; then close: divergences rewritten, `docs-site/` page stating plainly which incremental features Trino does and does not support and why, `verify-phase.sh` green | pending |
 
 ## Decision log
+
+- **2026-09-14 — reshape at phase 4 planning: phase 3's three blocking gaps become four rows
+  (3a/3b/3c/3d) ahead of phase 4, option (a) of the block report.** Phase 3's summary recommends
+  fixing gaps 1-3 before any further live `execute_project` proof, because phases 4-6 (delete-and-
+  insert window, merge-less conditional write, degraded routes) all drive calendar-partitioned or
+  snapshot-reconcile-shaped models through exactly the paths that carry them. Planning phase 4
+  first would re-discover all three. None of this work leaves the outcome: every one of the three
+  gaps blocks criterion 2 (the reachable families execute end-to-end through `execute_project`) and
+  criterion 7 (the generative gate runs through the real pipeline), so each gets a row rather than
+  a hand-off. Row 3 stays `blocked` with its trace intact; 3d carries its two unachieved tests
+  (the CLI family proof and `statement_parity`'s Trino leg) rather than re-opening row 3.
+  Phases 4-10 are unchanged in content and order.
+
+- **2026-09-14 — ruling for phase 3b (gap 1): typed ANSI literals everywhere, one spelling, no
+  dialect threading.** Of the two options the phase-3 summary poses, `partition_literal`'s calendar
+  axis renders `DATE '2026-01-01'` / `TIMESTAMP '…'` on *every* dialect rather than per-dialect
+  rendering threaded through `Region`/`inject_time_filter`/`inject_source_filters`. Rationale: the
+  ANSI typed literal is accepted by DuckDB, Spark, BigQuery and Trino alike, so one spelling
+  type-checks everywhere and no consumer acquires a dialect branch (criterion 6's shape); the
+  competing option would put dialect knowledge into four call sites that today are dialect-blind.
+  The cost is the ~19 files pinning exact literal text — verified to be test-fixture and
+  spec-freshness assertions over rendered SQL, not stored state: every production caller of
+  `partition_literal` (`smelt-backend-{duckdb,spark,bigquery}/sql.rs`, `transformer.rs`,
+  `emit/types.rs::Region`) renders it into a SQL predicate, and none persists it into the ledger,
+  so no migration of recorded state is implied. If 3b's implementer finds a persisted-literal site
+  this survey missed, that is an escalation, not an absorb.
 
 - **2026-09-14 — reshape at phase 3 planning: no row changed; phase 3 absorbs the three
   consequences of landing `maintenance_dialect`.** Turning
