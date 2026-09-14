@@ -494,7 +494,7 @@ async fn append_only_posture_probe_and_baseline_snapshot_come_from_the_emitters(
     let inner = DuckDbBackend::new(&db_path, "main")
         .await
         .expect("open backend");
-    let backend = RecordingBackend::new(inner);
+    let backend = RecordingBackend::new(Box::new(inner));
 
     let parse = smelt_parser::parse("SELECT * FROM smelt.sources.raw.events");
     let refs = smelt_parser::ast::File::cast(parse.syntax())
@@ -665,7 +665,7 @@ async fn source_mutation_fingerprint_comes_from_the_emitter() {
     let inner = DuckDbBackend::new(&db_path, "main")
         .await
         .expect("open backend");
-    let backend = RecordingBackend::new(inner);
+    let backend = RecordingBackend::new(Box::new(inner));
 
     let digest_columns = vec!["user_id".to_string(), "status".to_string()];
     let expected_sql = emit_source_mutation_fingerprint(

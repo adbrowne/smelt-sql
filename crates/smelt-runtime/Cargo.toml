@@ -50,6 +50,11 @@ smelt-backends = { path = "../smelt-backends" }
 # `tests/probe_manifest.rs`. `smelt-maintenance-testkit` already depends on
 # `smelt-runtime` as a normal dependency; this only links test binaries.
 smelt-maintenance-testkit = { path = "../smelt-maintenance-testkit" }
+# Test-only dependency (no cycle: `smelt-backend-trino` has no dependency on
+# this crate, normal or dev): `tests/statement_parity/trino.rs` needs a
+# `TrinoBackend` it constructs directly (schema create/drop and post-run
+# row reads on the live tier) rather than through a `Target`/`Config`.
+smelt-backend-trino = { path = "../smelt-backend-trino" }
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
 async-trait = "0.1"
 arrow.workspace = true

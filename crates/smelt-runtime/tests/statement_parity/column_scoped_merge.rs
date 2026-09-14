@@ -79,7 +79,7 @@ async fn column_scoped_merge_statements_come_from_the_emitter() {
     let inner = DuckDbBackend::new(&db_path, "main")
         .await
         .expect("open duckdb");
-    let backend = RecordingBackend::new(inner);
+    let backend = RecordingBackend::new(Box::new(inner));
 
     backend
         .execute_sql(
@@ -193,7 +193,7 @@ async fn suppressed_column_scoped_merge_statements_come_from_the_emitter() {
     let inner = DuckDbBackend::new(&db_path, "main")
         .await
         .expect("open duckdb");
-    let backend = RecordingBackend::new(inner);
+    let backend = RecordingBackend::new(Box::new(inner));
 
     backend
         .execute_sql("CREATE TABLE main.dim_users (user_id BIGINT, tier VARCHAR)")

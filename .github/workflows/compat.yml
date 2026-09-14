@@ -514,6 +514,15 @@ jobs:
             exit 1
           fi
 
+      - name: Run smelt-runtime statement_parity Trino leg
+        run: |
+          set -o pipefail
+          cargo test -p smelt-runtime --test statement_parity --quiet 2>&1 | tee trino-runtime-test.log | tail -60
+          if grep -qi skipping trino-runtime-test.log; then
+            echo "::error::the Trino leg in smelt-runtime's statement_parity skipped with the tier up — SMELT_TRINO_URL should be set in this job"
+            exit 1
+          fi
+
       # The dialect_audit binary also carries Spark and BigQuery legs, which
       # legitimately skip green with no session/credential in this job — the
       # check is deliberately narrow to `schema_leg_trino` rather than a bare

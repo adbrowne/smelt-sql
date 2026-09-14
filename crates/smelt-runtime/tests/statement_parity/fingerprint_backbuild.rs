@@ -21,7 +21,7 @@ async fn fingerprint_sidecar_diff_and_refresh_statements_come_from_the_emitter()
     let inner = DuckDbBackend::new(&db_path, "main")
         .await
         .expect("open duckdb");
-    let backend = RecordingBackend::new(inner);
+    let backend = RecordingBackend::new(Box::new(inner));
 
     backend
         .execute_sql(
@@ -346,7 +346,7 @@ async fn stage_and_migrate(
     let inner = DuckDbBackend::new(&db_path, "main")
         .await
         .expect("open duckdb for migration");
-    let backend = RecordingBackend::new(inner);
+    let backend = RecordingBackend::new(Box::new(inner));
 
     (derived, backend, tmp)
 }

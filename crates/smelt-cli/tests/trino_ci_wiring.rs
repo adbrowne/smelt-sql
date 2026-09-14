@@ -179,14 +179,13 @@ fn discover_test_binaries(krate: &'static str) -> Vec<TestBinary> {
 }
 
 /// The derived live-gated census across every crate this repo's Trino tier
-/// touches from test code: `smelt-cli` and `smelt-backend-trino`.
-/// `smelt-runtime` carries no live Trino leg today (`docs/outcomes/
-/// 20260913-trino-incremental/phases/03d-summary.md` — the keyed-fold
-/// `statement_parity` leg was attempted and found blocked by gaps 4/5, not
-/// landed), so it is not scanned here; add it back the day a live leg lands
-/// there.
+/// touches from test code: `smelt-cli`, `smelt-backend-trino`, and
+/// `smelt-runtime` (`statement_parity/trino.rs`, landed phase 3h — `docs/
+/// outcomes/20260913-trino-incremental/phases/03h-plan.md` — once gaps 4/5
+/// closed the whole-row `MERGE` upsert family the `statement_parity` leg
+/// needed).
 fn live_gated_census() -> Vec<TestBinary> {
-    ["smelt-cli", "smelt-backend-trino"]
+    ["smelt-cli", "smelt-backend-trino", "smelt-runtime"]
         .into_iter()
         .flat_map(discover_test_binaries)
         // This very file (`trino_ci_wiring`) matches the markers because it

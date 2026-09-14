@@ -10,7 +10,7 @@ async fn delta_restricted_recompute_statements_come_from_the_emitter() {
     let inner = DuckDbBackend::new(&db_path, "main")
         .await
         .expect("open duckdb");
-    let backend = RecordingBackend::new(inner);
+    let backend = RecordingBackend::new(Box::new(inner));
 
     backend
         .execute_sql("CREATE TABLE main.enriched (event_id VARCHAR, event_date DATE, tier VARCHAR)")
@@ -132,7 +132,7 @@ async fn delta_restricted_recompute_records_the_ledger_reset() {
     let inner = DuckDbBackend::new(&db_path, "main")
         .await
         .expect("open duckdb");
-    let backend = RecordingBackend::new(inner);
+    let backend = RecordingBackend::new(Box::new(inner));
 
     backend
         .execute_sql("CREATE TABLE main.enriched (event_id VARCHAR, event_date DATE, tier VARCHAR)")
@@ -283,7 +283,7 @@ async fn region_conditional_write_matches_the_emitted_group_byte_for_byte() {
     let inner = DuckDbBackend::new(&db_path, "main")
         .await
         .expect("open duckdb");
-    let backend = RecordingBackend::new(inner);
+    let backend = RecordingBackend::new(Box::new(inner));
 
     backend
         .execute_sql(
@@ -380,7 +380,7 @@ async fn open_closure_recompute_statements_come_from_the_unrestricted_emitter() 
     let inner = DuckDbBackend::new(&db_path, "main")
         .await
         .expect("open duckdb");
-    let backend = RecordingBackend::new(inner);
+    let backend = RecordingBackend::new(Box::new(inner));
 
     backend
         .execute_sql("CREATE TABLE main.enriched (event_id VARCHAR, event_date DATE, tier VARCHAR)")

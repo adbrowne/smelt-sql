@@ -4456,6 +4456,7 @@ dependencies = [
  "serde_json",
  "smelt-backend",
  "smelt-backend-duckdb",
+ "smelt-backend-trino",
  "smelt-backends",
  "smelt-cli",
  "smelt-core",

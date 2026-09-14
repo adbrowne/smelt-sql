@@ -156,7 +156,7 @@ approximated.
 | 3e | Live-Trino test isolation: every live-tier test gets a guaranteed-unique schema/namespace (or one process-wide guard), and `trino_state_residency.rs`'s `TRINO_ENV_GUARD` lock scope is widened to cover `stage_residency_project`'s own `SMELT_TRINO_URL` read — so the conformance and family gates fail for real reasons only | done |
 | 3f | Gap 4: every partition literal the windowed-keyed maintenance driver emits goes through 3b2's single literal-renderer owner, typed against the referenced column — the driving-source pushdown filter (`smelt-runtime/src/maintenance_driver/{driver.rs,cumulative.rs}`) and the target-scan slice bound (`TargetSlicePredicate::Range` in both keyed-fold emitters, plus `emit_recurrence_bound_probe`'s reuse of it) — the third and fourth emission sites of the class 3a/3b2 fixed | done |
 | 3g | Gap 5: `Technique::KeyedFold` gets a **plan-time** availability resolution mirroring the repair family's `resolve_availability` — the idempotent grade downgrades to a reachable technique on a structure-less backend, the additive grade takes a named, explain-visible downgrade or refuses with a diagnostic naming the backend and the missing structure (criterion 3's never-fold-twice route). An execution-time `BackendError::unsupported` is not sufficient: criterion 3 requires the verdict on the cell and explain-visible | done |
-| 3h | Phase 3d's deferred legs, re-attempted on 3f+3g: the whole-row `MERGE` upsert (keyed-fold) family end-to-end through `execute_project` on Trino, plus `statement_parity`'s Trino executed-vs-emitted leg (3d's reverted `RecordingBackend`/`emit_keyed_fold` byte-identity design redone) | planned |
+| 3h | Phase 3d's deferred legs, re-attempted on 3f+3g: the whole-row `MERGE` upsert (keyed-fold) family end-to-end through `execute_project` on Trino, plus `statement_parity`'s Trino executed-vs-emitted leg (3d's reverted `RecordingBackend`/`emit_keyed_fold` byte-identity design redone) | done |
 | 4 | The emulated delete-and-insert window: `DELETE` range exactly covering the insert's write window, asserted directly and under out-of-order and repeated application | pending |
 | 5 | The merge-less conditional write over T3's staged relation (the departed-row delete as a separate scoped `DELETE`, since `WHEN NOT MATCHED BY SOURCE` is absent), and the column-scoped merge — executing where its cell needs no merge ledger, taking T3's `MaintenanceStateDowngraded` route where it does, per Spark's precedent | pending |
 | 6 | The degraded routes: per-group recompute, the succession grain's full rebuild in place of the patch route (presented table row- and column-identical to the ledger-bearing rebuild's presented arm), and the sidecar-less key-addressed downgrade — each recorded on the cell and explain-visible. Includes succession's own partition-literal sites (its `driving_steps` call site in `execute/project/mod.rs` still passes `Undeclared`, 3f's untouched residue): if the degraded succession route emits a literal against a typed column on Trino, it goes through 3b2's single renderer like every other site of the class | pending |
@@ -166,6 +166,28 @@ approximated.
 | 10 | Mid-stream schema evolution under maintenance, still oracle-equal; then close: divergences rewritten, `docs-site/` page stating plainly which incremental features Trino does and does not support and why, `verify-phase.sh` green | pending |
 
 ## Decision log
+
+- **2026-09-15 — 3h implementation: kept `RecordingBackendFactory`'s DuckDB construction path
+  unchanged rather than routing it through `smelt_backends::create_backend`.** Generalizing
+  `RecordingBackend`'s `inner` to `Box<dyn Backend>` only needs the type widened; the shared
+  `create_backend` helper requires a `database` field on the `Target` even when a
+  `database_override` is supplied, which several pre-existing `statement_parity` fixtures'
+  `smelt.yml` omit (they rely entirely on the test's own `db_path`). Using it broke 6 DuckDB
+  tests; reverted to the original direct `DuckDbBackend::new(&path, &schema)` construction, and
+  gave Trino its own `TrinoRecordingBackendFactory` in `trino.rs` instead.
+- **2026-09-15 — 3h implementation: `device_agg`'s fixture needs `maintenance.scan_bounds.
+  per_source.events.allow_full_scan: true` even for the idempotent (`MIN`) leg.** Measured live:
+  `MaintenanceScanUnbounded` refuses the build when the driving relation is a declared external
+  source (not a plain first-class model with inline `timeseries:` frontmatter), regardless of
+  fold grade. Matches the existing DuckDB fixture in `keyed_fold_state_downgrade_execution.rs`.
+- **2026-09-15 — 3h implementation: `smelt-runtime`'s own `tests/common/mod.rs`, not a reuse of
+  `smelt-cli`'s.** `trino_ci_wiring.rs::every_live_trino_test_schema_name_comes_from_the_shared_
+  helper` scans each live-gated binary's own source for a private `fn trino_schema(`/`fn
+  unique_schema(` definition; cargo's per-crate `tests/` compilation has no cross-crate module
+  sharing, so the fix is a same-shaped sibling file (`crates/smelt-runtime/tests/common/mod.rs`),
+  loaded into the `statement_parity` binary via `#[path = "../common/mod.rs"] mod common;` in
+  `main.rs` (one directory below where the file lives) rather than an inline helper in `trino.rs`
+  itself.
 
 - **2026-09-15 — 3h planning: the `MERGE` family fixture must be an *idempotent* fold, and the
   additive grade's downgrade is proved live here rather than in row 6.** 3d's deferred test design

@@ -93,15 +93,21 @@ fn no_retry_policy() -> smelt_runtime::RetryPolicy<'static> {
     }
 }
 
-/// Wraps a real [`DuckDbBackend`], delegating every call, but recording the
-/// [`StatementGroup`] passed to `execute_statement_group` — the single
-/// point every emitted maintenance statement flows through on its way to
-/// the connection (`docs/specs/incremental_models.md` §"Statement emission
-/// (single owner)"). Recording here, rather than trusting the emitter was
-/// called with the "right" inputs, is what proves *executed* SQL, not just
-/// *constructed* SQL, matches the emitter's output.
+/// Wraps a real backend (DuckDB or Trino), delegating every call, but
+/// recording the [`StatementGroup`] passed to `execute_statement_group` —
+/// the single point every emitted maintenance statement flows through on
+/// its way to the connection (`docs/specs/incremental_models.md` §"Statement
+/// emission (single owner)"). Recording here, rather than trusting the
+/// emitter was called with the "right" inputs, is what proves *executed*
+/// SQL, not just *constructed* SQL, matches the emitter's output.
+///
+/// `inner` is `Box<dyn Backend>` rather than a concrete `DuckDbBackend` so
+/// one recorder wraps either backend — `RecordingBackendFactory` below
+/// dispatches through `smelt_backends::create_backend` (the same
+/// `target_type → Box<dyn Backend>` selection the CLI/UI use), and
+/// `trino.rs`'s own factory boxes a `TrinoBackend` directly.
 struct RecordingBackend {
-    inner: DuckDbBackend,
+    inner: Box<dyn Backend>,
     groups: Mutex<Vec<StatementGroup>>,
     /// Every raw SQL string handed to `execute_sql` directly (not via
     /// `execute_statement_group`) — the checked route-3 out-of-slice match
@@ -112,7 +118,7 @@ struct RecordingBackend {
 }
 
 impl RecordingBackend {
-    fn new(inner: DuckDbBackend) -> Self {
+    fn new(inner: Box<dyn Backend>) -> Self {
         Self {
             inner,
             groups: Mutex::new(Vec::new()),
@@ -263,10 +269,17 @@ impl BackendFactory for RecordingBackendFactory {
         let schema = target_config.schema.clone();
         let slot = Arc::clone(&self.backend);
         Box::pin(async move {
+            // DuckDB is the only backend this factory itself constructs —
+            // preserved unchanged from before the `Box<dyn Backend>`
+            // generalization so every pre-existing fixture (several of
+            // which declare a `duckdb` target with no `database:` field,
+            // relying entirely on `self.db_path`) keeps working unchanged.
+            // The Trino leg (`trino.rs`) builds its own `TrinoBackend`
+            // directly and never reaches this factory.
             let inner = DuckDbBackend::new(&path, &schema)
                 .await
                 .map_err(|e| anyhow::anyhow!("DuckDB init failed: {}", e))?;
-            let recording = Arc::new(RecordingBackend::new(inner));
+            let recording = Arc::new(RecordingBackend::new(Box::new(inner)));
             *slot.lock().unwrap() = Some(Arc::clone(&recording));
             // `execute_project` owns the returned `Box<dyn Backend>`; we
             // keep a second handle via the `Arc` above purely to read back
@@ -488,6 +501,15 @@ fn make_request(target: &str, start: &str, end: &str) -> ExecuteRequest {
     }
 }
 
+// `main.rs` lives in `tests/statement_parity/`, one directory below the
+// crate's shared `tests/common/mod.rs` (the same file
+// `trino_ci_wiring.rs`'s census folding logic looks for at that fixed
+// location regardless of which binary declares `mod common;`) — the
+// `#[path]` override is what makes a plain `mod common;` resolve there
+// instead of `tests/statement_parity/common.rs`.
+#[path = "../common/mod.rs"]
+mod common;
+
 mod column_scoped_merge;
 mod delta_region;
 mod fingerprint_backbuild;
@@ -497,3 +519,4 @@ mod repair_and_key_addressed;
 mod staged_candidate_conditional;
 mod structural_and_ledger;
 mod succession;
+mod trino;

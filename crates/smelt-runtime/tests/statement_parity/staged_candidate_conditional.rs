@@ -145,7 +145,7 @@ async fn suppressed_keyed_fold_statements_come_from_the_emitter() {
     let inner = DuckDbBackend::new(&db_path, "main")
         .await
         .expect("open duckdb");
-    let backend = RecordingBackend::new(inner);
+    let backend = RecordingBackend::new(Box::new(inner));
 
     backend
         .execute_sql(
@@ -254,7 +254,7 @@ async fn staged_candidate_conditional_statements_come_from_the_emitter() {
     let inner = DuckDbBackend::new(&db_path, "main")
         .await
         .expect("open duckdb");
-    let backend = RecordingBackend::new(inner);
+    let backend = RecordingBackend::new(Box::new(inner));
 
     backend
         .execute_sql(
@@ -395,7 +395,7 @@ async fn staged_candidate_conditional_recompute_deletes_departed_keys() {
     let inner = DuckDbBackend::new(&db_path, "main")
         .await
         .expect("open duckdb");
-    let backend = RecordingBackend::new(inner);
+    let backend = RecordingBackend::new(Box::new(inner));
 
     backend
         .execute_sql(
@@ -505,7 +505,7 @@ async fn staged_candidate_interrupted_run_leaves_no_temp_relation_behind() {
     let inner = DuckDbBackend::new(&db_path, "main")
         .await
         .expect("open duckdb");
-    let backend = RecordingBackend::new(inner);
+    let backend = RecordingBackend::new(Box::new(inner));
 
     backend
         .execute_sql("CREATE TABLE main.dim_users (user_id BIGINT, tier VARCHAR)")

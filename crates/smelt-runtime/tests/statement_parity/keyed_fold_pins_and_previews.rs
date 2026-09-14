@@ -661,7 +661,7 @@ async fn recurrence_bound_probe_and_checked_merge_come_from_the_emitters() {
     let inner = DuckDbBackend::new(&db_path, "main")
         .await
         .expect("open backend");
-    let backend = RecordingBackend::new(inner);
+    let backend = RecordingBackend::new(Box::new(inner));
 
     let classification = CumulativeClassification {
         unique_key: vec!["event_id".to_string()],
