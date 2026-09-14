@@ -63,7 +63,13 @@ async fn keyed_ledger_skip_reports_no_reporter_event() {
         ..Default::default()
     };
     let retry = no_retry_policy();
-    let steps = driving_steps("2024-01-01", "2024-01-02", &Granularity::Day).unwrap();
+    let steps = driving_steps(
+        "2024-01-01",
+        "2024-01-02",
+        &Granularity::Day,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
+    )
+    .unwrap();
     run_windowed_keyed_maintenance(
         &backend,
         "model.under.test",
@@ -72,6 +78,7 @@ async fn keyed_ledger_skip_reports_no_reporter_event() {
         &steps,
         &SumRule,
         None,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         &unconditional_suppression(),
         None,
         |step| {
@@ -100,7 +107,13 @@ async fn keyed_ledger_skip_reports_no_reporter_event() {
 async fn idempotent_ledger_on_duckdb_writes_the_record() {
     let backend = RecordingBackend::default();
     let retry = no_retry_policy();
-    let steps = driving_steps("2024-01-01", "2024-01-02", &Granularity::Day).unwrap();
+    let steps = driving_steps(
+        "2024-01-01",
+        "2024-01-02",
+        &Granularity::Day,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
+    )
+    .unwrap();
     run_windowed_keyed_maintenance(
         &backend,
         "model.under.test",
@@ -109,6 +122,7 @@ async fn idempotent_ledger_on_duckdb_writes_the_record() {
         &steps,
         &SumRule,
         None,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         &unconditional_suppression(),
         None,
         |step| {
@@ -140,7 +154,13 @@ async fn idempotent_ledger_on_duckdb_writes_the_record() {
 #[tokio::test]
 async fn additive_grade_routes_through_ledger_fold() {
     let backend = RecordingBackend::default();
-    let steps = driving_steps("2024-01-01", "2024-01-02", &Granularity::Day).unwrap();
+    let steps = driving_steps(
+        "2024-01-01",
+        "2024-01-02",
+        &Granularity::Day,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
+    )
+    .unwrap();
     run_windowed_keyed_maintenance(
         &backend,
         "model.under.test",
@@ -149,6 +169,7 @@ async fn additive_grade_routes_through_ledger_fold() {
         &steps,
         &SumRuleAdditive,
         None,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         &unconditional_suppression(),
         None,
         |step| {
@@ -195,7 +216,13 @@ async fn additive_grade_on_a_dialect_with_no_refusal_fails_loud() {
         dialect: SqlDialect::SparkSQL,
         ..Default::default()
     };
-    let steps = driving_steps("2024-01-01", "2024-01-02", &Granularity::Day).unwrap();
+    let steps = driving_steps(
+        "2024-01-01",
+        "2024-01-02",
+        &Granularity::Day,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
+    )
+    .unwrap();
     let err = run_windowed_keyed_maintenance(
         &backend,
         "model.under.test",
@@ -204,6 +231,7 @@ async fn additive_grade_on_a_dialect_with_no_refusal_fails_loud() {
         &steps,
         &SumRuleAdditive,
         None,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         &unconditional_suppression(),
         None,
         |step| {
@@ -246,7 +274,13 @@ async fn additive_grade_refuses_a_first_run_ddl_action_where_transactions_cannot
         !backend.capabilities().supports_transactional_ddl,
         "this test's premise is BigQuery's inability to hold DDL in a transaction"
     );
-    let steps = driving_steps("2024-01-01", "2024-01-02", &Granularity::Day).unwrap();
+    let steps = driving_steps(
+        "2024-01-01",
+        "2024-01-02",
+        &Granularity::Day,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
+    )
+    .unwrap();
     let err = run_windowed_keyed_maintenance(
         &backend,
         "model.under.test",
@@ -255,6 +289,7 @@ async fn additive_grade_refuses_a_first_run_ddl_action_where_transactions_cannot
         &steps,
         &SumRuleAdditive,
         None,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         &unconditional_suppression(),
         None,
         |step| {
@@ -300,7 +335,13 @@ async fn additive_grade_on_bigquery_folds_once_the_target_exists() {
         table_exists: Mutex::new(true),
         ..Default::default()
     };
-    let steps = driving_steps("2024-01-01", "2024-01-02", &Granularity::Day).unwrap();
+    let steps = driving_steps(
+        "2024-01-01",
+        "2024-01-02",
+        &Granularity::Day,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
+    )
+    .unwrap();
     run_windowed_keyed_maintenance(
         &backend,
         "model.under.test",
@@ -309,6 +350,7 @@ async fn additive_grade_on_bigquery_folds_once_the_target_exists() {
         &steps,
         &SumRuleAdditive,
         None,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         &unconditional_suppression(),
         None,
         |step| {

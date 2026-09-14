@@ -281,6 +281,7 @@ impl WindowedKeyedRule for CumulativeClassification {
     /// the single-owner emitter for this statement) needs to build the
     /// route-3 checked-merge probe — this impl supplies it and delegates
     /// the SQL text construction entirely to that emitter.
+    #[allow(clippy::too_many_arguments)]
     fn recurrence_probe_sql(
         &self,
         schema: &str,
@@ -288,6 +289,7 @@ impl WindowedKeyedRule for CumulativeClassification {
         delta_sql: &str,
         partition_column: &str,
         slice_lower: &str,
+        column_type: smelt_logical::maintenance::emit::PartitionColumnType,
         dialect: MaintenanceDialect,
     ) -> Option<String> {
         let schema_table = format!("{schema}.{table}");
@@ -298,6 +300,7 @@ impl WindowedKeyedRule for CumulativeClassification {
                 partition_column,
                 delta_sql,
                 slice_lower,
+                column_type,
                 dialect,
             )
             .sql,
@@ -351,12 +354,12 @@ pub async fn execute_cumulative_aggregate(
     time_range: &TimeRange,
     source_timeseries: &SourceTimeseriesMap,
     source_key_recurrence: &HashMap<String, smelt_core::sources::KeyRecurrence>,
+    source_infos: &[smelt_core::SourceInfo],
     verbose: bool,
     retry: &crate::execute::RetryPolicy<'_>,
     probe_policy: &crate::probes::ProbePolicy,
 ) -> Result<ExecutionResult> {
     let model_name = &model.address_segments.join(".");
-    let _ = (target, compiler); // reserved for future per-target compiler dispatch
 
     // 1. Classify the model SQL.
     let clean_sql = smelt_parser::strip_frontmatter(&model.content).to_string();
@@ -476,15 +479,46 @@ pub async fn execute_cumulative_aggregate(
     //    dropping the target table before re-running (full rebuild) or a
     //    manual cascade rebuild.
 
+    // The driving source's declared partition-column type (`docs/specs/
+    // incremental_shapes.md` §"The partition grain" rule 8a) — resolved once
+    // via the single owner (`crate::execute::sources::
+    // source_partition_column_type`, the same derivation `build_model_source_
+    // bounds` uses for a plain incremental model's own pushdown), and reused
+    // for both the driving-source pushdown filter's `SourceBound` and the
+    // per-step `driving_steps` window.
+    let driving_column_type = crate::execute::sources::source_partition_column_type(
+        source_infos,
+        &driving_source_name,
+        &driving_ts.partition_column,
+    );
+
+    // The model's own maintained partition column's declared/inferred type,
+    // resolved through the SAME projection `apply_type_casts` uses
+    // (`SqlCompiler::resolve_partition_column_type`) rather than a separate
+    // inference — only meaningful (and only resolved) when this model
+    // declares its own `timeseries:` block, i.e. when `locality_slice` above
+    // is `Some` and a `TargetSlicePredicate::Range` can actually be built.
+    let model_column_type = match model.metadata.as_ref().and_then(|m| m.timeseries.as_ref()) {
+        Some(own_ts) if locality_slice.is_some() => compiler
+            .get(target)
+            .resolve_partition_column_type(&clean_sql, &own_ts.partition_column),
+        _ => smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
+    };
+
     // 3. Step over the driving source's partitions in temporal order via the
     //    mode-agnostic windowed-keyed-maintenance driver.
-    let steps = driving_steps(&time_range.start, &time_range.end, &driving_ts.granularity)
-        .with_context(|| {
-            format!(
-                "Failed to generate partition values for {} over [{}, {})",
-                model_name, time_range.start, time_range.end
-            )
-        })?;
+    let steps = driving_steps(
+        &time_range.start,
+        &time_range.end,
+        &driving_ts.granularity,
+        driving_column_type,
+    )
+    .with_context(|| {
+        format!(
+            "Failed to generate partition values for {} over [{}, {})",
+            model_name, time_range.start, time_range.end
+        )
+    })?;
 
     if steps.is_empty() {
         anyhow::bail!(
@@ -541,6 +575,7 @@ pub async fn execute_cumulative_aggregate(
         &steps,
         &classification,
         locality_slice.as_ref(),
+        model_column_type,
         &suppression,
         write_pin,
         |step| {
@@ -554,7 +589,7 @@ pub async fn execute_cumulative_aggregate(
                     partition_col: driving_ts.partition_column.clone(),
                     before_secs: 0,
                     after_secs: 0,
-                    column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
+                    column_type: driving_column_type,
                 },
             );
             let pushed = inject_source_filters(&clean_sql, &bound_map, &step.range);
@@ -1172,6 +1207,7 @@ mod tests {
             partition_column: "event_date".to_string(),
             lower: "2026-01-02".to_string(),
             upper: "2026-01-02".to_string(),
+            column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         };
         let without_slice = build_cumulative_merge_sql(
             "main",
@@ -1364,6 +1400,7 @@ mod tests {
             partition_column: "event_date".to_string(),
             lower: "2026-01-02".to_string(),
             upper: "2026-01-02".to_string(),
+            column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         };
         let composed = build_cumulative_merge_sql(
             "main",

@@ -3,6 +3,7 @@
 //! and the departed-key anti-join `DELETE`.
 
 use super::types::*;
+use crate::PartitionAxis;
 
 /// Column-scoped re-derivation (bottom-left): the keyed `MERGE` production
 /// actually executes for `Technique::ColumnScopedMerge`
@@ -252,6 +253,13 @@ pub enum TargetSlicePredicate {
         partition_column: String,
         lower: String,
         upper: String,
+        /// The referenced partition column's own SQL type
+        /// (`docs/specs/incremental_shapes.md` §"The partition grain" rule
+        /// 8a) — `lower`/`upper` render through the single
+        /// [`partition_literal`] owner against this type, on the calendar
+        /// axis (the only axis a keyed-fold slice reaches today), rather
+        /// than the bare quoted-string spelling this predicate used before.
+        column_type: PartitionColumnType,
     },
     DeltaValues {
         partition_column: String,
@@ -310,11 +318,18 @@ pub fn emit_keyed_fold(
                 partition_column,
                 lower,
                 upper,
+                column_type,
             } => {
-                let safe_lower = lower.replace('\'', "''");
-                let safe_upper = upper.replace('\'', "''");
+                let lower_lit = partition_literal(PartitionAxis::Calendar, *column_type, lower)
+                    .unwrap_or_else(|e| {
+                        panic!("emit_keyed_fold: invalid target-slice lower bound: {e}")
+                    });
+                let upper_lit = partition_literal(PartitionAxis::Calendar, *column_type, upper)
+                    .unwrap_or_else(|e| {
+                        panic!("emit_keyed_fold: invalid target-slice upper bound: {e}")
+                    });
                 on.push_str(&format!(
-                    " AND target.{partition_column} BETWEEN '{safe_lower}' AND '{safe_upper}'"
+                    " AND target.{partition_column} BETWEEN {lower_lit} AND {upper_lit}"
                 ));
             }
             TargetSlicePredicate::DeltaValues {
@@ -401,11 +416,18 @@ pub fn emit_keyed_fold_suppressed(
                 partition_column,
                 lower,
                 upper,
+                column_type,
             } => {
-                let safe_lower = lower.replace('\'', "''");
-                let safe_upper = upper.replace('\'', "''");
+                let lower_lit = partition_literal(PartitionAxis::Calendar, *column_type, lower)
+                    .unwrap_or_else(|e| {
+                        panic!("emit_keyed_fold_suppressed: invalid target-slice lower bound: {e}")
+                    });
+                let upper_lit = partition_literal(PartitionAxis::Calendar, *column_type, upper)
+                    .unwrap_or_else(|e| {
+                        panic!("emit_keyed_fold_suppressed: invalid target-slice upper bound: {e}")
+                    });
                 on.push_str(&format!(
-                    " AND target.{partition_column} BETWEEN '{safe_lower}' AND '{safe_upper}'"
+                    " AND target.{partition_column} BETWEEN {lower_lit} AND {upper_lit}"
                 ));
             }
             TargetSlicePredicate::DeltaValues {
@@ -728,6 +750,7 @@ mod keyed_fold_suppressed_tests {
             partition_column: "event_date".to_string(),
             lower: "2026-01-01".to_string(),
             upper: "2026-01-02".to_string(),
+            column_type: PartitionColumnType::Undeclared,
         };
         let group = emit_keyed_fold_suppressed(
             "main.device_daily",
@@ -815,6 +838,7 @@ mod composed_slice_bounded_suppression_tests {
             partition_column: "first_seen_date".to_string(),
             lower: "2026-04-01".to_string(),
             upper: "2026-04-01".to_string(),
+            column_type: PartitionColumnType::Undeclared,
         };
         let group = emit_keyed_fold_suppressed(
             "main.events_deduped",

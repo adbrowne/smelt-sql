@@ -1106,7 +1106,12 @@ async fn recurrence_conforming() -> anyhow::Result<()> {
     kr_insert(&backend, 1, "2026-01-01").await?;
     kr_insert(&backend, 1, "2026-01-02").await?; // in-bound: 1 day, r=3 days
 
-    let steps = driving_steps("2026-01-01", "2026-01-03", &Granularity::Day)?;
+    let steps = driving_steps(
+        "2026-01-01",
+        "2026-01-03",
+        &Granularity::Day,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
+    )?;
     run_windowed_keyed_maintenance(
         &backend,
         "events_last_seen",
@@ -1115,6 +1120,7 @@ async fn recurrence_conforming() -> anyhow::Result<()> {
         &steps,
         &kr_classification(),
         Some(&kr_checked_slice()),
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         &kr_unconditional(),
         None,
         kr_compile_step,
@@ -1142,7 +1148,12 @@ async fn recurrence_violated() -> anyhow::Result<()> {
     let backend = kr_setup_backend(&db_path).await?;
 
     kr_insert(&backend, 1, "2026-01-01").await?;
-    let create_steps = driving_steps("2026-01-01", "2026-01-02", &Granularity::Day)?;
+    let create_steps = driving_steps(
+        "2026-01-01",
+        "2026-01-02",
+        &Granularity::Day,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
+    )?;
     run_windowed_keyed_maintenance(
         &backend,
         "events_last_seen",
@@ -1151,6 +1162,7 @@ async fn recurrence_violated() -> anyhow::Result<()> {
         &create_steps,
         &kr_classification(),
         Some(&kr_checked_slice()),
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         &kr_unconditional(),
         None,
         kr_compile_step,
@@ -1161,7 +1173,12 @@ async fn recurrence_violated() -> anyhow::Result<()> {
     .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     kr_insert(&backend, 1, "2026-01-06").await?; // 5 days after day 1, outside r=3
-    let violating_steps = driving_steps("2026-01-06", "2026-01-07", &Granularity::Day)?;
+    let violating_steps = driving_steps(
+        "2026-01-06",
+        "2026-01-07",
+        &Granularity::Day,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
+    )?;
     let err = run_windowed_keyed_maintenance(
         &backend,
         "events_last_seen",
@@ -1170,6 +1187,7 @@ async fn recurrence_violated() -> anyhow::Result<()> {
         &violating_steps,
         &kr_classification(),
         Some(&kr_checked_slice()),
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         &kr_unconditional(),
         None,
         kr_compile_step,
@@ -1198,7 +1216,12 @@ async fn recurrence_violated_probes_off() -> anyhow::Result<()> {
     let backend = kr_setup_backend(&db_path).await?;
 
     kr_insert(&backend, 1, "2026-01-01").await?;
-    let create_steps = driving_steps("2026-01-01", "2026-01-02", &Granularity::Day)?;
+    let create_steps = driving_steps(
+        "2026-01-01",
+        "2026-01-02",
+        &Granularity::Day,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
+    )?;
     run_windowed_keyed_maintenance(
         &backend,
         "events_last_seen",
@@ -1207,6 +1230,7 @@ async fn recurrence_violated_probes_off() -> anyhow::Result<()> {
         &create_steps,
         &kr_classification(),
         Some(&kr_checked_slice()),
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         &kr_unconditional(),
         None,
         kr_compile_step,
@@ -1217,7 +1241,12 @@ async fn recurrence_violated_probes_off() -> anyhow::Result<()> {
     .map_err(|e| anyhow::anyhow!("{e}"))?;
 
     kr_insert(&backend, 1, "2026-01-06").await?;
-    let violating_steps = driving_steps("2026-01-06", "2026-01-07", &Granularity::Day)?;
+    let violating_steps = driving_steps(
+        "2026-01-06",
+        "2026-01-07",
+        &Granularity::Day,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
+    )?;
     run_windowed_keyed_maintenance(
         &backend,
         "events_last_seen",
@@ -1226,6 +1255,7 @@ async fn recurrence_violated_probes_off() -> anyhow::Result<()> {
         &violating_steps,
         &kr_classification(),
         Some(&kr_checked_slice()),
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         &kr_unconditional(),
         None,
         kr_compile_step,

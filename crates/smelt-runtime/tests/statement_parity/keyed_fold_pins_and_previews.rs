@@ -134,6 +134,7 @@ async fn keyed_pin_on_a_merge_less_backend_refuses_before_any_write() {
         "2024-01-01",
         "2024-01-02",
         &smelt_core::config::Granularity::Day,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
     )
     .expect("steps");
     let suppression = WriteSuppression::Unconditional {
@@ -149,6 +150,7 @@ async fn keyed_pin_on_a_merge_less_backend_refuses_before_any_write() {
         &steps,
         &classification,
         None,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         &suppression,
         Some(pin),
         |step| {
@@ -565,16 +567,21 @@ async fn keyed_fold_slice_predicated_merge_statements_come_from_the_emitter() {
         "max_amount".to_string(),
         "GREATEST(target.max_amount, delta.max_amount)".to_string(),
     )];
+    // The model's own `event_date` output column is DATE-typed, so the
+    // slice bound renders through the single `partition_literal` owner as
+    // `DATE '…'` (`docs/outcomes/20260913-trino-incremental/
+    // phases/03f-plan.md`, gap 4), not a bare quoted string.
     let slice = TargetSlicePredicate::Range {
         partition_column: "event_date".to_string(),
         lower: "2024-01-02".to_string(),
         upper: "2024-01-02".to_string(),
+        column_type: smelt_logical::maintenance::emit::PartitionColumnType::Date,
     };
 
     let prefix = "MERGE INTO main.device_daily AS target USING (";
     let suffix = ") AS delta ON target.device_id = delta.device_id AND \
                   target.event_date = delta.event_date AND \
-                  target.event_date BETWEEN '2024-01-02' AND '2024-01-02' \
+                  target.event_date BETWEEN DATE '2024-01-02' AND DATE '2024-01-02' \
                   WHEN MATCHED AND (target.max_amount IS DISTINCT FROM (GREATEST(target.\
                   max_amount, delta.max_amount))) THEN UPDATE SET \
                   max_amount = GREATEST(target.max_amount, delta.max_amount) \
@@ -700,6 +707,7 @@ async fn recurrence_bound_probe_and_checked_merge_come_from_the_emitters() {
         "2026-02-01",
         "2026-02-02",
         &smelt_core::config::Granularity::Day,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
     )
     .expect("steps");
     run_windowed_keyed_maintenance(
@@ -710,6 +718,7 @@ async fn recurrence_bound_probe_and_checked_merge_come_from_the_emitters() {
         &create_steps,
         &classification,
         Some(&slice),
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         &smelt_logical::maintenance::choice::WriteSuppression::Unconditional {
             why: "test asserts the unconditional checked-merge shape".to_string(),
         },
@@ -734,6 +743,7 @@ async fn recurrence_bound_probe_and_checked_merge_come_from_the_emitters() {
         "2026-02-02",
         "2026-02-03",
         &smelt_core::config::Granularity::Day,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
     )
     .expect("steps");
     run_windowed_keyed_maintenance(
@@ -744,6 +754,7 @@ async fn recurrence_bound_probe_and_checked_merge_come_from_the_emitters() {
         &steps,
         &classification,
         Some(&slice),
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         &smelt_logical::maintenance::choice::WriteSuppression::Unconditional {
             why: "test asserts the unconditional checked-merge shape".to_string(),
         },
@@ -771,6 +782,7 @@ async fn recurrence_bound_probe_and_checked_merge_come_from_the_emitters() {
         "last_seen_date",
         delta_select,
         "2026-01-30",
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         MaintenanceDialect::DuckDb,
     );
     assert_eq!(
@@ -790,6 +802,7 @@ async fn recurrence_bound_probe_and_checked_merge_come_from_the_emitters() {
         partition_column: "last_seen_date".to_string(),
         lower: "2026-01-30".to_string(),
         upper: "2026-02-02".to_string(),
+        column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
     };
     let expected_merge = emit_keyed_fold(
         "main.events_last_seen",

@@ -464,6 +464,7 @@ pub(crate) async fn drive_composed_route2_and_assert(
             &window.start.format("%Y-%m-%d").to_string(),
             &window.end.format("%Y-%m-%d").to_string(),
             &smelt_core::config::Granularity::Day,
+            smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         )?;
         run_windowed_keyed_maintenance(
             backend,
@@ -473,6 +474,7 @@ pub(crate) async fn drive_composed_route2_and_assert(
             &steps,
             &classification,
             slice,
+            smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
             &composed_route2_suppression(),
             None,
             compile_step,
@@ -513,6 +515,7 @@ pub(crate) async fn drive_composed_derived_and_assert(
             &window.start.format("%Y-%m-%d").to_string(),
             &window.end.format("%Y-%m-%d").to_string(),
             &smelt_core::config::Granularity::Day,
+            smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         )?;
         run_windowed_keyed_maintenance(
             backend,
@@ -522,6 +525,7 @@ pub(crate) async fn drive_composed_derived_and_assert(
             &steps,
             &classification,
             slice,
+            smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
             &composed_derived_suppression(),
             None,
             compile_step,
@@ -560,6 +564,7 @@ pub(crate) async fn drive_composed_route3_and_assert(
             &run_date_str,
             &next_day_str,
             &smelt_core::config::Granularity::Day,
+            smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         )?;
         run_windowed_keyed_maintenance(
             backend,
@@ -569,6 +574,7 @@ pub(crate) async fn drive_composed_route3_and_assert(
             &steps,
             &classification,
             Some(&slice),
+            smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
             &composed_route3_suppression(),
             None,
             compile_step,

@@ -234,7 +234,13 @@ fn repair_keys_literal_select_empty_keys_is_well_typed_per_dialect() {
 
 #[test]
 fn driving_steps_day_granularity_in_temporal_order() {
-    let steps = driving_steps("2024-01-01", "2024-01-04", &Granularity::Day).unwrap();
+    let steps = driving_steps(
+        "2024-01-01",
+        "2024-01-04",
+        &Granularity::Day,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
+    )
+    .unwrap();
     let values: Vec<&str> = steps.iter().map(|s| s.partition_value.as_str()).collect();
     assert_eq!(values, vec!["2024-01-01", "2024-01-02", "2024-01-03"]);
     assert_eq!(steps[0].range.start, "2024-01-01");
@@ -243,7 +249,13 @@ fn driving_steps_day_granularity_in_temporal_order() {
 
 #[test]
 fn driving_steps_week_granularity() {
-    let steps = driving_steps("2024-01-01", "2024-01-15", &Granularity::Week).unwrap();
+    let steps = driving_steps(
+        "2024-01-01",
+        "2024-01-15",
+        &Granularity::Week,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
+    )
+    .unwrap();
     let values: Vec<&str> = steps.iter().map(|s| s.partition_value.as_str()).collect();
     assert_eq!(values, vec!["2024-01-01", "2024-01-08"]);
     assert_eq!(steps[0].range.end, "2024-01-08");
@@ -251,13 +263,25 @@ fn driving_steps_week_granularity() {
 
 #[test]
 fn driving_steps_rejects_unsupported_granularity() {
-    let err = driving_steps("2024-01-01", "2024-02-01", &Granularity::Month).unwrap_err();
+    let err = driving_steps(
+        "2024-01-01",
+        "2024-02-01",
+        &Granularity::Month,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
+    )
+    .unwrap_err();
     assert!(err.to_string().contains("day and week"));
 }
 
 #[test]
 fn driving_steps_rejects_empty_window() {
-    assert!(driving_steps("2024-01-05", "2024-01-01", &Granularity::Day).is_err());
+    assert!(driving_steps(
+        "2024-01-05",
+        "2024-01-01",
+        &Granularity::Day,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared
+    )
+    .is_err());
 }
 
 /// The plain unconditional matched arm — the pre-Phase-C6 default for
@@ -461,7 +485,13 @@ impl WindowedKeyedRule for SumRule {
 #[tokio::test]
 async fn refuses_before_any_backend_call() {
     let backend = RecordingBackend::default();
-    let steps = driving_steps("2024-01-01", "2024-01-03", &Granularity::Day).unwrap();
+    let steps = driving_steps(
+        "2024-01-01",
+        "2024-01-03",
+        &Granularity::Day,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
+    )
+    .unwrap();
     let result = run_windowed_keyed_maintenance(
         &backend,
         "model.under.test",
@@ -470,6 +500,7 @@ async fn refuses_before_any_backend_call() {
         &steps,
         &AlwaysRefuses,
         None,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         &unconditional_suppression(),
         None,
         |step| {
@@ -501,7 +532,13 @@ async fn refuses_before_any_backend_call() {
 #[tokio::test]
 async fn staged_candidate_pin_over_an_unconditional_cell_refuses() {
     let backend = RecordingBackend::default();
-    let steps = driving_steps("2024-01-01", "2024-01-02", &Granularity::Day).unwrap();
+    let steps = driving_steps(
+        "2024-01-01",
+        "2024-01-02",
+        &Granularity::Day,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
+    )
+    .unwrap();
     let pin = smelt_logical::maintenance::lookup_write_pattern("staged_candidate").unwrap();
     let result = run_windowed_keyed_maintenance(
         &backend,
@@ -511,6 +548,7 @@ async fn staged_candidate_pin_over_an_unconditional_cell_refuses() {
         &steps,
         &SumRule,
         None,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         &unconditional_suppression(),
         Some(pin),
         |step| {
@@ -538,7 +576,13 @@ async fn staged_candidate_pin_over_an_unconditional_cell_refuses() {
 #[tokio::test]
 async fn sequences_create_then_merge_across_partitions_in_temporal_order() {
     let backend = RecordingBackend::default();
-    let steps = driving_steps("2024-01-01", "2024-01-04", &Granularity::Day).unwrap();
+    let steps = driving_steps(
+        "2024-01-01",
+        "2024-01-04",
+        &Granularity::Day,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
+    )
+    .unwrap();
     run_windowed_keyed_maintenance(
         &backend,
         "model.under.test",
@@ -547,6 +591,7 @@ async fn sequences_create_then_merge_across_partitions_in_temporal_order() {
         &steps,
         &SumRule,
         None,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         &unconditional_suppression(),
         None,
         |step| {
@@ -632,7 +677,13 @@ async fn route2_locality_threads_delta_values_slice_over_the_steps_own_delta() {
     // Three day-steps: the first creates the table (no `merge_sql` call
     // at all — the create branch owns that step); the remaining two
     // exercise `merge_sql` and are the ones this test inspects.
-    let steps = driving_steps("2024-01-01", "2024-01-04", &Granularity::Day).unwrap();
+    let steps = driving_steps(
+        "2024-01-01",
+        "2024-01-04",
+        &Granularity::Day,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
+    )
+    .unwrap();
     let rule = CapturingRule {
         captured: Mutex::new(Vec::new()),
     };
@@ -647,6 +698,7 @@ async fn route2_locality_threads_delta_values_slice_over_the_steps_own_delta() {
         &steps,
         &rule,
         Some(&locality),
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         &unconditional_suppression(),
         None,
         |step| {

@@ -215,7 +215,13 @@ async fn recurrence_probe_under_off_cadence_runs_without_dispatch() {
     let backend = setup_backend(&db_path).await;
 
     insert_event(&backend, 1, "2026-01-01").await;
-    let create_steps = driving_steps("2026-01-01", "2026-01-02", &Granularity::Day).expect("steps");
+    let create_steps = driving_steps(
+        "2026-01-01",
+        "2026-01-02",
+        &Granularity::Day,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
+    )
+    .expect("steps");
     run_windowed_keyed_maintenance(
         &backend,
         "events_last_seen",
@@ -224,6 +230,7 @@ async fn recurrence_probe_under_off_cadence_runs_without_dispatch() {
         &create_steps,
         &classification(),
         Some(&checked_slice()),
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         &unconditional(),
         None,
         compile_step,
@@ -236,8 +243,13 @@ async fn recurrence_probe_under_off_cadence_runs_without_dispatch() {
     // Day 6 redelivery — 5 days after day 1, further apart than r=3 days:
     // a genuine violation under `per_run`, but `off` trusts it.
     insert_event(&backend, 1, "2026-01-06").await;
-    let violating_steps =
-        driving_steps("2026-01-06", "2026-01-07", &Granularity::Day).expect("steps");
+    let violating_steps = driving_steps(
+        "2026-01-06",
+        "2026-01-07",
+        &Granularity::Day,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
+    )
+    .expect("steps");
     run_windowed_keyed_maintenance(
         &backend,
         "events_last_seen",
@@ -246,6 +258,7 @@ async fn recurrence_probe_under_off_cadence_runs_without_dispatch() {
         &violating_steps,
         &classification(),
         Some(&checked_slice()),
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         &unconditional(),
         None,
         compile_step,
@@ -289,7 +302,13 @@ async fn unbuildable_probe_still_fails_closed_under_per_run() {
     let backend = setup_backend(&db_path).await;
 
     insert_event(&backend, 1, "2026-01-01").await;
-    let create_steps = driving_steps("2026-01-01", "2026-01-02", &Granularity::Day).expect("steps");
+    let create_steps = driving_steps(
+        "2026-01-01",
+        "2026-01-02",
+        &Granularity::Day,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
+    )
+    .expect("steps");
     run_windowed_keyed_maintenance(
         &backend,
         "events_last_seen",
@@ -298,6 +317,7 @@ async fn unbuildable_probe_still_fails_closed_under_per_run() {
         &create_steps,
         &RuleWithNoProbe,
         Some(&checked_slice()),
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         &unconditional(),
         None,
         compile_step,
@@ -308,7 +328,13 @@ async fn unbuildable_probe_still_fails_closed_under_per_run() {
     .expect("day 1 create has no target table yet, so no probe is consulted");
 
     insert_event(&backend, 1, "2026-01-06").await;
-    let merge_steps = driving_steps("2026-01-06", "2026-01-07", &Granularity::Day).expect("steps");
+    let merge_steps = driving_steps(
+        "2026-01-06",
+        "2026-01-07",
+        &Granularity::Day,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
+    )
+    .expect("steps");
     let err = run_windowed_keyed_maintenance(
         &backend,
         "events_last_seen",
@@ -317,6 +343,7 @@ async fn unbuildable_probe_still_fails_closed_under_per_run() {
         &merge_steps,
         &RuleWithNoProbe,
         Some(&checked_slice()),
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         &unconditional(),
         None,
         compile_step,

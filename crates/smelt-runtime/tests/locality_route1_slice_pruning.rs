@@ -520,13 +520,18 @@ async fn route1_slice_pruning_excludes_prior_window_and_matches_full_refresh() {
              (would mean the target scan was not pruned): {merge_sql}"
         );
     }
+    // The model's own `event_date` output column is DATE-typed (`CAST(event_date
+    // AS DATE)` in the compiled SQL above), so the slice bound now renders
+    // through the single `partition_literal` owner as a typed `DATE '…'`
+    // literal rather than a bare quoted string (`docs/outcomes/
+    // 20260913-trino-incremental/phases/03f-plan.md`, gap 4).
     assert!(
-        merges[0].contains("BETWEEN '2026-01-02' AND '2026-01-02'"),
+        merges[0].contains("BETWEEN DATE '2026-01-02' AND DATE '2026-01-02'"),
         "step 0 (2026-01-02) slice must be exactly its own date (zero margin): {}",
         merges[0]
     );
     assert!(
-        merges[1].contains("BETWEEN '2026-01-03' AND '2026-01-03'"),
+        merges[1].contains("BETWEEN DATE '2026-01-03' AND DATE '2026-01-03'"),
         "step 1 (2026-01-03) slice must be exactly its own date (zero margin): {}",
         merges[1]
     );

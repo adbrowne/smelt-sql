@@ -1961,6 +1961,7 @@ pub async fn execute_project(
                                 &time_range,
                                 source_timeseries,
                                 source_key_recurrence,
+                                source_infos,
                                 false,
                                 &retry_policy,
                                 &probe_policy_for_model(config, prior_runs, &plan.name),
@@ -2653,6 +2654,7 @@ pub async fn execute_project(
                             &s.format("%Y-%m-%d").to_string(),
                             &e.format("%Y-%m-%d").to_string(),
                             &cell.granularity,
+                            smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
                         )?;
                         let succession_probe_policy =
                             probe_policy_for_model(config, prior_runs, &plan.name);

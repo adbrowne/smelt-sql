@@ -27,7 +27,7 @@ mod project;
 mod retention_admission;
 mod retry;
 mod sink;
-mod sources;
+pub(crate) mod sources;
 mod targets;
 mod window;
 

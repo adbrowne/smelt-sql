@@ -213,6 +213,7 @@ async fn key_derived_partition_model_admits_and_runs() {
         "2026-01-01",
         "2026-01-03",
         &smelt_core::config::Granularity::Day,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
     )
     .expect("steps 1");
     run_windowed_keyed_maintenance(
@@ -223,6 +224,7 @@ async fn key_derived_partition_model_admits_and_runs() {
         &steps_1,
         &classification,
         None,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         &suppression,
         None,
         compile_step_1,
@@ -254,6 +256,7 @@ async fn key_derived_partition_model_admits_and_runs() {
         "2026-01-03",
         "2026-01-04",
         &smelt_core::config::Granularity::Day,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
     )
     .expect("steps 2");
     run_windowed_keyed_maintenance(
@@ -264,6 +267,7 @@ async fn key_derived_partition_model_admits_and_runs() {
         &steps_2,
         &classification,
         None,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         &suppression,
         None,
         compile_step_2,

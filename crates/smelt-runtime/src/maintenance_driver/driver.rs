@@ -29,6 +29,7 @@ pub fn driving_steps(
     start: &str,
     end: &str,
     granularity: &Granularity,
+    column_type: smelt_logical::maintenance::emit::PartitionColumnType,
 ) -> Result<Vec<MaintenanceStep>> {
     use chrono::{Duration as ChronoDuration, NaiveDate};
 
@@ -63,7 +64,7 @@ pub fn driving_steps(
                 start: current.format("%Y-%m-%d").to_string(),
                 end: next.format("%Y-%m-%d").to_string(),
                 axis: smelt_logical::PartitionAxis::Calendar,
-                column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
+                column_type,
             },
         });
         current = next;
@@ -198,6 +199,7 @@ pub trait WindowedKeyedRule: Send + Sync {
     /// exists only so rules with no keyed shape at all need not implement
     /// it; `keyed`'s own impl (`crate::cumulative::CumulativeClassification`)
     /// always returns `Some`.
+    #[allow(clippy::too_many_arguments)]
     fn recurrence_probe_sql(
         &self,
         schema: &str,
@@ -205,6 +207,7 @@ pub trait WindowedKeyedRule: Send + Sync {
         delta_sql: &str,
         partition_column: &str,
         slice_lower: &str,
+        column_type: smelt_logical::maintenance::emit::PartitionColumnType,
         dialect: MaintenanceDialect,
     ) -> Option<String> {
         let _ = (
@@ -213,6 +216,7 @@ pub trait WindowedKeyedRule: Send + Sync {
             delta_sql,
             partition_column,
             slice_lower,
+            column_type,
             dialect,
         );
         None
@@ -286,6 +290,7 @@ pub async fn run_windowed_keyed_maintenance(
     steps: &[MaintenanceStep],
     rule: &dyn WindowedKeyedRule,
     locality: Option<&LocalitySlice>,
+    column_type: smelt_logical::maintenance::emit::PartitionColumnType,
     suppression: &WriteSuppression,
     write_pin: Option<&'static WritePattern>,
     mut compile_step: impl FnMut(&MaintenanceStep) -> Result<String>,
@@ -387,6 +392,7 @@ pub async fn run_windowed_keyed_maintenance(
                 partition_column: partition_column.clone(),
                 lower: subtract_seconds_from_date(&step.partition_value, margin_before.0),
                 upper: add_seconds_to_date(&step.partition_value, margin_after.0),
+                column_type,
             },
             LocalitySlice::DeltaValues { partition_column } => TargetSlicePredicate::DeltaValues {
                 partition_column: partition_column.clone(),
@@ -439,6 +445,7 @@ pub async fn run_windowed_keyed_maintenance(
                     &delta_sql,
                     partition_column,
                     &slice_lower,
+                    column_type,
                     smelt_backend::maintenance_dialect(backend.dialect())?,
                 ) {
                     Some(probe_sql) => {

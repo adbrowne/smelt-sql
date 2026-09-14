@@ -6,6 +6,7 @@ use super::fingerprint::row_fingerprint_expr;
 use super::hash::hash_hex_expr;
 use super::partition_bucket::{partition_bucket_expr, PartitionBucket};
 use super::types::*;
+use crate::PartitionAxis;
 
 /// The out-of-slice match probe for a **checked** route-3 (recurrence-
 /// bounded, declared `r`) merge (`docs/specs/incremental_models.md`
@@ -29,13 +30,18 @@ use super::types::*;
 /// `TargetSlicePredicate::Range` uses (the step's own partition value,
 /// widened backward by the declared `r` plus margins) — this emitter does
 /// no date arithmetic of its own, matching every other emitter in this
-/// module.
+/// module. It renders through the single [`partition_literal`] owner
+/// against `column_type` — `partition_column`'s own declared/inferred SQL
+/// type (`docs/specs/incremental_shapes.md` §"The partition grain" rule
+/// 8a) — rather than a hand-rolled quoted string, so a `DATE`/`TIMESTAMP`
+/// column gets a typed literal exactly like the merge's own bound.
 pub fn emit_recurrence_bound_probe(
     schema_table: &str,
     key: &[String],
     partition_column: &str,
     delta_select: &str,
     slice_lower: &str,
+    column_type: PartitionColumnType,
     dialect: MaintenanceDialect,
 ) -> MaintenanceStatement {
     let cast_type = probe_dialect_string_type(dialect);
@@ -50,12 +56,13 @@ pub fn emit_recurrence_bound_probe(
         .map(|k| format!("CAST(target.{k} AS {cast_type})"))
         .collect::<Vec<_>>()
         .join(" || '|' || ");
-    let safe_lower = slice_lower.replace('\'', "''");
+    let slice_lower_lit = partition_literal(PartitionAxis::Calendar, column_type, slice_lower)
+        .unwrap_or_else(|e| panic!("emit_recurrence_bound_probe: invalid slice_lower bound: {e}"));
     let violations_select = format!(
         "SELECT DISTINCT {key_concat} AS violation_key \
          FROM {schema_table} AS target \
          JOIN (SELECT DISTINCT {key_list} FROM ({delta_select})) AS delta ON {join_cond} \
-         WHERE target.{partition_column} < '{safe_lower}'"
+         WHERE target.{partition_column} < {slice_lower_lit}"
     );
     let sql = wrap_violation_probe("__recurrence_violations", &violations_select, dialect);
     MaintenanceStatement::new(sql)

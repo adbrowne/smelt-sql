@@ -1709,8 +1709,10 @@ inferred *output* facts (§Future Extensions).
    be nonzero for an integer-axis model, that is a hard refusal (fail-closed), never silently
    zeroed or coerced 1:1 into "N units". A partition literal is rendered **in the axis's own
    domain and the referenced partition column's own type** everywhere a run emits one — the
-   output clamp, the per-source scan filter, and the maintenance region's `DELETE` predicate —
-   and everywhere `smelt explain` reports one: on the integer axis, bare (`7`); on the calendar
+   output clamp, the per-source scan filter, the maintenance region's `DELETE` predicate, the
+   windowed-keyed driver's per-step driving-source pushdown filter, and a keyed merge's
+   target-scan slice bound (and the recurrence probe that reuses that same bound) — and
+   everywhere `smelt explain` reports one: on the integer axis, bare (`7`); on the calendar
    axis, `DATE 'YYYY-MM-DD'` or `TIMESTAMP 'YYYY-MM-DD HH:MM:SS[.fff]'` when the referenced
    partition column is declared or inferred `DATE`/`TIMESTAMP`, and a quoted, escaped string
    (`'2026-01-01'`) when it is declared a string type or its type is not resolvable. The

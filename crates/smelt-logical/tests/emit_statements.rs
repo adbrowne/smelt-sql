@@ -153,6 +153,7 @@ fn keyed_fold_with_slice_carries_target_partition_predicate() {
         partition_column: "event_date".to_string(),
         lower: "2026-01-02".to_string(),
         upper: "2026-01-02".to_string(),
+        column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
     };
     let group = emit_keyed_fold(
         "main.device_daily",
@@ -185,6 +186,7 @@ fn keyed_fold_slice_escapes_quoted_literal_bounds() {
         partition_column: "name".to_string(),
         lower: "O'Brien".to_string(),
         upper: "Z".to_string(),
+        column_type: smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
     };
     let group = emit_keyed_fold(
         "main.t",
@@ -200,6 +202,66 @@ fn keyed_fold_slice_escapes_quoted_literal_bounds() {
             .contains("AND target.name BETWEEN 'O''Brien' AND 'Z'"),
         "expected escaped slice bound: {}",
         group.statements[0].sql
+    );
+}
+
+/// A `Date`-typed target partition column renders its slice bounds through
+/// the single [`partition_literal`](smelt_logical::maintenance::emit::partition_literal)
+/// owner as `DATE '…'`, not a bare quoted string — both `emit_keyed_fold`
+/// and `emit_keyed_fold_suppressed` (`docs/outcomes/20260913-trino-incremental/
+/// phases/03f-plan.md`, gap 4). `Text`/`Undeclared` stay byte-for-byte the
+/// pre-existing quoted-string spelling (already asserted above by
+/// `keyed_fold_with_slice_carries_target_partition_predicate` and
+/// `keyed_fold_slice_escapes_quoted_literal_bounds`).
+#[test]
+fn keyed_fold_target_slice_renders_typed_bounds() {
+    use smelt_logical::maintenance::emit::{
+        emit_keyed_fold_suppressed, PartitionColumnType, TargetSlicePredicate,
+    };
+
+    let slice = TargetSlicePredicate::Range {
+        partition_column: "event_date".to_string(),
+        lower: "2026-01-02".to_string(),
+        upper: "2026-01-09".to_string(),
+        column_type: PartitionColumnType::Date,
+    };
+    let group = emit_keyed_fold(
+        "main.device_daily",
+        &["device_id".to_string(), "event_date".to_string()],
+        &[(
+            "event_count".to_string(),
+            "target.event_count + delta.event_count".to_string(),
+        )],
+        "SELECT device_id, event_date, COUNT(*) AS event_count FROM events GROUP BY 1, 2",
+        Some(&slice),
+        MaintenanceDialect::DuckDb,
+    );
+    assert!(
+        group.statements[0]
+            .sql
+            .contains("AND target.event_date BETWEEN DATE '2026-01-02' AND DATE '2026-01-09'"),
+        "expected a typed DATE literal bound: {}",
+        group.statements[0].sql
+    );
+
+    let suppressed_group = emit_keyed_fold_suppressed(
+        "main.device_daily",
+        &["device_id".to_string(), "event_date".to_string()],
+        &[(
+            "event_count".to_string(),
+            "target.event_count + delta.event_count".to_string(),
+        )],
+        "SELECT device_id, event_date, COUNT(*) AS event_count FROM events GROUP BY 1, 2",
+        Some(&slice),
+        &["event_count".to_string()],
+        MaintenanceDialect::DuckDb,
+    );
+    assert!(
+        suppressed_group.statements[0]
+            .sql
+            .contains("AND target.event_date BETWEEN DATE '2026-01-02' AND DATE '2026-01-09'"),
+        "expected a typed DATE literal bound: {}",
+        suppressed_group.statements[0].sql
     );
 }
 
@@ -460,6 +522,7 @@ fn recurrence_bound_probe_matches_production_shape() {
         "last_seen_date",
         delta_select,
         "2026-01-07",
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         MaintenanceDialect::DuckDb,
     );
     assert_eq!(
@@ -486,6 +549,7 @@ fn recurrence_bound_probe_composite_key_concatenates_and_ands() {
         "last_seen_date",
         delta_select,
         "2026-01-01",
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         MaintenanceDialect::DuckDb,
     );
     assert!(
@@ -513,11 +577,35 @@ fn recurrence_bound_probe_escapes_quoted_slice_lower() {
         "last_seen_date",
         "SELECT event_id, event_date FROM events",
         "2026-01-0'7",
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         MaintenanceDialect::DuckDb,
     );
     assert!(
         stmt.sql.contains("< '2026-01-0''7'"),
         "expected escaped literal in: {}",
+        stmt.sql
+    );
+}
+
+/// A `Date`-typed partition column renders the probe's lower bound through
+/// the single [`partition_literal`] owner as `DATE '…'`, taking the same
+/// typed spelling `TargetSlicePredicate::Range` uses for the merge's own
+/// bound (`docs/outcomes/20260913-trino-incremental/phases/03f-plan.md`,
+/// gap 4).
+#[test]
+fn recurrence_bound_probe_renders_typed_lower_bound() {
+    let stmt = emit_recurrence_bound_probe(
+        "main.events_last_seen",
+        &["event_id".to_string()],
+        "last_seen_date",
+        "SELECT event_id, event_date FROM events",
+        "2026-01-07",
+        smelt_logical::maintenance::emit::PartitionColumnType::Date,
+        MaintenanceDialect::DuckDb,
+    );
+    assert!(
+        stmt.sql.contains("< DATE '2026-01-07'"),
+        "expected a typed DATE literal lower bound: {}",
         stmt.sql
     );
 }
@@ -538,6 +626,7 @@ fn recurrence_bound_probe_spark_dialect_uses_string_and_concat_ws() {
         "last_seen",
         "SELECT id, d FROM events",
         "2026-01-01",
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         MaintenanceDialect::Spark,
     );
     assert!(
@@ -1308,6 +1397,7 @@ fn every_probe_emitter_returns_violation_count_and_sample_keys() {
                 "d",
                 "SELECT id, d FROM events",
                 "2026-01-01",
+                smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
                 dialect,
             ),
             emit_functional_dependency_probe(
@@ -1365,6 +1455,7 @@ fn recurrence_bound_probe_sql_is_unchanged_by_the_shared_wrapper() {
         "last_seen_date",
         "SELECT event_id, event_date FROM events WHERE event_date = '2026-01-10'",
         "2026-01-07",
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         MaintenanceDialect::DuckDb,
     );
     assert_eq!(
@@ -1985,5 +2076,93 @@ fn duckdb_and_bigquery_hash_spellings_are_unchanged() {
         "SELECT COALESCE(CAST(user_id AS STRING), '\u{2}NULL\u{2}') AS delta_key, \
          TO_HEX(SHA256(sha256(CASE WHEN name IS NULL THEN 'N' ELSE CONCAT('V', CAST(name AS \
          STRING)) END))) AS delta_digest FROM raw.dim_users"
+    );
+}
+
+/// Structural gate (`docs/outcomes/20260913-trino-incremental/
+/// phases/03f-plan.md`, gap 4 / rule 8a): no maintenance emitter — in
+/// `smelt-logical`'s own `maintenance/emit/` or `smelt-runtime`'s
+/// `maintenance_driver/` — quotes a partition/slice bound by hand. Every
+/// such bound must be a [`partition_literal`] result; the single owner
+/// (`crates/smelt-logical/src/maintenance/emit/types.rs`) is excluded from
+/// the scan since its own `Text`/`Undeclared` arm is the one place this
+/// exact quoting is the correct implementation. Mirrors `diff_purity.rs`'s
+/// source-text-scan idiom: deliberately blunt, and narrow — pinned to the
+/// literal variable-name spellings the pre-fix code actually used
+/// (`lower`/`upper`/`safe_lower`/`safe_upper`/`slice_lower`), not a broad
+/// "any quote near a brace" pattern that would trip on unrelated
+/// string-escaping (fingerprint/key literals) elsewhere in these modules.
+#[test]
+fn no_maintenance_emitter_quotes_a_partition_value_by_hand() {
+    use std::fs;
+    use std::path::{Path, PathBuf};
+
+    fn repo_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crates/smelt-logical has a parent dir")
+            .parent()
+            .expect("crates/ has a parent dir")
+            .to_path_buf()
+    }
+
+    fn rs_files_recursive(dir: &Path, out: &mut Vec<PathBuf>) {
+        let entries = fs::read_dir(dir).unwrap_or_else(|e| {
+            panic!(
+                "no_maintenance_emitter_quotes_a_partition_value_by_hand gate could not read {}: \
+                 {e}",
+                dir.display()
+            )
+        });
+        for entry in entries {
+            let path = entry
+                .unwrap_or_else(|e| panic!("gate could not read a dir entry: {e}"))
+                .path();
+            if path.is_dir() {
+                rs_files_recursive(&path, out);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                out.push(path);
+            }
+        }
+    }
+
+    const FORBIDDEN_TOKENS: &[&str] = &[
+        "'{lower}'",
+        "'{upper}'",
+        "'{safe_lower}'",
+        "'{safe_upper}'",
+        "'{slice_lower}'",
+    ];
+
+    let root = repo_root();
+    let owner = root.join("crates/smelt-logical/src/maintenance/emit/types.rs");
+    let mut files = Vec::new();
+    rs_files_recursive(
+        &root.join("crates/smelt-logical/src/maintenance/emit"),
+        &mut files,
+    );
+    rs_files_recursive(
+        &root.join("crates/smelt-runtime/src/maintenance_driver"),
+        &mut files,
+    );
+    files.retain(|p| p != &owner);
+    assert!(!files.is_empty(), "gate found no .rs files to scan");
+
+    let mut violations = Vec::new();
+    for path in &files {
+        let text = fs::read_to_string(path)
+            .unwrap_or_else(|e| panic!("gate could not read {}: {e}", path.display()));
+        for token in FORBIDDEN_TOKENS {
+            if text.contains(token) {
+                violations.push(format!("{} in {}", token, path.display()));
+            }
+        }
+    }
+
+    assert!(
+        violations.is_empty(),
+        "a partition/slice bound must render through partition_literal, never a hand-quoted \
+         literal (docs/specs/incremental_shapes.md §\"The partition grain\" rule 8a) — found \
+         forbidden token(s) {violations:?}",
     );
 }

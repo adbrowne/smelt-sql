@@ -20,7 +20,7 @@ crates/smelt-cli/tests/github_activity_bq_oracle.rs 1002
 crates/smelt-cli/tests/github_activity_dual_target.rs 1358
 crates/smelt-cli/tests/github_activity_oracle.rs 1069
 crates/smelt-cli/tests/incremental/schema_evolution.rs 1743
-crates/smelt-cli/tests/maintenance_conformance/fact_violations.rs 1406
+crates/smelt-cli/tests/maintenance_conformance/fact_violations.rs 1436
 crates/smelt-cli/tests/resume.rs 1066
 crates/smelt-cli/tests/since_upstream.rs 1274
 crates/smelt-core/src/config.rs 4777
@@ -74,7 +74,7 @@ crates/smelt-logical/src/rules/rule_diagnostics.rs 1587
 crates/smelt-logical/tests/backbuild_conformance.rs 3294
 crates/smelt-logical/tests/backbuild_options.rs 2249
 crates/smelt-logical/tests/backbuild_property.rs 1063
-crates/smelt-logical/tests/emit_statements.rs 1989
+crates/smelt-logical/tests/emit_statements.rs 2168
 crates/smelt-logical/tests/keyed_families.rs 1309
 crates/smelt-logical/tests/maintenance_grouping.rs 1072
 crates/smelt-lsp/src/backend/hover_impl.rs 1072
@@ -99,15 +99,15 @@ crates/smelt-parser/src/parser/smelt_ext.rs 1798
 crates/smelt-parser/src/parser/tests.rs 10461
 crates/smelt-parser/src/parser/types.rs 1086
 crates/smelt-runtime/src/compile.rs 4317
-crates/smelt-runtime/src/cumulative.rs 2184
-crates/smelt-runtime/src/execute/project/mod.rs 5180
+crates/smelt-runtime/src/cumulative.rs 2221
+crates/smelt-runtime/src/execute/project/mod.rs 5182
 crates/smelt-runtime/src/meta_eval.rs 2180
 crates/smelt-runtime/src/transformer.rs 1344
 crates/smelt-runtime/src/windowing.rs 1277
 crates/smelt-runtime/tests/contract_deferral_skip_e2e.rs 1061
 crates/smelt-runtime/tests/fingerprint_sidecar.rs 1717
 crates/smelt-runtime/tests/key_addressed_model_edge_lowering.rs 1201
-crates/smelt-runtime/tests/observed_delta/main.rs 1074
+crates/smelt-runtime/tests/observed_delta/main.rs 1078
 crates/smelt-runtime/tests/repair_lowering.rs 1884
 crates/smelt-runtime/tests/since_upstream_propagation.rs 2326
 crates/smelt-runtime/tests/technique_lowering/basic.rs 1122

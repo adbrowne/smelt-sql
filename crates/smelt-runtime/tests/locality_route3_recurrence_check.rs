@@ -189,7 +189,13 @@ async fn checked_route3_in_bound_redelivery_merges_cleanly() {
     // Day 2: event_id 1 redelivered — 1 day after day 1, well within r=3 days.
     insert_event(&backend, 1, "2026-01-02").await;
 
-    let steps = driving_steps("2026-01-01", "2026-01-03", &Granularity::Day).expect("steps");
+    let steps = driving_steps(
+        "2026-01-01",
+        "2026-01-03",
+        &Granularity::Day,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
+    )
+    .expect("steps");
     let classification = classification();
     let slice = checked_slice();
     run_windowed_keyed_maintenance(
@@ -200,6 +206,7 @@ async fn checked_route3_in_bound_redelivery_merges_cleanly() {
         &steps,
         &classification,
         Some(&slice),
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         &unconditional(),
         None,
         compile_step,
@@ -229,7 +236,13 @@ async fn checked_route3_out_of_bound_redelivery_rolls_back_with_violation() {
 
     // Day 1: event_id 1 first seen — creates the target table.
     insert_event(&backend, 1, "2026-01-01").await;
-    let create_steps = driving_steps("2026-01-01", "2026-01-02", &Granularity::Day).expect("steps");
+    let create_steps = driving_steps(
+        "2026-01-01",
+        "2026-01-02",
+        &Granularity::Day,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
+    )
+    .expect("steps");
     run_windowed_keyed_maintenance(
         &backend,
         "events_last_seen",
@@ -238,6 +251,7 @@ async fn checked_route3_out_of_bound_redelivery_rolls_back_with_violation() {
         &create_steps,
         &classification(),
         Some(&checked_slice()),
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         &unconditional(),
         None,
         compile_step,
@@ -256,8 +270,13 @@ async fn checked_route3_out_of_bound_redelivery_rolls_back_with_violation() {
     // for this step is 2026-01-06 - 3 days = 2026-01-03; the stored row
     // (2026-01-01) lies before it — a violation.
     insert_event(&backend, 1, "2026-01-06").await;
-    let violating_steps =
-        driving_steps("2026-01-06", "2026-01-07", &Granularity::Day).expect("steps");
+    let violating_steps = driving_steps(
+        "2026-01-06",
+        "2026-01-07",
+        &Granularity::Day,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
+    )
+    .expect("steps");
     let err = run_windowed_keyed_maintenance(
         &backend,
         "events_last_seen",
@@ -266,6 +285,7 @@ async fn checked_route3_out_of_bound_redelivery_rolls_back_with_violation() {
         &violating_steps,
         &classification(),
         Some(&checked_slice()),
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         &unconditional(),
         None,
         compile_step,
@@ -438,7 +458,13 @@ async fn derived_route3_bound_never_emits_the_check() {
         )
         .await
         .expect("insert day 1");
-    let create_steps = driving_steps("2026-01-01", "2026-01-02", &Granularity::Day).expect("steps");
+    let create_steps = driving_steps(
+        "2026-01-01",
+        "2026-01-02",
+        &Granularity::Day,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
+    )
+    .expect("steps");
     run_windowed_keyed_maintenance(
         &backend,
         "events_last_seen",
@@ -447,6 +473,7 @@ async fn derived_route3_bound_never_emits_the_check() {
         &create_steps,
         &classification(),
         Some(&derived_slice()),
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         &unconditional(),
         None,
         compile_step,
@@ -463,7 +490,13 @@ async fn derived_route3_bound_never_emits_the_check() {
         )
         .await
         .expect("insert day 2");
-    let steps = driving_steps("2026-01-02", "2026-01-03", &Granularity::Day).expect("steps");
+    let steps = driving_steps(
+        "2026-01-02",
+        "2026-01-03",
+        &Granularity::Day,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
+    )
+    .expect("steps");
     run_windowed_keyed_maintenance(
         &backend,
         "events_last_seen",
@@ -472,6 +505,7 @@ async fn derived_route3_bound_never_emits_the_check() {
         &steps,
         &classification(),
         Some(&derived_slice()),
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         &unconditional(),
         None,
         compile_step,

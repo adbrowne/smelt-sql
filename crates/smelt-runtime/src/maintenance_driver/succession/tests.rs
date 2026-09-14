@@ -181,7 +181,13 @@ async fn run_steps(
 }
 
 fn day(s: &str, e: &str) -> Vec<crate::maintenance_driver::MaintenanceStep> {
-    driving_steps(s, e, &Granularity::Day).expect("driving_steps")
+    driving_steps(
+        s,
+        e,
+        &Granularity::Day,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
+    )
+    .expect("driving_steps")
 }
 
 /// The model's own compiled full-refresh oracle for [`recipe(true)`] —
