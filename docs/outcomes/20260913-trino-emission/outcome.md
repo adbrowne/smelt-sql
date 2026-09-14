@@ -131,7 +131,7 @@ including its null-safe join spelling.
 | 6 | The value direction — the leg that catches a spelling that survives but changes meaning — plus the two-sided Trino `ledger.rs` rows and the `.claude/dialect-gaps-baseline.txt` Trino metric with its tracking issue; phase 2's coverage census reaches zero here and the file is deleted, not grandfathered | done |
 | 7 | `Restructure`/`Rewrite` on a fourth dialect: position-opposite lowering planned from the source CST, null-safe synthesised join in Trino's spelling, and the running-frame refusal — each asserted against live output | done |
 | 8 | Seams: `dialect_seam` Trino refusal coverage (incl. inside function bodies), `emission_ownership` still green with no printer Trino branch, `projection_dialect_invariance` widened to four dialects byte-identically | done |
-| 9 | The type-oracle question: land the Trino leg with its divergence registry and `Unknown` census, or record an explicit deferral decision with a tracking issue — never silence | pending |
+| 9 | The type-oracle question: land the Trino leg with its divergence registry and `Unknown` census, or record an explicit deferral decision with a tracking issue — never silence | planned |
 | 10 | Close: regenerate `dialect-coverage.md` with the Trino column, doc-sync gate green, `verify-phase.sh` green, §Known Divergences rewritten to drop T1's implicit-`Native` divergence now that the gate closes it | pending |
 
 ## Decision log
@@ -361,5 +361,25 @@ including its null-safe join spelling.
   this offline seam; no new registry verdict was needed. `window_to_cte`'s Trino SQL confirmed to
   carry no `__smelt_` restructure synthesis through the real compile path. See
   `phases/08-summary.md`.
+
+- **2026-09-14 — phase 9 planned; no phase-table reshape.** Phase 8's summary deferred nothing
+  and explicitly named phases 9 and 10 as needing no new input. The decision criterion 11 leaves
+  open is taken here rather than left to the implement step: **the Trino type-oracle leg is
+  landed, not deferred.** Reason: nothing is missing — `TrinoOracle` already implements
+  `TypeOracle` (phase 5's schema leg), `classify_oracle_error` already carries Trino's four
+  verified refusal prefixes (phase 5), and the Arrow map already exists; a deferral with a
+  tracking issue would be silence with paperwork, which the criterion explicitly refuses. Two
+  findings surfaced while reading the code phase 9 touches, both folded into its own task list
+  rather than becoming rows. First, `find_divergence` has no `"trino"` arm (`_ => None`), so a
+  Trino type mismatch is currently unregisterable — every such difference would fail, which is
+  safe but makes the registry half of criterion 11 impossible until the field and arm exist.
+  Second, and the real hole: `trino_type_to_arrow`'s "unrecognised Trino type signature" error is
+  built with `BackendError::execution_failed`, so it reaches the classifier wearing the
+  `Execution failed for 'trino':` prefix and is skipped as a *query refusal* — smelt's own
+  mapping gap silently counting as "the engine rejected this SQL", the exact
+  unverified-as-passing equivalence phases 5 and 6 designed out for the schema and value legs.
+  Phase 9 gives it a distinct, non-allow-listed message so it stays `Fatal`. As with phases 5–7
+  there is no offline fallback: an unreachable coordinator is `<<PHASE_BLOCKED>>`, never a
+  verdict stated without a probe.
 
 ## Blocked
