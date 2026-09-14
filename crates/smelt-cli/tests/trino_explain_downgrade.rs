@@ -208,6 +208,69 @@ fn dry_run_on_trino_names_the_gap() {
     );
 }
 
+/// Phase 6 test 8 (`docs/outcomes/20260913-trino-ledger/phases/06-plan.md`):
+/// `contract.deferral`'s refusal (`DeclaredContractRequiresState`) is a
+/// `smelt-db` diagnostic, not a `smelt-logical` maintenance-plan refusal —
+/// `smelt explain` builds the plan directly and never runs the diagnostic
+/// gate, so it stays silent on a `contract.deferral`-declaring model even
+/// on a `trino` target (compare `explain_on_a_trino_target_reports_
+/// instead_of_aborting` above, whose `--json` cells carry no refusal at
+/// all). `smelt rebuild --dry-run` DOES run the diagnostic-parity gate
+/// (`docs/specs/architecture.md` §"Diagnostic range encoding" and
+/// `execute/project/mod.rs`'s own "Diagnostic-parity gate (analysis ↔
+/// build) — runs for dry_run too" comment), proving the refusal is not
+/// diagnostics-only — it reaches the CLI boundary, non-zero exit, naming
+/// the declaration and the backend.
+#[test]
+fn explain_on_trino_reports_the_deferral_refusal() {
+    let tmp = tempfile::TempDir::new().expect("create tempdir");
+    std::fs::write(tmp.path().join("smelt.yml"), SMELT_YML).unwrap();
+    std::fs::create_dir_all(tmp.path().join("models/sources")).unwrap();
+    std::fs::write(
+        tmp.path().join("models/sources/payments.yml"),
+        PAYMENTS_SOURCE,
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("models/region_deferred.sql"),
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: partition\n\
+         timeseries:\n  partition_column: pay_date\n  event_time_column: pay_date\n  \
+         granularity: day\ncontract:\n  deferral: 1 day\n---\n\
+         SELECT user_id, pay_date, amount FROM smelt.sources.payments\n",
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_smelt"))
+        .arg("rebuild")
+        .arg("region_deferred")
+        .arg("--start")
+        .arg("2026-01-01")
+        .arg("--end")
+        .arg("2026-01-02")
+        .arg("--dry-run")
+        .arg("--project-dir")
+        .arg(tmp.path())
+        .output()
+        .expect("spawn smelt rebuild region_deferred --dry-run");
+
+    assert!(
+        !output.status.success(),
+        "a declared contract.deferral on a trino target (no reconciliation ledger) must refuse \
+         the build, not silently proceed: stdout={}\nstderr={}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("DeclaredContractRequiresState") && stderr.contains("contract.deferral"),
+        "the refusal must name its diagnostic code and the declaration: {stderr}"
+    );
+    assert!(
+        stderr.contains("trino"),
+        "the refusal must name the backend that cannot supply the ledger: {stderr}"
+    );
+}
+
 // =============================================================================
 // Phase 5 (`docs/outcomes/20260913-trino-ledger/outcome.md`) test 7: one
 // model per structure-bearing shape, staged into a single Trino-target

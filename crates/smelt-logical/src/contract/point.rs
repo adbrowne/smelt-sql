@@ -107,6 +107,31 @@ mod point_tests {
     use super::*;
     use crate::maintenance::availability::StateStructure;
 
+    /// `required_state_structure` takes only a `ContractPoint`, never a
+    /// dialect — the contract-lattice point single-ownership invariant
+    /// means Trino (or any dialect realising no correctness structure)
+    /// needs no fourth lattice point of its own; a point's state demand is
+    /// exhaustive over the three variants alone
+    /// (`docs/outcomes/20260913-trino-ledger`).
+    #[test]
+    fn required_state_structure_is_dialect_free() {
+        assert_eq!(
+            required_state_structure(&ContractPoint::Default),
+            None,
+            "the default point demands no state structure on any dialect"
+        );
+        assert_eq!(
+            required_state_structure(&ContractPoint::FrozenHorizon { h: 90 }),
+            None,
+            "frozen_horizon demands no state structure on any dialect"
+        );
+        assert_eq!(
+            required_state_structure(&ContractPoint::Deferral { d: 1 }),
+            Some(StateStructure::ReconciliationLedger),
+            "deferral demands the reconciliation ledger regardless of dialect"
+        );
+    }
+
     #[test]
     fn deferral_requires_the_reconciliation_ledger() {
         assert_eq!(

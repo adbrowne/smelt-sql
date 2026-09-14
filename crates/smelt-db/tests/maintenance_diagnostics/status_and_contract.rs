@@ -335,6 +335,12 @@ GROUP BY device_id
 "#;
 
 fn smelt_yml_single_target(target_type: &str) -> String {
+    let target_block = if target_type == "trino" {
+        "    type: trino\n    schema: main\n    host: localhost\n    catalog: iceberg\n    user: smelt\n"
+            .to_string()
+    } else {
+        format!("    type: {target_type}\n    database: target/dev.duckdb\n    schema: main\n")
+    };
     format!(
         r#"
 name: state_residency_fixture
@@ -345,10 +351,7 @@ paths:
 
 targets:
   dev:
-    type: {target_type}
-    database: target/dev.duckdb
-    schema: main
-
+{target_block}
 default_materialization: view
 "#
     )
@@ -599,5 +602,200 @@ GROUP BY order_date
             .iter()
             .all(|d| d.code != Some(DiagnosticCode::DeclaredContractRequiresState)),
         "DuckDB realises the reconciliation ledger; expected no refusal, got {diags:?}"
+    );
+}
+
+/// Trino realises none of the five correctness structures (`state.md`
+/// §"Which dialects realise which structure", `docs/outcomes/20260913-trino-ledger`).
+/// `contract.deferral`'s semantics are a statement about state — the
+/// reconciliation ledger's frontier — so it refuses on Trino exactly as it
+/// does on Spark.
+#[test]
+fn deferral_on_trino_refuses_declared_contract_requires_state() {
+    let model = r#"---
+materialization: table
+refresh: incremental
+grain: partition
+timeseries:
+  event_time_column: order_date
+  partition_column: order_date
+  granularity: day
+contract:
+  deferral: 1 day
+---
+SELECT order_date, SUM(amount) AS total
+FROM smelt.sources.orders
+GROUP BY order_date
+"#;
+    let diags = diagnostics_for(
+        &[
+            ("smelt.yml", &smelt_yml_single_target("trino")),
+            ("models/sources/orders.yml", CONTRACT_ORDERS_SOURCE),
+            ("models/order_totals.sql", model),
+        ],
+        "order_totals",
+    );
+    let refusals: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::DeclaredContractRequiresState))
+        .collect();
+    assert_eq!(
+        refusals.len(),
+        1,
+        "expected exactly one DeclaredContractRequiresState, got {diags:?}"
+    );
+    assert_eq!(
+        refusals[0].severity,
+        smelt_db::DiagnosticSeverity::Error,
+        "DeclaredContractRequiresState must be an Error"
+    );
+    assert!(
+        refusals[0].message.contains("contract.deferral"),
+        "message must name the declaration, got: {}",
+        refusals[0].message
+    );
+}
+
+/// Same refusal, declared via `contract.cells[].deferral` on Trino.
+#[test]
+fn cell_level_deferral_on_trino_refuses() {
+    let model = r#"---
+materialization: table
+refresh: incremental
+grain: partition
+timeseries:
+  event_time_column: order_date
+  partition_column: order_date
+  granularity: day
+contract:
+  cells:
+    - columns: [total]
+      on: orders
+      deferral: 1 day
+---
+SELECT order_date, SUM(amount) AS total
+FROM smelt.sources.orders
+GROUP BY order_date
+"#;
+    let diags = diagnostics_for(
+        &[
+            ("smelt.yml", &smelt_yml_single_target("trino")),
+            ("models/sources/orders.yml", CONTRACT_ORDERS_SOURCE),
+            ("models/order_totals.sql", model),
+        ],
+        "order_totals",
+    );
+    let refusals: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::DeclaredContractRequiresState))
+        .collect();
+    assert_eq!(
+        refusals.len(),
+        1,
+        "expected exactly one DeclaredContractRequiresState, got {diags:?}"
+    );
+    assert!(
+        refusals[0].message.contains("contract.cells"),
+        "message must name the cell-level declaration, got: {}",
+        refusals[0].message
+    );
+}
+
+/// `contract.frozen_horizon` is a statement about the model's own SQL (an
+/// unrevisited partition band), not about state — it stays admitted on
+/// Trino with no `DeclaredContractRequiresState`.
+#[test]
+fn frozen_horizon_on_trino_is_admitted() {
+    let source = r#"
+description: Orders, append-only, clocked on order_date.
+mutation_profile: append_only
+columns:
+  - { name: order_id, type: INTEGER, nullable: false }
+  - { name: order_date, type: TIMESTAMP, nullable: false }
+  - { name: amount, type: DOUBLE, nullable: false }
+"#;
+    let model = r#"---
+materialization: table
+refresh: incremental
+grain: partition
+timeseries:
+  event_time_column: order_date
+  partition_column: order_date
+  granularity: day
+contract:
+  frozen_horizon: '90 days'
+maintenance:
+  scan_bounds:
+    per_source:
+      orders:
+        allow_full_scan: true
+---
+SELECT
+    date_trunc('day', o.order_date) AS order_date,
+    SUM(o.amount) AS total
+FROM smelt.sources.orders o
+GROUP BY 1
+"#;
+    let diags = diagnostics_for(
+        &[
+            ("smelt.yml", &smelt_yml_single_target("trino")),
+            ("models/sources/orders.yml", source),
+            ("models/order_totals.sql", model),
+        ],
+        "order_totals",
+    );
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.code != Some(DiagnosticCode::DeclaredContractRequiresState)),
+        "frozen_horizon needs no state structure; expected no refusal, got {diags:?}"
+    );
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.severity != smelt_db::DiagnosticSeverity::Error),
+        "expected no Error at all, got {diags:?}"
+    );
+}
+
+const CONTRACT_CUSTOMERS_SOURCE: &str = r#"
+description: A mutable customer snapshot.
+mutation_profile: mutable_snapshot
+columns:
+  - { name: customer_id, type: INTEGER, nullable: false }
+  - { name: tier, type: VARCHAR, nullable: false }
+"#;
+
+/// `contract.retain_departed` is a statement about the model's own SQL (a
+/// tombstone-preserving keyed fold), not about state — it stays admitted on
+/// Trino with no `DeclaredContractRequiresState`.
+#[test]
+fn retain_departed_on_trino_is_admitted() {
+    let model = r#"---
+materialization: table
+refresh: incremental
+grain: key
+unique_key: [customer_id]
+contract:
+  retain_departed: true
+---
+SELECT
+    c.customer_id,
+    c.tier
+FROM smelt.sources.customers c
+"#;
+    let diags = diagnostics_for(
+        &[
+            ("smelt.yml", &smelt_yml_single_target("trino")),
+            ("models/sources/customers.yml", CONTRACT_CUSTOMERS_SOURCE),
+            ("models/dim_customers.sql", model),
+        ],
+        "dim_customers",
+    );
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.code != Some(DiagnosticCode::DeclaredContractRequiresState)),
+        "retain_departed needs no state structure; expected no refusal, got {diags:?}"
     );
 }

@@ -1158,7 +1158,13 @@ would otherwise depend on one of those structures takes the degradation contract
 recompute-family downgrade instead, carrying `MaintenanceStateDowngraded`; it is never refused.
 Schema evolution is a separate axis: Iceberg supports it directly, and its measured
 `SchemaOperation` mapping lands in `ddl_trino`
-(`docs/outcomes/20260913-trino-ledger/outcome.md`).
+(`docs/outcomes/20260913-trino-ledger/outcome.md`). The contract lattice degrades the same way:
+`contract.deferral` is a statement about state (the reconciliation ledger's frontier) and
+refuses with `DeclaredContractRequiresState` on Trino exactly as on Spark, while
+`contract.frozen_horizon` and `contract.retain_departed` are statements about the model's own
+SQL and stay admitted — `frozen_horizon`'s late-arrival verification probe is simply skipped
+with a run-time warning where Trino has no `MaintenanceDialect` to render it in
+(`docs/specs/state.md` §"Declarations stay fail-loud").
 
 ## Design
 

@@ -145,6 +145,50 @@ pub fn frozen_horizon_probes(
     probes
 }
 
+/// Resolve the `MaintenanceDialect` [`frozen_horizon_probes`] needs, but
+/// only when `metadata` actually declares `contract.frozen_horizon` —
+/// mirroring `crate::model_probes::any_declared_probe`'s gate, one
+/// declaration earlier. A caller must never resolve a `MaintenanceDialect`
+/// for a declaration the model never made: on a dialect with no
+/// maintenance-statement realisation (Trino today —
+/// `20260913-trino-incremental` owns adding one), that would hard-error
+/// every clocked model's every batch regardless of whether it uses the
+/// contract lattice at all.
+///
+/// Where the declaration IS present but the dialect cannot supply one, the
+/// declaration itself stays valid (`docs/specs/state.md` §"Declarations
+/// stay fail-loud") — only the live verification is unavailable, so this
+/// logs a `tracing::warn!` naming the model, the dialect and the skipped
+/// probe, and returns `None` (skip) rather than propagating
+/// `UnsupportedMaintenanceDialect`.
+pub fn resolve_frozen_horizon_dialect(
+    model_name: &str,
+    dialect: smelt_backend::SqlDialect,
+    metadata: Option<&ModelMetadata>,
+) -> Option<MaintenanceDialect> {
+    let declares_frozen_horizon = metadata
+        .and_then(|m| m.contract.as_ref())
+        .and_then(|c| c.frozen_horizon.as_ref())
+        .is_some();
+    if !declares_frozen_horizon {
+        return None;
+    }
+    match smelt_backend::maintenance_dialect(dialect) {
+        Ok(d) => Some(d),
+        Err(_) => {
+            tracing::warn!(
+                model = model_name,
+                dialect = dialect.name(),
+                probe = "contract.frozen_horizon",
+                "skipping declared contract.frozen_horizon verification probe: this dialect \
+                 has no maintenance-statement realisation — the declaration remains valid and \
+                 the run proceeds unverified"
+            );
+            None
+        }
+    }
+}
+
 /// One source's refreshed frozen-band baseline, ready for the caller to
 /// persist under `state_io_lock`.
 #[derive(Debug, Clone)]

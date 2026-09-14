@@ -3446,20 +3446,33 @@ pub async fn execute_project(
                     // full-refresh site above, scoped to this batch's own
                     // compiled (filtered) SQL
                     // (`docs/specs/model_properties.md` §"Probe obligation").
-                    let declared_probes = crate::model_probes::declared_model_probes(
-                        &plan.name,
-                        &format!(
-                            "{}.{} batch [{}, {})",
-                            schema,
-                            plan.model_file.db_name_owned(),
-                            batch.partition_start,
-                            batch.partition_end,
-                        ),
+                    // Only resolve a `MaintenanceDialect` when this model
+                    // actually declares a probe — mirrors the full-refresh
+                    // site's `any_declared_probe` gate
+                    // (`docs/outcomes/20260913-trino-ledger/phases/
+                    // 06-plan.md`): this batch-loop counterpart was missed
+                    // when that gate landed.
+                    let declared_probes = if crate::model_probes::any_declared_probe(
                         plan.model_file.metadata.as_deref(),
                         Some(&inc_plan.timeseries),
-                        &compiled.sql,
-                        smelt_backend::maintenance_dialect(backend.dialect())?,
-                    );
+                    ) {
+                        crate::model_probes::declared_model_probes(
+                            &plan.name,
+                            &format!(
+                                "{}.{} batch [{}, {})",
+                                schema,
+                                plan.model_file.db_name_owned(),
+                                batch.partition_start,
+                                batch.partition_end,
+                            ),
+                            plan.model_file.metadata.as_deref(),
+                            Some(&inc_plan.timeseries),
+                            &compiled.sql,
+                            smelt_backend::maintenance_dialect(backend.dialect())?,
+                        )
+                    } else {
+                        Vec::new()
+                    };
                     model_probe_records.extend(
                         crate::model_probes::dispatch_declared_model_probes(
                             backend,
@@ -3531,7 +3544,28 @@ pub async fn execute_project(
                     // subsequent run
                     // (`docs/outcomes/20260809-contract-lattice-v1/phases/
                     // 03-plan.md`).
-                    if let Some(end_date) = end_date {
+                    // The maintenance dialect is resolved only where a
+                    // declaration actually needs it
+                    // (`crate::contract_probes::resolve_frozen_horizon_dialect`)
+                    // — an undeclared model must never pay for a dialect
+                    // that does not exist (e.g. Trino,
+                    // `smelt_backend::maintenance_dialect` returns `Err` —
+                    // `docs/outcomes/20260913-trino-ledger/phases/06-plan.md`).
+                    // Where the declaration IS present but the target has no
+                    // maintenance dialect, the verification probe is skipped
+                    // with a run-time warning (`docs/specs/state.md`
+                    // §"Declarations stay fail-loud") rather than
+                    // propagating `UnsupportedMaintenanceDialect` — the
+                    // declaration itself stays valid; only its live
+                    // verification is unavailable.
+                    let frozen_horizon_dialect = end_date.and_then(|_| {
+                        crate::contract_probes::resolve_frozen_horizon_dialect(
+                            &plan.name,
+                            backend.dialect(),
+                            plan.model_file.metadata.as_deref(),
+                        )
+                    });
+                    if let (Some(end_date), Some(dialect)) = (end_date, frozen_horizon_dialect) {
                         let _io_guard = state_io_lock.lock().await;
                         let frozen_band_baselines = file_store
                             .load_frozen_band_baselines()
@@ -3551,7 +3585,7 @@ pub async fn execute_project(
                             end_date,
                             model_target,
                             schema,
-                            smelt_backend::maintenance_dialect(backend.dialect())?,
+                            dialect,
                         );
                         if !contract_probes.is_empty() {
                             let result =

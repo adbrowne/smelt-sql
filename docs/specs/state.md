@@ -444,6 +444,16 @@ cannot be measured without the frontier — declaring it where the frontier has 
 is `DeclaredContractRequiresState`, a validation error, because silently skipping the
 measurement would turn a declared guarantee into an unverified hope.
 
+The converse holds for every other contract point: a declaration the SQL upholds stays valid
+even where its *verification probe* has no emission on the target dialect — the run proceeds,
+and the skipped verification is reported as a run-time warning naming the model, the dialect,
+and the probe, following §"The degradation contract"'s precision-loss recording rule above.
+`contract.frozen_horizon`'s late-arrival probe is the instance: on a dialect with no
+`MaintenanceDialect` mapping, the probe cannot be dispatched, but the declaration itself is a
+statement about the model's own SQL (an unrevisited partition band), not about state, so it is
+never refused. `contract.deferral` remains the sole declaration whose semantics demand a
+refusal rather than a skipped verification.
+
 ## Design
 
 **Two classes, not a spectrum.** Every structure is either transaction-coupled to the data or

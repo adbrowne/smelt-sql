@@ -155,13 +155,31 @@ land near or above Delta's.
 | 3 | Schema-evolution DDL: `ddl_trino/` as a module directory with the measured `SchemaOperation` → Trino/Iceberg mapping table in its header, type spellings derived from what the server accepted, and T1's five schema-related capability cells confirmed or corrected back into the spec table | done |
 | 4 | Wire the absence: Trino claims no correctness structure, availability resolution downgrades every dependent cell to its recompute equivalent with `MaintenanceStateDowngraded`, derived once by the pure resolver with the ideal plan still materialised | done |
 | 5 | The two invariants as standing tests: no execution path on Trino reaches a builder for an unclaimed structure (claim ⇒ builder), and no absence produces a refusal where the contract specifies a downgrade (absence ⇒ downgrade) | done |
-| 6 | `contract.deferral` refuses on Trino with `DeclaredContractRequiresState`; `frozen_horizon` and `retain_departed` follow the existing grain and posture rules with no new lattice point | planned |
+| 6 | `contract.deferral` refuses on Trino with `DeclaredContractRequiresState`; `frozen_horizon` and `retain_departed` follow the existing grain and posture rules with no new lattice point | done |
 | 7 | The staged relation group without temp tables: scratch-schema relation with a derived non-colliding name, owned lifecycle, proved cleanup after an interruption between stage and apply — or a by-name refusal if T1 measured the flag `false` | pending |
 | 8 | Locking and versioning: two concurrent runs where exactly one proceeds, or a refusal naming the backend and the missing capability — never a lock that never locks | pending |
 | 9 | `.smelt/` is not correctness-bearing on Trino: delete-between-runs equality, and `state.mode: stateless` writing nothing while changing no maintained table's value | pending |
 | 10 | Surface and close: `smelt explain` rendering Trino's downgrades (text + `--json`), diagnostics catalogue and `examples/broken/` fixtures, `docs-site/` state page updated with what Trino costs and why, `verify-phase.sh` green with no baseline bumped | pending |
 
 ## Decision log
+
+- **2026-09-14 — phase 6 implementation: a second sibling gap found and fixed (same batch loop,
+  different declaration), and tests 6–7 retargeted to a directly-testable seam instead of a full
+  live run.** Making the RED test for the L3554 frozen-horizon gap pass surfaced a second,
+  structurally identical unconditional `maintenance_dialect(...)?` a few dozen lines earlier in
+  the SAME batch loop: the `declared_model_probes` call for `timeseries.assert_monotonic`/
+  `functional_dependencies`/`bounded_domain` (unrelated to the contract lattice, but hit by ANY
+  clocked model's batch write). The full-refresh counterpart of this exact call already gates on
+  `any_declared_probe`; the batch-loop counterpart had been missed the same way frozen_horizon's
+  had. Fixed both with the same lazy-resolution shape, since the test fixture genuinely hit it
+  (per the plan's own "fix any that a Trino run of the test fixtures actually hits" instruction).
+  Separately: attempting a full live `execute_project` run (as tests 6–7 were framed) revealed
+  that Trino has NO `MaintenanceDialect` mapping at all yet — ANY incremental batch write, not
+  just a frozen-horizon-declaring one, hard-errors downstream at the real DELETE+INSERT emission
+  site by design (`20260913-trino-incremental`'s subject). Retargeted tests 6–7 to a new extracted
+  seam, `contract_probes::resolve_frozen_horizon_dialect`, rather than a live run that cannot
+  complete on Trino today for reasons outside this phase's scope. See `phases/06-summary.md` for
+  the full account.
 
 - **2026-09-14 — phase 6 planning: no reshape; one runtime gap folded into the phase rather than
   deferred.** The phase table is unchanged. Three facts recorded while planning. (1) The
