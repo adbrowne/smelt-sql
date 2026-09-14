@@ -152,7 +152,7 @@ land near or above Delta's.
 |---|-------|--------|
 | 1 | Confirm the posture: `scripts/trino-probe-state.sh` runs the cross-table `START TRANSACTION` candidates (including a failing second statement) against the live tier and prints Trino's answers verbatim; escalate in the decision log if genuine cross-table atomicity is found, since that would change this outcome | done |
 | 2 | Spec delta: `state.md`'s realisability table gains a Trino column reading `no` five times with Spark's reason stated as permanent, `multi_backend.md` §"Incremental & schema evolution per backend" states it for the target, and the diagnostics the degradation needs are named | done |
-| 3 | Schema-evolution DDL: `ddl_trino/` as a module directory with the measured `SchemaOperation` → Trino/Iceberg mapping table in its header, type spellings derived from what the server accepted, and T1's five schema-related capability cells confirmed or corrected back into the spec table | pending |
+| 3 | Schema-evolution DDL: `ddl_trino/` as a module directory with the measured `SchemaOperation` → Trino/Iceberg mapping table in its header, type spellings derived from what the server accepted, and T1's five schema-related capability cells confirmed or corrected back into the spec table | planned |
 | 4 | Wire the absence: Trino claims no correctness structure, availability resolution downgrades every dependent cell to its recompute equivalent with `MaintenanceStateDowngraded`, derived once by the pure resolver with the ideal plan still materialised | pending |
 | 5 | The two invariants as standing tests: no execution path on Trino reaches a builder for an unclaimed structure (claim ⇒ builder), and no absence produces a refusal where the contract specifies a downgrade (absence ⇒ downgrade) | pending |
 | 6 | `contract.deferral` refuses on Trino with `DeclaredContractRequiresState`; `frozen_horizon` and `retain_departed` follow the existing grain and posture rules with no new lattice point | pending |
@@ -162,6 +162,22 @@ land near or above Delta's.
 | 10 | Surface and close: `smelt explain` rendering Trino's downgrades (text + `--json`), diagnostics catalogue and `examples/broken/` fixtures, `docs-site/` state page updated with what Trino costs and why, `verify-phase.sh` green with no baseline bumped | pending |
 
 ## Decision log
+
+- **2026-09-14 — phase 3 planning: no reshape; probe and generator stay one phase.** Considered
+  splitting phase 3 into a probe row and a generator row (the phase-1/phase-2 rhythm), and
+  rejected it: renumbering rows 4-10 would break the decision-log references to "phase 4", and
+  criterion 6 deliberately binds the measurement to the mapping table it produces — a probe whose
+  output nothing consumes for a phase is the "read from documentation" failure with an extra step.
+  Two facts recorded while planning. (1) T1 already measured the five schema-related capability
+  cells against a live coordinator (`crates/smelt-backend-trino/tests/capability_probes.rs`, each
+  with the server's words in `trino_iceberg()`), so criterion 6's second half is mostly a
+  *confirmation* at `SchemaOperation` granularity rather than a fresh measurement — the new probe
+  covers the forms those cells do not: add `NOT NULL` column, add with `default:`, `SET`/`DROP NOT
+  NULL`, drop struct field, backfill, and the type spellings. (2) `ddl_backend_for_dialect`
+  currently returns `UnsupportedDdlDialect` for `SqlDialect::Trino` with a doc comment naming Trino
+  as the live case; phase 3 inverts that and rewords the comment, keeping the `Result` signature so
+  callers are untouched. The live tier was down at planning time (`curl :18080/v1/info` → no
+  connection), so task 2 brings it up first and blocks rather than skipping green if it cannot.
 
 - **2026-09-14 — phase 2 result: spec text lands; one pre-existing gate needed the same tokens
   kept.** `state.md`'s realisability table gained the `Trino (Iceberg)` column (five `**no**`
