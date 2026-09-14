@@ -157,11 +157,26 @@ land near or above Delta's.
 | 5 | The two invariants as standing tests: no execution path on Trino reaches a builder for an unclaimed structure (claim ⇒ builder), and no absence produces a refusal where the contract specifies a downgrade (absence ⇒ downgrade) | done |
 | 6 | `contract.deferral` refuses on Trino with `DeclaredContractRequiresState`; `frozen_horizon` and `retain_departed` follow the existing grain and posture rules with no new lattice point | done |
 | 7 | The staged relation group without temp tables: scratch-schema relation with a derived non-colliding name, owned lifecycle, proved cleanup after an interruption between stage and apply — or a by-name refusal if T1 measured the flag `false` | done |
-| 8 | Locking and versioning: two concurrent runs where exactly one proceeds, or a refusal naming the backend and the missing capability — never a lock that never locks | pending |
+| 8 | Locking and versioning: two concurrent runs where exactly one proceeds, or a refusal naming the backend and the missing capability — never a lock that never locks | planned |
 | 9 | `.smelt/` is not correctness-bearing on Trino: delete-between-runs equality, and `state.mode: stateless` writing nothing while changing no maintained table's value | pending |
-| 10 | Surface and close: `smelt explain` rendering Trino's downgrades (text + `--json`), diagnostics catalogue and `examples/broken/` fixtures, `docs-site/` state page updated with what Trino costs and why, `verify-phase.sh` green with no baseline bumped | pending |
+| 10 | The keyless staged emitter's sentinel: `emit_staged_candidate_conditional_keyless`'s hardcoded `CREATE TEMP TABLE` either takes phase 7's residence/atomicity treatment, or a standing test proves no Trino execution path reaches it — a temp-table spelling on a backend with no temp tables is exactly the claim-without-builder failure criterion 3 excludes | pending |
+| 11 | Surface and close: `smelt explain` rendering Trino's downgrades (text + `--json`), diagnostics catalogue and `examples/broken/` fixtures, `docs-site/` state page updated with what Trino costs and why, `verify-phase.sh` green with no baseline bumped | pending |
 
 ## Decision log
+
+- **2026-09-14 — phase 8 planned; one row added, table renumbered.** Locking and versioning are
+  filesystem-resident and depend on no backend capability, so criterion 9 resolves to *realised*,
+  not *refused by name* — the phase's work is therefore demonstration on a Trino target plus
+  making the one genuine no-op (`state.mode: stateless`, where nothing is written under `.smelt/`
+  so there is nothing to serialize) a **stated** behaviour in `run_state.md` rather than a silent
+  one, which is precisely what "never a lock that never locks" asks for. No new `DiagnosticCode`:
+  the contended-lock failure is the existing `"state locked by PID <n>"` error, not a diagnostic.
+- **2026-09-14 — reshape: new phase 10 (keyless staged emitter), old phase 10 → 11.** Phase 7's
+  summary recorded that `emit_staged_candidate_conditional_keyless` still hardcodes
+  `CREATE TEMP TABLE` for its sentinel relation, excluded from that phase's four-emitter scope on
+  the grounds that no production Trino caller reaches it today. "No caller today" is an
+  unasserted claim about an execution path on a backend with no temp tables, which is the shape
+  criteria 3 and 8 exist to exclude — so it gets a row rather than leaving the outcome.
 
 - **2026-09-14 — phase 7 done: `StagedRelation` (residence, atomicity, derived name) lands as
   capability data; four emitters re-keyed; live-proved on Trino.** `BackendCapabilities` gains
