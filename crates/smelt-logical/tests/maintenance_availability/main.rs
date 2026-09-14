@@ -15,6 +15,7 @@ use smelt_types::SqlFunction;
 mod realisation;
 mod resolution;
 mod succession;
+mod trino_invariants;
 
 fn set(items: &[&str]) -> BTreeSet<String> {
     items.iter().map(|s| s.to_string()).collect()

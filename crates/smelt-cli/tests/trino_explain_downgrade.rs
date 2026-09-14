@@ -12,6 +12,19 @@
 
 use std::process::Command;
 
+/// Phase 5 test 7 (`docs/outcomes/20260913-trino-ledger/outcome.md`): the
+/// per-model `merge_key:` override `cs_merged`'s column-scoped-merge cell
+/// needs (`smelt_maintenance_testkit::recipe::ValueEnrichedRecipe::model_file`'s
+/// own doc comment: the column-scoped `MERGE`'s `ON`-predicate key is not
+/// declarable in `.sql` frontmatter under `grain: partition`).
+const FOUR_SHAPES_SMELT_YML: &str = "name: trino_four_shapes_fixture\n\
+    version: 1\n\
+    paths:\n  - models\n\
+    targets:\n  dev:\n    type: trino\n    host: trino.internal\n    port: 8080\n    \
+    user: smelt\n    catalog: iceberg\n    schema: main\n\
+    default_materialization: table\n\
+    models:\n  cs_merged:\n    merge_key: [id]\n";
+
 const SMELT_YML: &str = "name: trino_explain_downgrade_fixture\n\
     version: 1\n\
     paths:\n  - models\n\
@@ -193,4 +206,193 @@ fn dry_run_on_trino_names_the_gap() {
         "a named line about the missing maintenance-statement support must print, naming \
          the model and Trino, not a silent skip: stdout={stdout}\nstderr={stderr}"
     );
+}
+
+// =============================================================================
+// Phase 5 (`docs/outcomes/20260913-trino-ledger/outcome.md`) test 7: one
+// model per structure-bearing shape, staged into a single Trino-target
+// project. Success criterion 4's "every cell that would have used a Trino
+// correctness structure resolves to its recompute-family equivalent" checked
+// at the CLI boundary across all four shapes, not just `lifetime_spend`'s
+// keyed fold.
+// =============================================================================
+
+/// Stage a project with one model per structure-bearing shape, all reading
+/// a `trino` target:
+///
+/// - `lifetime_spend` — `Technique::KeyedFold` (reconciliation ledger),
+///   [`stage_trino_keyed_fold_project`]'s own fixture.
+/// - `cs_merged` — `Technique::ColumnScopedMerge` (transactional merge
+///   ledger): an append-only fact `LEFT JOIN`-enriched by a
+///   `mutable_snapshot` dimension's payload column
+///   (`smelt_maintenance_testkit::recipe::ValueEnrichedRecipe`'s shape).
+/// - `dag_kchain_b` — a key-addressed `Technique::PerGroupRecompute`
+///   (fingerprint sidecar): reads `dag_kchain_a`, a clockless keyed model,
+///   as a model edge (`smelt_maintenance_testkit::dag::keyed_chain_dag`'s
+///   shape).
+/// - `customer_history` — `Technique::SuccessionPatch` (tombstone ledger):
+///   `explain_maintenance::support::stage_succession_project`'s shape.
+fn stage_trino_four_shapes_project() -> tempfile::TempDir {
+    let tmp = tempfile::TempDir::new().expect("create tempdir");
+    std::fs::write(tmp.path().join("smelt.yml"), FOUR_SHAPES_SMELT_YML).unwrap();
+    std::fs::create_dir_all(tmp.path().join("models/sources")).unwrap();
+
+    // Keyed fold.
+    std::fs::write(
+        tmp.path().join("models/sources/payments.yml"),
+        PAYMENTS_SOURCE,
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("models/lifetime_spend.sql"),
+        KEYED_FOLD_MODEL_SQL,
+    )
+    .unwrap();
+
+    // Column-scoped merge.
+    std::fs::write(
+        tmp.path().join("models/sources/cs_fact.yml"),
+        "description: column-scoped-merge fact source.\n\
+         mutation_profile: append_only\n\
+         timeseries:\n  event_time_column: d\n  partition_column: d\n  granularity: day\n\
+         columns:\n\
+         - name: d\n  type: DATE\n\
+         - name: id\n  type: INTEGER\n\
+         - name: val\n  type: INTEGER\n",
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("models/sources/cs_dim.yml"),
+        "description: column-scoped-merge mutable dimension.\n\
+         mutation_profile: mutable_snapshot\nunique_key: [id]\n\
+         columns:\n\
+         - name: id\n  type: INTEGER\n\
+         - name: attr\n  type: INTEGER\n",
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("models/cs_merged.sql"),
+        "---\ntimeseries:\n  event_time_column: d\n  partition_column: d\n  granularity: day\n\
+         refresh: incremental\ngrain: partition\n\
+         maintenance:\n  scan_bounds:\n    per_source:\n      cs_dim:\n        \
+         allow_full_scan: true\n---\n\
+         SELECT f.d AS d, f.id AS id, f.val AS val, dim.attr AS attr\n\
+         FROM smelt.sources.cs_fact f LEFT JOIN smelt.sources.cs_dim dim ON f.id = dim.id\n",
+    )
+    .unwrap();
+
+    // Key-addressed per-group recompute.
+    std::fs::write(
+        tmp.path().join("models/sources/ka_events.yml"),
+        "description: key-addressed chain source.\n\
+         mutation_profile: append_only\n\
+         timeseries:\n  event_time_column: d\n  partition_column: d\n  granularity: day\n\
+         columns:\n\
+         - name: d\n  type: DATE\n\
+         - name: id\n  type: INTEGER\n\
+         - name: val\n  type: INTEGER\n",
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("models/dag_kchain_a.sql"),
+        "---\nrefresh: incremental\ngrain: key\n\
+         maintenance:\n  scan_bounds:\n    per_source:\n      ka_events:\n        \
+         allow_full_scan: true\n---\n\
+         SELECT id, SUM(val) AS total FROM smelt.sources.ka_events GROUP BY id\n",
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("models/dag_kchain_b.sql"),
+        "---\nrefresh: incremental\ngrain: key\n---\n\
+         SELECT id, ANY_VALUE(total) AS total FROM smelt.dag_kchain_a GROUP BY id\n",
+    )
+    .unwrap();
+
+    // Succession.
+    std::fs::write(
+        tmp.path().join("models/sources/customer_changes.yml"),
+        "description: customer change-event stream.\n\
+         mutation_profile: append_only\n\
+         timeseries:\n  event_time_column: effective_ts\n  partition_column: ingested_date\n  \
+         granularity: day\n\
+         columns:\n\
+         - name: customer_id\n  type: INTEGER\n\
+         - name: effective_ts\n  type: TIMESTAMP\n\
+         - name: region\n  type: VARCHAR\n\
+         - name: ingested_date\n  type: DATE\n",
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("models/customer_history.sql"),
+        "---\nrefresh: incremental\n---\n\
+         SELECT customer_id, effective_ts, region, \
+         LEAD(effective_ts) OVER (PARTITION BY customer_id ORDER BY effective_ts) AS valid_to\n\
+         FROM smelt.sources.customer_changes\n",
+    )
+    .unwrap();
+
+    tmp
+}
+
+/// `smelt explain <model> --json` on a `trino` target, for one model per
+/// structure-bearing shape: exit 0, a `state_downgrade` naming the shape's
+/// own ideal technique, and no `Unsupported*Dialect` refusal text anywhere
+/// in the report.
+#[test]
+fn explain_on_trino_downgrades_every_structure_bearing_shape() {
+    let tmp = stage_trino_four_shapes_project();
+
+    for (model, expected_original) in [
+        ("lifetime_spend", "KeyedFold"),
+        ("cs_merged", "ColumnScopedMerge"),
+        ("dag_kchain_b", "PerGroupRecompute"),
+        ("customer_history", "SuccessionPatch"),
+    ] {
+        let output = Command::new(env!("CARGO_BIN_EXE_smelt"))
+            .arg("explain")
+            .arg(model)
+            .arg("--json")
+            .arg("--project-dir")
+            .arg(tmp.path())
+            .output()
+            .unwrap_or_else(|e| panic!("spawn smelt explain {model} --json: {e}"));
+
+        assert!(
+            output.status.success(),
+            "smelt explain {model} --json must exit 0 on a trino target, not abort: stderr={}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        assert!(
+            !stdout.contains("Unsupported"),
+            "{model}: expected no Unsupported*Dialect refusal text in the JSON report: {stdout}"
+        );
+        let json: serde_json::Value = serde_json::from_str(&stdout)
+            .unwrap_or_else(|e| panic!("{model}: explain --json output must parse: {e}\n{stdout}"));
+
+        let cells = json["cells"]
+            .as_array()
+            .unwrap_or_else(|| panic!("{model}: expected a cells array: {stdout}"));
+        let downgraded = cells
+            .iter()
+            .find(|c| c.get("state_downgrade").is_some())
+            .unwrap_or_else(|| {
+                panic!("{model}: expected a cell carrying state_downgrade: {stdout}")
+            });
+        let downgrade = &downgraded["state_downgrade"];
+        let original = downgrade["original"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{model}: state_downgrade.original must be a string"));
+        assert_eq!(
+            original, expected_original,
+            "{model}: unexpected ideal technique: {stdout}"
+        );
+        let missing = downgrade["missing"]
+            .as_str()
+            .unwrap_or_else(|| panic!("{model}: state_downgrade.missing must be a string"));
+        assert!(
+            !missing.is_empty(),
+            "{model}: state_downgrade.missing must name the missing structure: {stdout}"
+        );
+    }
 }

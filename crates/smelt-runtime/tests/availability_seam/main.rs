@@ -23,6 +23,7 @@ use smelt_runtime::maintenance_availability::{
     availability_for_run, derive_resolved, derive_resolved_with_edges,
 };
 
+mod builders;
 mod structural;
 
 /// A `grain: key` model whose driving source (`payments`) is append-only
