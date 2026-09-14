@@ -238,3 +238,246 @@ async fn keyed_fold_parity_on_trino() {
 
     common::drop_trino_schema(&schema).await;
 }
+
+fn stage_delete_insert_project(project_dir: &Path, env: &TrinoEnv, schema: &str) {
+    std::fs::create_dir_all(project_dir.join("models")).unwrap();
+
+    // Self-contained: no upstream ref/source needed to exercise the region
+    // DELETE+INSERT family — the output clamp wraps the model's own SELECT
+    // regardless of where its data comes from (`region_and_keyed_fold.rs`'s
+    // DuckDB precedent). The explicit outer `CAST(event_date AS DATE)`
+    // (rather than a bare `SELECT *` over the VALUES literal) is what lets
+    // smelt's own type inference resolve `event_date` as a genuine `Date`
+    // column — `stage_calendar_partition_project`'s precedent in
+    // `crates/smelt-cli/tests/trino_incremental_families.rs` — so the
+    // injected output-clamp literal renders `DATE '…'`-typed (gap 1's fix)
+    // rather than a bare quoted string a strict engine refuses.
+    write_model(
+        project_dir,
+        "daily_mart",
+        "---\n\
+         materialization: table\n\
+         refresh: incremental\n\
+         grain: partition\n\
+         timeseries:\n\
+         \x20\x20partition_column: event_date\n\
+         \x20\x20event_time_column: event_date\n\
+         \x20\x20granularity: day\n\
+         ---\n\
+         SELECT CAST(event_date AS DATE) AS event_date, amount FROM (VALUES \
+         (DATE '2026-01-01', 10), (DATE '2026-01-02', 20)) AS t(event_date, amount)",
+    );
+
+    let smelt_yml = format!(
+        "name: trino_statement_parity_delete_insert\nversion: 1\npaths:\n  - models\n\
+         targets:\n  dev:\n    type: trino\n    host: {host}\n    port: {port}\n    \
+         user: {user}\n    catalog: {catalog}\n    schema: {schema}\n    tls: {tls}\n\
+         default_materialization: table\ntarget: dev\n",
+        host = env.host,
+        port = env.port,
+        user = env.user,
+        catalog = env.catalog,
+        tls = env.tls,
+    );
+    std::fs::write(project_dir.join("smelt.yml"), smelt_yml).unwrap();
+}
+
+/// Test 3 (`docs/outcomes/20260913-trino-incremental/phases/04-plan.md`):
+/// the region `DELETE`+`INSERT` family's (`Technique::DeleteInsert`)
+/// executed statements, captured by a `RecordingBackend` wrapping a real
+/// `TrinoBackend` during a real `execute_project` run, are byte-identical
+/// to a direct `emit_delete_insert` call with the batch's own inputs — the
+/// same shape `region_and_keyed_fold.rs::
+/// region_recompute_statements_come_from_the_emitter` proves for DuckDB.
+/// Also asserts criterion 4's "asserted directly": the `DELETE`'s two
+/// literals are exactly the batch's own bounds, the same two literals the
+/// `INSERT` body's injected output clamp carries (recovered from the
+/// executed text itself, not independently rederived).
+#[tokio::test]
+async fn delete_insert_parity_on_trino() {
+    let Some(env) = common::trino_env() else {
+        eprintln!("SMELT_TRINO_URL unset — skipping delete_insert_parity_on_trino");
+        return;
+    };
+    let schema = common::trino_schema("delete_insert");
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path();
+    stage_delete_insert_project(project_dir, &env, &schema);
+
+    let config = Arc::new(Config::load(project_dir).expect("load config"));
+    let scheme = if env.tls { "https" } else { "http" };
+
+    // Run 1: the table does not exist yet — this run always hits the
+    // first-run `create_table_as` arm, never `delete_and_insert_transactional`.
+    {
+        let (db, graph) = build_db_and_graph(project_dir, &config);
+        let backend_slot: Arc<Mutex<Option<Arc<RecordingBackend>>>> = Arc::new(Mutex::new(None));
+        let factory = TrinoRecordingBackendFactory {
+            base_url: format!("{scheme}://{}:{}", env.host, env.port),
+            user: env.user.clone(),
+            catalog: env.catalog.clone(),
+            backend: Arc::clone(&backend_slot),
+        };
+        let outcome = execute_project(
+            "trino-delete-insert-statement-parity-run-1".to_string(),
+            make_request("dev", "2026-01-01", "2026-01-02"),
+            Arc::clone(&config),
+            graph,
+            db,
+            project_dir,
+            &factory,
+            &smelt_runtime::NoOpReporter,
+            CancellationToken::new(),
+        )
+        .await;
+        if let Err(e) = &outcome {
+            common::drop_trino_schema(&schema).await;
+            panic!("execute_project run 1 (first-run create) failed: {e}");
+        }
+    }
+
+    // Run 2: the table exists — this run must dispatch `IncrementalStrategy::
+    // DeleteInsert`, and its statements are what this test asserts against.
+    let (db, graph) = build_db_and_graph(project_dir, &config);
+    let backend_slot: Arc<Mutex<Option<Arc<RecordingBackend>>>> = Arc::new(Mutex::new(None));
+    let factory = TrinoRecordingBackendFactory {
+        base_url: format!("{scheme}://{}:{}", env.host, env.port),
+        user: env.user.clone(),
+        catalog: env.catalog.clone(),
+        backend: Arc::clone(&backend_slot),
+    };
+
+    let outcome = execute_project(
+        "trino-delete-insert-statement-parity-run-2".to_string(),
+        make_request("dev", "2026-01-01", "2026-01-03"),
+        Arc::clone(&config),
+        graph,
+        db,
+        project_dir,
+        &factory,
+        &smelt_runtime::NoOpReporter,
+        CancellationToken::new(),
+    )
+    .await;
+
+    if let Err(e) = &outcome {
+        common::drop_trino_schema(&schema).await;
+        panic!("execute_project (Trino delete+insert) failed: {e}");
+    }
+    let outcome = outcome.unwrap();
+    assert!(
+        outcome.models.contains_key("daily_mart"),
+        "daily_mart must have run: {:?}",
+        outcome.models.keys().collect::<Vec<_>>()
+    );
+
+    let recorded = backend_slot
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("backend recorded");
+    let groups = recorded.recorded_groups();
+    assert_eq!(
+        groups.len(),
+        1,
+        "one DELETE+INSERT group must have executed: {groups:?}"
+    );
+
+    let group = &groups[0];
+    assert!(
+        group.transactional,
+        "region DELETE+INSERT must be transactional"
+    );
+    assert_eq!(group.statements.len(), 2);
+
+    // `execute_model_incremental_with_bookkeeping`'s `IncrementalStrategy::
+    // DeleteInsert` arm (`crates/smelt-backend/src/lib.rs`) — the real
+    // dispatch path a `refresh: incremental`/`grain: partition` model's
+    // steady-state run takes — builds the group via the dialect-agnostic
+    // `build_delete_insert_group(schema, name, ...)` with a bare, unquoted
+    // `schema.table` name; it never routes through `Backend::
+    // delete_and_insert_transactional`, so the executed text is not
+    // catalog-qualified here (that override's own target, `insert_overwrite`,
+    // has no production caller today — the same "unreached" situation
+    // `delete_partitions` is in — and is proved separately by this file's
+    // unit test in `crates/smelt-backend-trino/src/backend.rs`).
+    let table_name = format!("{schema}.daily_mart");
+    let delete_prefix = format!("DELETE FROM {table_name} WHERE ");
+    let insert_prefix = format!("INSERT INTO {table_name} ");
+
+    let delete_sql = &group.statements[0].sql;
+    let insert_sql = &group.statements[1].sql;
+    assert!(
+        delete_sql.starts_with(&delete_prefix),
+        "unexpected delete shape: {delete_sql}"
+    );
+    assert!(
+        insert_sql.starts_with(&insert_prefix),
+        "unexpected insert shape: {insert_sql}"
+    );
+
+    // Recover the region literals from the executed DELETE's own WHERE
+    // clause — proving the executed text is exactly what the emitter
+    // produces, and that the DELETE's two literals are the same ones the
+    // INSERT body's injected output clamp carries (they must be, since both
+    // come from the same batch's PartitionRange, but this is the direct
+    // assertion criterion 4 asks for).
+    let where_clause = delete_sql
+        .strip_prefix(&delete_prefix)
+        .expect("delete shape");
+    let parts: Vec<&str> = where_clause.split(" AND ").collect();
+    let start_lit = parts[0]
+        .strip_prefix("event_date >= ")
+        .expect("start literal");
+    let end_lit = parts[1].strip_prefix("event_date < ").expect("end literal");
+    assert!(
+        insert_sql.contains(start_lit) && insert_sql.contains(end_lit),
+        "the INSERT body's injected output clamp must carry the same two literals the DELETE \
+         covers: delete={delete_sql} insert={insert_sql}"
+    );
+
+    let body = insert_sql
+        .strip_prefix(&insert_prefix)
+        .expect("insert shape");
+    let region = Region {
+        start: start_lit.to_string(),
+        end: end_lit.to_string(),
+    };
+    let expected = emit_delete_insert(
+        &table_name,
+        "event_date",
+        &region,
+        body,
+        MaintenanceDialect::Trino,
+    );
+    let matches = &expected == group;
+    if !matches {
+        common::drop_trino_schema(&schema).await;
+    }
+    assert_eq!(
+        &expected, group,
+        "executed group must be byte-identical to a direct emitter call over the same inputs"
+    );
+
+    // Result-equivalence, mirroring region_and_keyed_fold.rs's DuckDB proof:
+    // the DELETE+INSERT statements actually executed must leave `daily_mart`
+    // multiset-equal to a full refresh of the model's own SQL.
+    let full_refresh_sql = "SELECT * FROM (VALUES (DATE '2026-01-01', 10), \
+                             (DATE '2026-01-02', 20)) AS t(event_date, amount)";
+    let equal = multiset_equal(
+        recorded.as_ref(),
+        &format!("SELECT * FROM {table_name}"),
+        full_refresh_sql,
+    )
+    .await;
+    if !equal {
+        common::drop_trino_schema(&schema).await;
+    }
+    assert!(
+        equal,
+        "the DELETE+INSERT statements execute_project actually ran must reproduce a full refresh"
+    );
+
+    common::drop_trino_schema(&schema).await;
+}

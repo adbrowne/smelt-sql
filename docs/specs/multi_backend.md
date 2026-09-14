@@ -1219,7 +1219,7 @@ Which landing state that is, per `Technique`, is derived once by
 
 | `Technique` | On `trino` | Diagnostic |
 |---|---|---|
-| `DeleteInsert` | reachable; the write window is emulated (`DELETE` + `INSERT`), since `supports_insert_overwrite` is `✗` | — |
+| `DeleteInsert` | reachable; the write window is emulated (`DELETE` + `INSERT`), since `supports_insert_overwrite` is `✗`. The pair executes sequentially rather than in one transaction, since Iceberg writes are autocommit-only (`incremental_shapes.md` §"First-run and backfill"); an `INSERT` failure leaves the chunk's window empty rather than rolling back, which re-running the same window restores because the `DELETE` covers exactly the window the `INSERT` writes | — |
 | `PerGroupRecompute`, no `key_scope` | reachable | — |
 | `PerGroupRecompute`, key-addressed (`UpstreamKeyed` / `DownstreamGrainOverUpstream`) | refused — needs the fingerprint sidecar, and a clamped current-source scan is unsound here, not merely wider | `UnsupportedOnBackend` |
 | `KeyedFold` | downgraded to its recompute-family equivalent — no reconciliation ledger, so no never-fold-twice refusal | `MaintenanceStateDowngraded` |

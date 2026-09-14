@@ -603,9 +603,15 @@ first, then runs every batch — first included — as ordinary DELETE+INSERT, m
 hand-seeding. Forced or `--per-partition` execution advances calendar-unit batches
 (`Month`/`Quarter`/`Year`) by true boundaries; `Day`/`Week` use fixed steps. Output rows may be
 finer-grained than `partition_column`, written in full per batch. Each chunk's DELETE+INSERT is
-one transaction — INSERT failure rolls back only that chunk's DELETE, earlier committed chunks
-stay (each chunk is idempotent) — and a run halts at the first failed chunk, exits non-zero,
-and resumes correctly on re-run of the same range. smelt does not auto-re-run partitions on
+one transaction where the backend realises a multi-statement transaction (DuckDB); on
+Trino/Iceberg and Spark it executes sequentially, since those backends' writes are
+autocommit-only, so an INSERT failure leaves that chunk's window empty rather than rolling
+back. This is safe because the DELETE covers exactly the window the INSERT writes and nothing
+outside it: re-running the same window restores the chunk regardless of which failure mode
+applies — the same idempotence the paragraph already relies on for resumption. Where the pair
+is transactional, INSERT failure instead rolls back only that chunk's DELETE, earlier committed
+chunks stay (each chunk is idempotent) — and a run halts at the first failed chunk, exits
+non-zero, and resumes correctly on re-run of the same range. smelt does not auto-re-run partitions on
 late data; the mitigations are trailing `--event-time-end` behind known latency, or
 overlapping re-process ranges — both orchestration choices, never a plan input: declared
 source lateness is consumed by scheduling and staleness only and never widens a scan

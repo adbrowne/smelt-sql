@@ -442,6 +442,47 @@ mod delta_restricted_delete_insert_tests {
 }
 
 #[cfg(test)]
+mod delete_insert_tests {
+    use super::*;
+
+    /// The emulated delete-and-insert window's central property
+    /// (`docs/outcomes/20260913-trino-incremental` phase 4, criterion 4):
+    /// the `DELETE` predicate is byte-identical to the region's own
+    /// predicate — the emitter neither widens nor narrows the window it
+    /// deletes relative to what the caller's `INSERT` body writes — and the
+    /// `INSERT` carries `body` verbatim, with no second filter added.
+    #[test]
+    fn delete_leg_predicate_is_exactly_the_insert_window() {
+        let region = Region {
+            start: "'2026-07-01'".to_string(),
+            end: "'2026-07-02'".to_string(),
+        };
+        let body = "SELECT event_id, event_date FROM events_enriched_recompute";
+        let group = emit_delete_insert(
+            "main.events_enriched",
+            "event_date",
+            &region,
+            body,
+            MaintenanceDialect::Trino,
+        );
+
+        assert!(group.transactional);
+        assert_eq!(group.statements.len(), 2);
+        assert_eq!(
+            group.statements[0].sql,
+            format!(
+                "DELETE FROM main.events_enriched WHERE {}",
+                region.predicate(None, "event_date")
+            )
+        );
+        assert_eq!(
+            group.statements[1].sql,
+            format!("INSERT INTO main.events_enriched {body}")
+        );
+    }
+}
+
+#[cfg(test)]
 mod per_group_recompute_tests {
     use super::*;
 

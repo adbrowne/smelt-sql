@@ -10,15 +10,20 @@
 //!
 //! `insert_into_from_query` is implemented (the plain `INSERT INTO … SELECT
 //! …` append and whole-row-`MERGE` families,
-//! `docs/outcomes/20260913-trino-incremental` phase 3). `delete_partitions`
-//! and `insert_overwrite` still refuse by name: Trino has no `INSERT
-//! OVERWRITE`, and the emulated delete-and-insert window's exact-coverage
-//! `DELETE` is phase 4's subject, not this one's.
+//! `docs/outcomes/20260913-trino-incremental` phase 3). `insert_overwrite`
+//! is implemented too, emulated as a scoped `DELETE` + `INSERT` pair since
+//! Trino has no `INSERT OVERWRITE` (phase 4). `delete_partitions` still
+//! refuses by name — it is on no runtime path (`smelt-runtime` never calls
+//! it; the only reference outside this crate is a test double), so it stays
+//! unimplemented rather than adding an unreached statement-authoring site.
 
 use arrow::array::{Array, Int64Array, RecordBatch};
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
-use smelt_backend::{Backend, BackendCapabilities, BackendError, PartitionRange, SqlDialect};
+use smelt_backend::{
+    emit_delete_insert, Backend, BackendCapabilities, BackendError, MaintenanceDialect,
+    PartitionRange, Region, SqlDialect,
+};
 
 use crate::arrow_convert::{arrow_type_to_trino_type, render_trino_literal};
 use crate::client::TrinoClient;
@@ -376,8 +381,8 @@ impl Backend for TrinoBackend {
         Err(BackendError::unsupported(
             self.dialect().name(),
             format!(
-                "delete_partitions for '{schema}.{name}' — Trino's incremental/maintenance \
-                 family lands in docs/outcomes/20260913-trino-incremental"
+                "delete_partitions for '{schema}.{name}' — unreached on Trino: no runtime path \
+                 calls this method (partition replacement goes through insert_overwrite)"
             ),
         ))
     }
@@ -395,20 +400,56 @@ impl Backend for TrinoBackend {
         Ok(())
     }
 
+    /// Trino has no `INSERT OVERWRITE` (`supports_insert_overwrite = false`,
+    /// measured live), so partition replacement lowers to the scoped
+    /// `DELETE` + `INSERT` pair rather than surfacing an error — the
+    /// lower-don't-reject rule in `multi_backend.md` §"Parity contract",
+    /// BigQuery's precedent.
     async fn insert_overwrite(
         &self,
         schema: &str,
         name: &str,
-        _sql: &str,
-        _partition: &PartitionRange,
+        sql: &str,
+        partition: &PartitionRange,
     ) -> Result<(), BackendError> {
-        Err(BackendError::unsupported(
-            self.dialect().name(),
-            format!(
-                "insert_overwrite for '{schema}.{name}' — Trino's incremental/maintenance \
-                 family lands in docs/outcomes/20260913-trino-incremental"
-            ),
-        ))
+        self.delete_and_insert_transactional(schema, name, partition, sql)
+            .await
+    }
+
+    /// Overrides the trait default so the emitted `DELETE`/`INSERT` text
+    /// targets the catalog-qualified, double-quoted three-part name — the
+    /// generic default only sees `schema`/`name` and cannot know the
+    /// catalog. The text itself still comes from `emit_delete_insert`
+    /// (`docs/specs/incremental_models.md` §"Statement emission (single
+    /// owner)"); this crate authors no DELETE/INSERT of its own. No override
+    /// of `execute_statement_group`: the Iceberg connector accepts writes
+    /// only in autocommit, so the pair executes sequentially via the trait
+    /// default rather than in one backend transaction
+    /// (`docs/specs/incremental_shapes.md` §"First-run and backfill") — the
+    /// DELETE's exact-coverage property is what makes that safe to re-run.
+    async fn delete_and_insert_transactional(
+        &self,
+        schema: &str,
+        name: &str,
+        partition: &PartitionRange,
+        sql: &str,
+    ) -> Result<(), BackendError> {
+        let table_name = self.qualified_name(schema, name);
+        let region = Region::for_axis(
+            partition.axis,
+            partition.column_type,
+            &partition.start,
+            &partition.end,
+        )
+        .map_err(|message| BackendError::ConfigurationError { message })?;
+        let group = emit_delete_insert(
+            &table_name,
+            &partition.column,
+            &region,
+            sql,
+            MaintenanceDialect::Trino,
+        );
+        self.execute_statement_group(&group).await
     }
 }
 
@@ -531,5 +572,30 @@ mod tests {
             .await
             .expect_err("must inherit the trait's erroring default");
         assert!(matches!(err, BackendError::UnsupportedFeature { .. }));
+    }
+
+    /// `insert_overwrite` used to refuse by name (`BackendError::unsupported`)
+    /// before phase 4 emulated it as a scoped `DELETE` + `INSERT`. With no
+    /// live coordinator behind `backend()`'s config, the call still fails —
+    /// but on a connection error, never on the old `UnsupportedFeature`
+    /// refusal, proving the by-name refusal is gone from this path
+    /// (`docs/outcomes/20260913-trino-incremental` phase 4).
+    #[tokio::test]
+    async fn insert_overwrite_is_emulated_not_refused() {
+        let partition = PartitionRange {
+            column: "event_date".to_string(),
+            axis: smelt_backend::PartitionAxis::Calendar,
+            column_type: smelt_backend::PartitionColumnType::Date,
+            start: "2026-07-01".to_string(),
+            end: "2026-07-02".to_string(),
+        };
+        let err = backend()
+            .insert_overwrite("sch", "tbl", "SELECT 1", &partition)
+            .await
+            .expect_err("no live coordinator behind this config");
+        assert!(
+            !matches!(err, BackendError::UnsupportedFeature { .. }),
+            "insert_overwrite must no longer refuse by name, got {err:?}"
+        );
     }
 }
