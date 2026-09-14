@@ -49,6 +49,29 @@ fn bigquery_admits_a_whole_row_merge_that_has_a_column_list() {
     );
 }
 
+/// Trino's Iceberg `MERGE` has no star form either (measured live,
+/// `crates/smelt-backend-trino/tests/merge_clause_forms.rs`), so it needs
+/// the same guard BigQuery gets.
+#[test]
+fn trino_refuses_a_whole_row_merge_with_no_column_list() {
+    let err = require_merge_columns(SqlDialect::Trino, SCHEMA, TABLE, &[])
+        .expect_err("Trino has no `UPDATE SET *`, so an empty column list must be refused");
+    let msg = err.to_string();
+    assert!(
+        msg.contains("analytics.dim_customer"),
+        "the refusal must name the model it refused; got: {msg}"
+    );
+}
+
+#[test]
+fn trino_admits_a_whole_row_merge_that_has_a_column_list() {
+    let columns = vec!["id".to_string(), "name".to_string()];
+    assert!(
+        require_merge_columns(SqlDialect::Trino, SCHEMA, TABLE, &columns).is_ok(),
+        "a resolved column list is exactly what Trino needs — it must pass"
+    );
+}
+
 /// The star dialects never read `columns`, so an empty list is not a defect
 /// there. Asserting this is what keeps the guard *narrow*: widening it to
 /// every dialect would refuse `SELECT *` models that DuckDB and Spark handle

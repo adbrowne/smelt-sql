@@ -86,7 +86,10 @@ pub fn partition_bucket_expr(
     match dialect {
         // DuckDB and Spark both take the unit as a quoted first argument and
         // are Monday-based on `week`.
-        MaintenanceDialect::DuckDb | MaintenanceDialect::Spark => {
+        // Trino's `date_trunc(unit, value)` takes the same argument order,
+        // and its `week` truncation is already ISO (Monday-based), matching
+        // smelt's week grid with no BigQuery-style override.
+        MaintenanceDialect::DuckDb | MaintenanceDialect::Spark | MaintenanceDialect::Trino => {
             let unit = quoted_unit(*granularity);
             format!("DATE_TRUNC('{unit}', {partition_column})")
         }

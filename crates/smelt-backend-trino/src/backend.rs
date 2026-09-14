@@ -8,14 +8,12 @@
 //! Trino refuses `CREATE MATERIALIZED VIEW` over the Iceberg REST catalog
 //! outright, so there is no native IVM path to override it with.
 //!
-//! `delete_partitions`, `insert_into_from_query` and `insert_overwrite` also
-//! refuse by name: this outcome's Out of scope section reserves "the
-//! incremental/maintenance families" for
-//! `docs/outcomes/20260913-trino-incremental`, and DuckDB's own DELETE+INSERT
-//! emulation for these methods bakes in transactionality and partition-axis
-//! assumptions this outcome has not measured against Iceberg — a guess here
-//! would need re-deciding there anyway, so refusing names the gap rather
-//! than papering over it with an implementation nothing has verified.
+//! `insert_into_from_query` is implemented (the plain `INSERT INTO … SELECT
+//! …` append and whole-row-`MERGE` families,
+//! `docs/outcomes/20260913-trino-incremental` phase 3). `delete_partitions`
+//! and `insert_overwrite` still refuse by name: Trino has no `INSERT
+//! OVERWRITE`, and the emulated delete-and-insert window's exact-coverage
+//! `DELETE` is phase 4's subject, not this one's.
 
 use arrow::array::{Array, Int64Array, RecordBatch};
 use arrow::datatypes::SchemaRef;
@@ -388,15 +386,13 @@ impl Backend for TrinoBackend {
         &self,
         schema: &str,
         name: &str,
-        _sql: &str,
+        sql: &str,
     ) -> Result<(), BackendError> {
-        Err(BackendError::unsupported(
-            self.dialect().name(),
-            format!(
-                "insert_into_from_query for '{schema}.{name}' — Trino's incremental/maintenance \
-                 family lands in docs/outcomes/20260913-trino-incremental"
-            ),
-        ))
+        let table = self.qualified_name(schema, name);
+        self.client
+            .execute(&format!("INSERT INTO {table} {sql}"))
+            .await?;
+        Ok(())
     }
 
     async fn insert_overwrite(

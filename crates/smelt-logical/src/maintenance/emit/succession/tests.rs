@@ -455,6 +455,8 @@ fn emit_succession_full_rebuild_refuses_only_the_dialect_with_no_realisation() {
     let err = rebuild(MaintenanceDialect::Spark).expect_err("Spark has no tombstone ledger");
     assert_eq!(err.dialect, "spark");
     assert!(err.to_string().contains("tombstone ledger"), "{err}");
+    let trino_err = rebuild(MaintenanceDialect::Trino).expect_err("Trino has no tombstone ledger");
+    assert_eq!(trino_err.dialect, "trino");
     rebuild(MaintenanceDialect::DuckDb).expect("DuckDB realises the tombstone ledger");
     rebuild(MaintenanceDialect::BigQuery).expect("BigQuery realises the tombstone ledger");
 }
@@ -546,6 +548,8 @@ fn emit_succession_patch_refuses_only_the_dialect_with_no_realisation() {
     };
     let err = patch(MaintenanceDialect::Spark).expect_err("Spark has no tombstone ledger");
     assert_eq!(err.dialect, "spark");
+    let trino_err = patch(MaintenanceDialect::Trino).expect_err("Trino has no tombstone ledger");
+    assert_eq!(trino_err.dialect, "trino");
     patch(MaintenanceDialect::DuckDb).expect("DuckDB realises the tombstone ledger");
     patch(MaintenanceDialect::BigQuery).expect("BigQuery realises the tombstone ledger");
 }

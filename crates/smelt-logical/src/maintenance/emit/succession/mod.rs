@@ -74,6 +74,7 @@ impl UnsupportedSuccessionDialect {
                 MaintenanceDialect::DuckDb => "duckdb",
                 MaintenanceDialect::Spark => "spark",
                 MaintenanceDialect::BigQuery => "bigquery",
+                MaintenanceDialect::Trino => "trino",
             },
         }
     }
@@ -84,13 +85,18 @@ impl UnsupportedSuccessionDialect {
 /// realise which structure"). Spark is refused — Delta has no cross-table
 /// transaction, so the tombstone record and the presented `MERGE` cannot be
 /// made atomic, which is the same permanent absence `smelt_state::ledger`
-/// records for the reconciliation ledger.
+/// records for the reconciliation ledger. Trino is refused for the same
+/// reason: `20260913-trino-ledger` declines every correctness structure on
+/// Iceberg, tombstone ledger included, so `SuccessionPatch` downgrades to
+/// `DeleteInsert` there exactly as it does on Spark.
 fn check_succession_dialect(
     dialect: MaintenanceDialect,
 ) -> Result<(), UnsupportedSuccessionDialect> {
     match dialect {
         MaintenanceDialect::DuckDb | MaintenanceDialect::BigQuery => Ok(()),
-        MaintenanceDialect::Spark => Err(UnsupportedSuccessionDialect::new(dialect)),
+        MaintenanceDialect::Spark | MaintenanceDialect::Trino => {
+            Err(UnsupportedSuccessionDialect::new(dialect))
+        }
     }
 }
 
@@ -118,7 +124,7 @@ fn touched_keys_predicate(
 ) -> String {
     let keys = key_col_list(key_cols);
     match dialect {
-        MaintenanceDialect::DuckDb | MaintenanceDialect::Spark => {
+        MaintenanceDialect::DuckDb | MaintenanceDialect::Spark | MaintenanceDialect::Trino => {
             format!(
                 "({keys}) IN (SELECT {keys} FROM ({event_delta_select}) AS __smelt_touched_keys)"
             )
@@ -234,7 +240,7 @@ fn build_domain_cte(
     // reason. So the alias is part of the per-dialect relation reference, not
     // a uniform addition.
     let (presented_ref, tombstone_ref, presented_alias, tombstone_alias) = match dialect {
-        MaintenanceDialect::DuckDb | MaintenanceDialect::Spark => (
+        MaintenanceDialect::DuckDb | MaintenanceDialect::Spark | MaintenanceDialect::Trino => (
             presented_table.to_string(),
             tombstone_table.to_string(),
             "",
@@ -346,8 +352,9 @@ pub fn emit_succession_patch(
     // `emit_succession_full_rebuild`'s own fold already uses — so BigQuery
     // gets that instead of a construct whose acceptance is a guess.
     let using_select = match dialect {
-        MaintenanceDialect::DuckDb | MaintenanceDialect::Spark => format!(
-            "WITH __smelt_domain AS ({domain}), \
+        MaintenanceDialect::DuckDb | MaintenanceDialect::Spark | MaintenanceDialect::Trino => {
+            format!(
+                "WITH __smelt_domain AS ({domain}), \
              __smelt_dedup AS (SELECT * FROM __smelt_domain QUALIFY ROW_NUMBER() OVER (PARTITION \
              BY {keys}, __smelt_t ORDER BY __smelt_is_delete ASC) = 1), \
              __smelt_windowed AS (SELECT {keys}, __smelt_t{payload_select}, __smelt_is_delete, \
@@ -356,7 +363,8 @@ pub fn emit_succession_patch(
              __smelt_dedup) \
              SELECT {keys}, __smelt_t{payload_select}, __smelt_is_delete{derived_select_part} \
              FROM __smelt_windowed"
-        ),
+            )
+        }
         MaintenanceDialect::BigQuery => format!(
             "SELECT {keys}, __smelt_t{payload_select}, __smelt_is_delete{derived_select_part} \
              FROM (SELECT {keys}, __smelt_t{payload_select}, __smelt_is_delete, \
@@ -600,7 +608,7 @@ pub fn emit_succession_full_rebuild(
     // DuckDB accepts both, and keeps the bare form so its emitted text is
     // unchanged.
     let ledger_delete = MaintenanceStatement::new(match dialect {
-        MaintenanceDialect::DuckDb | MaintenanceDialect::Spark => {
+        MaintenanceDialect::DuckDb | MaintenanceDialect::Spark | MaintenanceDialect::Trino => {
             format!("DELETE FROM {tombstone_table}")
         }
         MaintenanceDialect::BigQuery => format!("DELETE FROM {tombstone_table} WHERE TRUE"),
@@ -748,6 +756,9 @@ fn clock_tie_sample_agg(dialect: MaintenanceDialect) -> String {
         MaintenanceDialect::DuckDb => "STRING_AGG(violation_key, ', ')".to_string(),
         MaintenanceDialect::Spark => "CONCAT_WS(', ', COLLECT_LIST(violation_key))".to_string(),
         MaintenanceDialect::BigQuery => "STRING_AGG(violation_key, ', ')".to_string(),
+        // Never reached — Trino is refused by `check_succession_dialect`
+        // before this helper runs. Spelled for totality only.
+        MaintenanceDialect::Trino => "array_join(array_agg(violation_key), ', ')".to_string(),
     }
 }
 

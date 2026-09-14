@@ -120,12 +120,18 @@ fn explain_on_a_trino_target_reports_instead_of_aborting() {
     assert_eq!(executed, "PerGroupRecompute");
 }
 
-/// `smelt explain <model> --show-sql` on a `trino` target refuses by name —
-/// naming Trino and the missing maintenance-statement support — rather
-/// than printing nothing or silently falling back to another dialect's
-/// spelling.
+/// `smelt explain <model> --show-sql` on a `trino` target must not abort —
+/// `20260913-trino-incremental` phase 3 landed `MaintenanceDialect::Trino`,
+/// so the old "no maintenance-statement dialect for 'trino'" abort this
+/// pinned no longer happens on any cell. `lifetime_spend`'s cells (`KeyedFold`
+/// downgraded to `PerGroupRecompute`, and a `Backfill`-trigger `DeleteInsert`)
+/// still print "no statements" here — a pre-existing, dialect-independent gap
+/// in the technique-preview builder for this cell shape (it needs facts this
+/// fixture's plan cell does not carry), not a Trino refusal — so the
+/// assertion is narrowed to "no `Unsupported*Dialect` text", not "prints
+/// real SQL".
 #[test]
-fn explain_show_sql_on_trino_refuses_by_name() {
+fn explain_show_sql_on_trino_does_not_abort() {
     let tmp = stage_trino_keyed_fold_project();
 
     let output = Command::new(env!("CARGO_BIN_EXE_smelt"))
@@ -144,25 +150,21 @@ fn explain_show_sql_on_trino_refuses_by_name() {
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
     assert!(
-        stdout.contains("Trino"),
-        "the show-sql leg must name Trino rather than staying silent: {stdout}"
-    );
-    assert!(
-        stdout.contains("no statements") || stdout.contains("no maintenance-statement dialect"),
-        "the show-sql leg must name the missing maintenance-statement support, not print a \
-         substituted dialect's SQL: {stdout}"
+        !stdout.contains("Unsupported"),
+        "no maintenance-dialect refusal should appear now that Trino has one: {stdout}"
     );
 }
 
-/// `smelt rebuild <model> --dry-run` on a `trino` target must not silently
-/// `continue` past a model whose maintenance statements cannot be rendered
+/// `smelt rebuild <model> --dry-run` on a `trino` target: a `DeleteInsert`
+/// (region-recompute) cell is dialect-invariant text over the shared
+/// `emit_delete_insert` emitter, so once `MaintenanceDialect::Trino` exists
+/// (`20260913-trino-incremental` phase 3) it renders real statements the
+/// same as on any other dialect — no named gap, no silent `continue` past a
+/// model whose maintenance statements could not be rendered
 /// (`execute/project/dry_run.rs`'s old `let Ok(dialect) = ... else {
-/// continue };`) — that made a skipped statement look identical to an
-/// absent one (fail-loud discipline, `CLAUDE.md` §"Fail-loud discipline").
-/// The compiled-SQL line still prints (`reporter.model_compiled`); a named
-/// line about the missing maintenance-statement support must print too.
+/// continue };`, which used to fire here before this phase).
 #[test]
-fn dry_run_on_trino_names_the_gap() {
+fn dry_run_on_trino_renders_delete_insert() {
     let tmp = tempfile::TempDir::new().expect("create tempdir");
     std::fs::write(tmp.path().join("smelt.yml"), SMELT_YML).unwrap();
     std::fs::create_dir_all(tmp.path().join("models/sources")).unwrap();
@@ -196,15 +198,14 @@ fn dry_run_on_trino_names_the_gap() {
         String::from_utf8_lossy(&output.stderr)
     );
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
         stdout.contains("Would run: lifetime_spend"),
         "the model's compiled-SQL line must still print: {stdout}"
     );
     assert!(
-        stderr.contains("lifetime_spend") && stderr.contains("Trino"),
-        "a named line about the missing maintenance-statement support must print, naming \
-         the model and Trino, not a silent skip: stdout={stdout}\nstderr={stderr}"
+        stdout.contains("DELETE FROM") && stdout.contains("INSERT INTO"),
+        "the region DELETE+INSERT statements must actually render now that Trino has a \
+         MaintenanceDialect: {stdout}"
     );
 }
 

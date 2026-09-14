@@ -5,23 +5,21 @@
 //! inside the `if let Some(end_date)` arm, before `frozen_horizon_probes`
 //! was ever asked whether the model declares anything — so a Trino run of
 //! ANY clocked model (declared or not) would have hard-errored with
-//! `UnsupportedMaintenanceDialect`, since Trino currently has no
-//! `MaintenanceDialect` mapping at all (`20260913-trino-incremental` owns
-//! adding one). The fix, `crate::contract_probes::
+//! `UnsupportedMaintenanceDialect`, back when Trino had no `MaintenanceDialect`
+//! mapping at all. The fix, `crate::contract_probes::
 //! resolve_frozen_horizon_dialect`, resolves the dialect only when
-//! `contract.frozen_horizon` is actually declared, and where the target has
-//! no maintenance dialect, skips the verification probe with a
-//! `tracing::warn!` instead of propagating the error — the declaration
+//! `contract.frozen_horizon` is actually declared, and skips the
+//! verification probe with a `tracing::warn!` instead of propagating the
+//! error where the target has no maintenance dialect — the declaration
 //! itself stays valid (`docs/specs/state.md` §"Declarations stay
 //! fail-loud"), only its live verification is unavailable.
 //!
-//! Tested directly against the extracted pure/logging boundary rather than
-//! through a full `execute_project` run: Trino has no `MaintenanceDialect`
-//! mapping yet at all, so ANY live incremental batch write (not just a
-//! frozen-horizon-declaring one) still hard-errors downstream today at the
-//! DELETE+INSERT emission site — that is `20260913-trino-incremental`'s
-//! subject, not this phase's. `resolve_frozen_horizon_dialect` is the
-//! narrow, already-testable seam this phase's fix actually lives behind.
+//! `20260913-trino-incremental` phase 3 landed `MaintenanceDialect::Trino`,
+//! so the skip-with-warning route no longer fires for Trino — it resolves
+//! like any other dialect now, and the route stays live only for a dialect
+//! that still has none. Whether the probe is actually *proved* live against
+//! Trino is that outcome's phase 9, not this file's; this file only pins the
+//! resolution seam's behaviour.
 
 use std::cell::RefCell;
 use std::sync::{Once, OnceLock};
@@ -46,11 +44,9 @@ fn metadata_with_frozen_horizon() -> ModelMetadata {
     }
 }
 
-/// RED test for the 3554 gap: a clocked model with NO `contract.
-/// frozen_horizon` must never even ask `smelt_backend::maintenance_dialect`
-/// for a Trino mapping — it returns `None` (skip) immediately, and (unlike
-/// the pre-fix call site) never has a chance to propagate
-/// `UnsupportedMaintenanceDialect`.
+/// An undeclared `contract.frozen_horizon` never even asks
+/// `smelt_backend::maintenance_dialect` — it returns `None` (skip)
+/// immediately on every dialect, Trino included now that Trino has one.
 #[test]
 fn undeclared_frozen_horizon_never_resolves_a_dialect_on_trino() {
     let metadata = metadata_without_frozen_horizon();
@@ -58,8 +54,7 @@ fn undeclared_frozen_horizon_never_resolves_a_dialect_on_trino() {
         resolve_frozen_horizon_dialect("order_totals", SqlDialect::Trino, Some(&metadata));
     assert_eq!(
         resolved, None,
-        "an undeclared contract.frozen_horizon must never pay for a dialect that does not \
-         exist on Trino"
+        "an undeclared contract.frozen_horizon must never resolve a dialect at all"
     );
 }
 
@@ -155,11 +150,14 @@ fn capture_lock() -> &'static std::sync::Mutex<()> {
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
 }
 
-/// With the declaration present on Trino (no maintenance dialect), the
-/// probe is skipped — `None`, not an error — and exactly one WARN names the
-/// model, the declaration and the dialect.
+/// With the declaration present on Trino, the dialect now resolves like any
+/// other dialect (`20260913-trino-incremental` phase 3 landed
+/// `MaintenanceDialect::Trino`) — no skip, no warning. Every `SqlDialect`
+/// variant now has a `MaintenanceDialect`, so the skip-with-warning route in
+/// `resolve_frozen_horizon_dialect` has no live case to demonstrate today;
+/// it remains for whichever dialect is added next without one.
 #[test]
-fn declared_frozen_horizon_on_trino_skips_with_a_warning() {
+fn declared_frozen_horizon_on_trino_now_resolves() {
     let _guard = capture_lock().lock().unwrap();
     let metadata = metadata_with_frozen_horizon();
     let (resolved, warnings) = capture_warnings(|| {
@@ -167,14 +165,13 @@ fn declared_frozen_horizon_on_trino_skips_with_a_warning() {
     });
 
     assert_eq!(
-        resolved, None,
-        "a declared contract.frozen_horizon must degrade to a skipped probe on Trino, not an \
-         error"
+        resolved,
+        Some(smelt_backend::MaintenanceDialect::Trino),
+        "a declared contract.frozen_horizon on Trino must resolve now that Trino has a \
+         MaintenanceDialect"
     );
     assert!(
-        warnings.iter().any(|w| {
-            w.contains("order_totals") && w.contains("frozen_horizon") && w.contains("Trino")
-        }),
-        "expected a WARN naming the model, the declaration and the dialect, got: {warnings:?}"
+        warnings.is_empty(),
+        "no skip warning should fire once Trino resolves a dialect: {warnings:?}"
     );
 }

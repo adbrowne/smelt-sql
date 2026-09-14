@@ -1241,9 +1241,10 @@ Schema evolution is a separate axis: Iceberg supports it directly, and its measu
 `contract.deferral` is a statement about state (the reconciliation ledger's frontier) and
 refuses with `DeclaredContractRequiresState` on Trino exactly as on Spark, while
 `contract.frozen_horizon` and `contract.retain_departed` are statements about the model's own
-SQL and stay admitted — `frozen_horizon`'s late-arrival verification probe is simply skipped
-with a run-time warning where Trino has no `MaintenanceDialect` to render it in
-(`docs/specs/state.md` §"Declarations stay fail-loud"). The staged-candidate conditional
+SQL and stay admitted — `frozen_horizon`'s late-arrival verification probe renders on Trino
+like it does on any other dialect with a `MaintenanceDialect` (the skip-with-run-time-warning
+route in `contract_probes.rs` remains for a dialect that still has none). The staged-candidate
+conditional
 DELETE+INSERT's staged relation is realised too, over a non-temp, non-atomic residence
 (`staged_relation_residence = TargetSchema`, `staged_relation_group_is_atomic = false` — §"Column-
 scoped merge and conditional-write capabilities" above): a real, explicitly-named,
@@ -1455,10 +1456,6 @@ adopted as live data by a later run.
   (`build_column` in `crates/smelt-backend-trino/src/arrow_convert.rs`) has no `DataType::List`
   builder arm, so a model projecting an array-typed column reads back with an error rather than
   an Arrow list value. No plan is yet tracking the close.
-
-- **No maintenance dialect on Trino.** `maintenance_dialect` returns `Err` for
-  `SqlDialect::Trino`, so no incremental/maintenance family runs on a `trino` target today — a
-  full refresh is the only route. Owner: `docs/outcomes/20260913-trino-incremental/`.
 
 - **`supports_transactional_ddl = false` measures smelt's client, not Trino's grammar.** The
   measured `Client does not support transactions` error comes from smelt's stateless

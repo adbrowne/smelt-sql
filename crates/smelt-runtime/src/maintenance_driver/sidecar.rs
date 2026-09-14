@@ -348,15 +348,18 @@ pub fn repair_keys_literal_select(keys: &[String], dialect: MaintenanceDialect) 
     format!("SELECT * FROM {row_set}")
 }
 
-/// Map [`MaintenanceDialect`] (the maintenance-statement dialect, three
-/// variants) to [`smelt_core::BackendType`] (the row-set owner's dialect
-/// parameter) — a 1:1 relabeling, not a lossy collapse: both enumerate
-/// exactly DuckDB, Spark, and BigQuery.
+/// Map [`MaintenanceDialect`] to [`smelt_core::BackendType`] (the row-set
+/// owner's dialect parameter) — a 1:1 relabeling, not a lossy collapse.
+/// Every caller of this function belongs to the fingerprint-sidecar family,
+/// which `20260913-trino-ledger` declines on Trino — the plan layer
+/// downgrades before a Trino sidecar statement is requested — but the
+/// mapping is spelled for totality rather than left unreachable.
 fn maintenance_dialect_to_backend_type(dialect: MaintenanceDialect) -> smelt_core::BackendType {
     match dialect {
         MaintenanceDialect::DuckDb => smelt_core::BackendType::DuckDB,
         MaintenanceDialect::Spark => smelt_core::BackendType::Spark,
         MaintenanceDialect::BigQuery => smelt_core::BackendType::BigQuery,
+        MaintenanceDialect::Trino => smelt_core::BackendType::Trino,
     }
 }
 

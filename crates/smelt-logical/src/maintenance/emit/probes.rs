@@ -61,15 +61,14 @@ pub fn emit_recurrence_bound_probe(
     MaintenanceStatement::new(sql)
 }
 
-/// Map [`MaintenanceDialect`] (the maintenance-statement dialect, three
-/// variants) to [`smelt_core::BackendType`] (the row-set owner's dialect
-/// parameter) — a 1:1 relabeling, not a lossy collapse: both enumerate
-/// exactly DuckDB, Spark, and BigQuery.
+/// Map [`MaintenanceDialect`] to [`smelt_core::BackendType`] (the row-set
+/// owner's dialect parameter) — a 1:1 relabeling, not a lossy collapse.
 fn maintenance_dialect_to_backend_type(dialect: MaintenanceDialect) -> smelt_core::BackendType {
     match dialect {
         MaintenanceDialect::DuckDb => smelt_core::BackendType::DuckDB,
         MaintenanceDialect::Spark => smelt_core::BackendType::Spark,
         MaintenanceDialect::BigQuery => smelt_core::BackendType::BigQuery,
+        MaintenanceDialect::Trino => smelt_core::BackendType::Trino,
     }
 }
 
@@ -85,6 +84,9 @@ pub fn probe_dialect_string_type(dialect: MaintenanceDialect) -> &'static str {
         // GoogleSQL has no VARCHAR at all (`Type not found: VARCHAR`); its
         // unsized string type is STRING. Confirmed live (scripts/bigquery-probe3.sh).
         MaintenanceDialect::BigQuery => "STRING",
+        // Trino's unsized VARCHAR matches DuckDB's. Not measured live yet —
+        // proving a probe on Trino is `20260913-trino-incremental` phase 9.
+        MaintenanceDialect::Trino => "VARCHAR",
     }
 }
 
@@ -101,6 +103,10 @@ fn probe_dialect_sample_agg(dialect: MaintenanceDialect) -> String {
         // GoogleSQL has STRING_AGG with the same shape as DuckDB's.
         // Confirmed live (scripts/bigquery-probe3.sh).
         MaintenanceDialect::BigQuery => "STRING_AGG(violation_key, ', ')".to_string(),
+        // Trino has no STRING_AGG; the standard idiom is `array_join` over
+        // `array_agg`. Not measured live yet — proving a probe on Trino is
+        // phase 9.
+        MaintenanceDialect::Trino => "array_join(array_agg(violation_key), ', ')".to_string(),
     }
 }
 
@@ -726,6 +732,12 @@ pub fn emit_append_only_baseline_snapshot(
         MaintenanceDialect::Spark => {
             format!("CONCAT_WS('', SORT_ARRAY(COLLECT_LIST({row_hash})))")
         }
+        // Trino has no ordered STRING_AGG; `array_agg(... ORDER BY ...)`
+        // then `array_join` is the standard idiom. Not measured live yet —
+        // proving a probe on Trino is phase 9.
+        MaintenanceDialect::Trino => {
+            format!("array_join(array_agg({row_hash} ORDER BY {row_hash}), '')")
+        }
     };
     // GoogleSQL's SHA256 returns BYTES rather than a hex string, so
     // `hash_hex_expr` wraps it in TO_HEX to keep the fingerprint a STRING the
@@ -790,6 +802,12 @@ pub fn emit_source_mutation_fingerprint(
         }
         MaintenanceDialect::Spark => {
             format!("CONCAT_WS('', SORT_ARRAY(COLLECT_LIST({row_hash})))")
+        }
+        // Trino has no ordered STRING_AGG; `array_agg(... ORDER BY ...)`
+        // then `array_join` is the standard idiom. Not measured live yet —
+        // proving a probe on Trino is phase 9.
+        MaintenanceDialect::Trino => {
+            format!("array_join(array_agg({row_hash} ORDER BY {row_hash}), '')")
         }
     };
     let agg_fingerprint = hash_hex_expr(&agg_body, dialect);

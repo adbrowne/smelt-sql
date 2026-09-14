@@ -26,12 +26,13 @@ use async_trait::async_trait;
 
 /// A dialect with no [`MaintenanceDialect`] mapping was asked for one.
 ///
-/// Trino/Iceberg is the live case: giving it its own `MaintenanceDialect`
-/// variant would demand ~150 Trino SQL spellings across ten emitters, which
-/// is `20260913-trino-incremental`'s subject, not this phase's
-/// (`docs/outcomes/20260913-trino-target-spine/phases/02-plan.md`). A caller
-/// reaching this should have consulted `smelt_logical::maintenance::
-/// availability` and downgraded before asking for maintenance-statement text.
+/// Every dialect now has a `MaintenanceDialect` mapping
+/// (`20260913-trino-incremental` phase 3 landed Trino's), so this is
+/// currently unreachable from `maintenance_dialect` itself; it stays a typed
+/// `Result` rather than an infallible mapping so a future dialect addition
+/// is a compile error here, not a silent panic. A caller reaching this
+/// should have consulted `smelt_logical::maintenance::availability` and
+/// downgraded before asking for maintenance-statement text.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 #[error(
     "no maintenance-statement dialect exists for '{dialect}': its incremental maintenance \
@@ -55,9 +56,7 @@ pub fn maintenance_dialect(
         SqlDialect::DuckDB => Ok(MaintenanceDialect::DuckDb),
         SqlDialect::SparkSQL => Ok(MaintenanceDialect::Spark),
         SqlDialect::BigQuery => Ok(MaintenanceDialect::BigQuery),
-        SqlDialect::Trino => Err(UnsupportedMaintenanceDialect {
-            dialect: dialect.name(),
-        }),
+        SqlDialect::Trino => Ok(MaintenanceDialect::Trino),
     }
 }
 
@@ -89,29 +88,32 @@ fn build_delete_insert_group(
 /// was not given one.
 ///
 /// DuckDB and Spark spell the matched arm `UPDATE SET *` and never read
-/// `columns`; GoogleSQL has no star form, so an empty list there would emit a
-/// syntactically valid `MERGE` whose matched arm assigns nothing — rows would
-/// silently stop being updated. Fail-loud discipline (`architecture.md`
-/// §"Fail-loud discipline") makes that an error naming the model, not a
-/// degraded write.
+/// `columns`; GoogleSQL and Trino's Iceberg `MERGE` have no star form, so an
+/// empty list there would emit a syntactically valid `MERGE` whose matched
+/// arm assigns nothing — rows would silently stop being updated. Fail-loud
+/// discipline (`architecture.md` §"Fail-loud discipline") makes that an
+/// error naming the model, not a degraded write.
 pub fn require_merge_columns(
     dialect: SqlDialect,
     schema: &str,
     table: &str,
     columns: &[String],
 ) -> Result<(), BackendError> {
-    let is_bigquery = matches!(
+    let needs_column_list = matches!(
         maintenance_dialect(dialect),
-        Ok(MaintenanceDialect::BigQuery)
+        Ok(MaintenanceDialect::BigQuery) | Ok(MaintenanceDialect::Trino)
     );
-    if is_bigquery && columns.is_empty() {
+    if needs_column_list && columns.is_empty() {
         return Err(BackendError::execution_failed(
             format!("{schema}.{table}"),
-            "column-scoped MERGE on BigQuery needs the model's output column list, and none was \
-             resolved — GoogleSQL has no `UPDATE SET *`, so the emitted matched arm would assign \
-             no columns. This usually means the model's output columns are not statically \
-             resolvable (e.g. a surviving `SELECT *`); name the columns in the model's projection."
-                .to_string(),
+            format!(
+                "column-scoped MERGE on {} needs the model's output column list, and none was \
+                 resolved — this dialect has no `UPDATE SET *`, so the emitted matched arm would \
+                 assign no columns. This usually means the model's output columns are not \
+                 statically resolvable (e.g. a surviving `SELECT *`); name the columns in the \
+                 model's projection.",
+                dialect.name()
+            ),
         ));
     }
     Ok(())
@@ -789,12 +791,10 @@ pub trait Backend: Send + Sync {
 mod tests {
     use super::*;
 
-    /// The three dialects with a `MaintenanceDialect` mapping resolve; Trino
-    /// does not — naming it in the error rather than absorbing it into one of
-    /// the other three's emitters (`docs/outcomes/20260913-trino-target-spine/
-    /// phases/02-plan.md`).
+    /// All four dialects now resolve their own `MaintenanceDialect` variant
+    /// (`20260913-trino-incremental` phase 3 landed Trino's).
     #[test]
-    fn maintenance_dialect_is_ok_for_the_three_implemented_dialects_and_err_for_trino() {
+    fn maintenance_dialect_is_ok_for_all_four_dialects() {
         assert_eq!(
             maintenance_dialect(SqlDialect::DuckDB),
             Ok(MaintenanceDialect::DuckDb)
@@ -807,10 +807,9 @@ mod tests {
             maintenance_dialect(SqlDialect::BigQuery),
             Ok(MaintenanceDialect::BigQuery)
         );
-
-        let err = maintenance_dialect(SqlDialect::Trino)
-            .expect_err("Trino has no MaintenanceDialect mapping yet");
-        assert_eq!(err.dialect, SqlDialect::Trino.name());
-        assert!(err.to_string().contains(SqlDialect::Trino.name()));
+        assert_eq!(
+            maintenance_dialect(SqlDialect::Trino),
+            Ok(MaintenanceDialect::Trino)
+        );
     }
 }

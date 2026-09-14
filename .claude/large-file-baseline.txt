@@ -8,6 +8,14 @@
 # smaller files are left unconstrained (see BASELINE_MIN_LINES in the script).
 # Regenerate with: .claude/scripts/large-file-check.sh --update
 #
+# 2026-09-14 (docs/outcomes/20260913-trino-incremental phase 03, sign-off:
+# Andrew Browne): fingerprint.rs 1196 -> 1202, adding the `MaintenanceDialect::
+# Trino` arm to `emit_repair_group_digest_select`'s combine expression (never
+# reached in production — the fingerprint-sidecar family Trino declines — but
+# spelled for totality per the no-silent-reuse discipline), in the same shape
+# as the file's existing per-dialect arms — not a new abstraction, so grown in
+# place rather than split.
+#
 # 2026-09-14 (docs/outcomes/20260913-trino-ledger phase 07, sign-off: Andrew
 # Browne): cumulative.rs 2178 -> 2183, repair_lowering.rs 1570 -> 1572,
 # technique_lowering/basic.rs 1120 -> 1122 — re-keying each file's staged
@@ -110,7 +118,7 @@ crates/smelt-logical/src/analysis/source_bounds.rs 3371
 crates/smelt-logical/src/analysis/walk/tree.rs 1183
 crates/smelt-logical/src/backbuild/classify.rs 4637
 crates/smelt-logical/src/maintenance/choice/mod.rs 1231
-crates/smelt-logical/src/maintenance/emit/fingerprint.rs 1196
+crates/smelt-logical/src/maintenance/emit/fingerprint.rs 1202
 crates/smelt-logical/src/maintenance/grouping.rs 1099
 crates/smelt-logical/src/maintenance/locality.rs 2124
 crates/smelt-logical/src/maintenance/propagate.rs 2113

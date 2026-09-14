@@ -10,13 +10,16 @@
 //! Every staged-relation emitter derives `transactional` from the
 //! [`StagedRelation`] it is handed, never from a hardcoded `true` — this is
 //! a standing gate over all five emitters (the four keyed/recompute shapes
-//! plus the keyless whole-row shape), not a fix for one. Two further
-//! standing facts close criterion 3 (a claim implies a builder): no source
-//! file in `crates/smelt-logical/src/maintenance/emit/` spells
-//! `CREATE TEMP TABLE` outside `staged_relation.rs`'s own `create_prefix`,
-//! and no production Trino caller can reach the keyless executor without
-//! first asking `smelt_backend::maintenance_dialect` — which refuses Trino
-//! by name.
+//! plus the keyless whole-row shape), not a fix for one. A further standing
+//! fact closes criterion 3 (a claim implies a builder): no source file in
+//! `crates/smelt-logical/src/maintenance/emit/` spells `CREATE TEMP TABLE`
+//! outside `staged_relation.rs`'s own `create_prefix`.
+//!
+//! `smelt_backend::maintenance_dialect(SqlDialect::Trino)` now resolves
+//! (`20260913-trino-incremental` phase 3), so it no longer stands between a
+//! Trino caller and the keyless executor — which families actually reach it
+//! is `20260913-trino-incremental` phase 5's subject (the merge-less
+//! conditional write over T3's staged relation), not this file's.
 
 use smelt_logical::maintenance::diff_patch::DeleteLeg;
 use smelt_logical::maintenance::emit::{
@@ -164,18 +167,12 @@ fn no_staged_emitter_hardcodes_a_temp_table_spelling() {
     );
 }
 
-/// Trino has no `MaintenanceDialect` variant
-/// (`smelt_backend::maintenance_dialect(SqlDialect::Trino)` is an `Err`
-/// naming the backend), so `execute_staged_keyless_recompute`'s first
-/// fallible step refuses by name before it can build a `StagedRelation` at
-/// all — the asserted form of phase 7's "no production Trino caller reaches
-/// it".
+/// `smelt_backend::maintenance_dialect(SqlDialect::Trino)` now resolves to
+/// `MaintenanceDialect::Trino` (`20260913-trino-incremental` phase 3) — the
+/// non-regression counterpart of this file's other assertions, pinning that
+/// the mapping succeeds rather than the pre-phase-3 refusal.
 #[test]
-fn trino_cannot_reach_the_keyless_executor_without_a_maintenance_dialect() {
+fn trino_now_resolves_a_maintenance_dialect() {
     let result = smelt_backend::maintenance_dialect(smelt_dialect::SqlDialect::Trino);
-    let err = result.expect_err("Trino must have no maintenance dialect");
-    assert!(
-        err.to_string().contains("Trino"),
-        "refusal must name the backend: {err}"
-    );
+    assert_eq!(result, Ok(MaintenanceDialect::Trino));
 }

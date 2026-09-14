@@ -147,7 +147,7 @@ approximated.
 |---|-------|--------|
 | 1 | Characterise Iceberg `MERGE` by execution: each clause form run against the live tier, the three merge capability flags confirmed or corrected in the spec matrix, measured errors quoted | done |
 | 2 | Spec delta: `multi_backend.md` §"Whole-row MERGE" / §"Column-scoped merge and conditional-write capabilities" / §"Incremental & schema evolution per backend" stated for Trino, including which families are reachable and which take T3's downgrade, plus the refusal diagnostics any absent clause needs | done |
-| 3 | The append and whole-row-`MERGE` upsert families executing end-to-end through `execute_project` — including landing `maintenance_dialect` for `SqlDialect::Trino`, which returns `Err` today and blocks every family — with their `statement_parity` executed-vs-emitted legs | planned |
+| 3 | The append and whole-row-`MERGE` upsert families executing end-to-end through `execute_project` — including landing `maintenance_dialect` for `SqlDialect::Trino`, which returns `Err` today and blocks every family — with their `statement_parity` executed-vs-emitted legs | blocked |
 | 4 | The emulated delete-and-insert window: `DELETE` range exactly covering the insert's write window, asserted directly and under out-of-order and repeated application | pending |
 | 5 | The merge-less conditional write over T3's staged relation (the departed-row delete as a separate scoped `DELETE`, since `WHEN NOT MATCHED BY SOURCE` is absent), and the column-scoped merge — executing where its cell needs no merge ledger, taking T3's `MaintenanceStateDowngraded` route where it does, per Spark's precedent | pending |
 | 6 | The degraded routes: per-group recompute, the succession grain's full rebuild in place of the patch route (presented table row- and column-identical to the ledger-bearing rebuild's presented arm), and the sidecar-less key-addressed downgrade — each recorded on the cell and explain-visible | pending |
@@ -242,3 +242,51 @@ approximated.
   comparison would be testing almost nothing.
 
 ## Blocked
+
+- **2026-09-14 — phase 3 blocked at its live `execute_project` proof (Tests 7-8), after landing
+  `MaintenanceDialect::Trino` and every emitter it forced.** `MaintenanceDialect::Trino` exists,
+  resolves for all four dialects, and every arm it forced is filled per the three-way discipline
+  (`crates/smelt-logical/src/maintenance/emit/{merge,hash,bootstrap,fingerprint,partition_bucket,
+  probes}.rs`, `succession/mod.rs`, `smelt-runtime`'s `sidecar.rs`). `TrinoBackend::insert_into_
+  from_query` is implemented. The append and whole-row-MERGE-upsert families are proved live at the
+  `Backend`-trait level (`crates/smelt-backend-trino/tests/backend_live.rs`:
+  `insert_into_from_query_appends_and_leaves_prior_rows_intact`,
+  `delete_and_insert_transactional_covers_two_disjoint_windows`,
+  `merge_into_upserts_matched_and_unmatched_rows_across_two_runs` — all three pass against the live
+  tier). A real bug in the Trino `sha256` spelling was found and fixed live along the way
+  (`hash_digest_expr`'s Trino arm needed hex-encoding to keep the digest-of-digests composition
+  well-typed).
+
+  What blocks Tests 7 and 8 (a real `execute_project` CLI run, and `statement_parity`'s Trino leg)
+  is **three separate, pre-existing, cross-cutting bugs, none owned by this phase and none
+  Trino-specific in mechanism** — Trino's stricter typing is simply what surfaced them; every other
+  backend's looser implicit coercion has been masking them:
+  1. **Calendar-literal type coercion** — `partition_literal`'s calendar axis and `transformer.rs`'s
+     injected scan-window predicate both render a bare quoted string compared against a `DATE`/
+     `TIMESTAMP` column; DuckDB/Spark/BigQuery coerce it implicitly, Trino refuses
+     (`Cannot apply operator: date <= varchar(10)`, measured live).
+  2. **A bare-integer run window's axis is only re-resolved on the `--dry-run` path.** The real
+     execution path's `(None, None)` dispatch arm in `execute/project/mod.rs` hardcodes a calendar
+     axis rather than calling `parse_run_window_in_axis` the way `--dry-run`/`build_model_plans`
+     does, so an integer-axis model's real run injects a quoted string against an `INTEGER` column
+     (`Cannot apply operator: integer <= varchar(1)`, measured live). DuckDB tolerates it; Trino
+     does not.
+  3. **A snapshot-reconcile-shaped keyed model's `ColumnScopedMerge`-downgrade route assumes a
+     `ScanClamp` that cannot exist for an `UpstreamMutation`-triggered (unclocked) cell**, refusing
+     with `MaintenanceRepairSliceMissing` instead of falling back to the full-scan recompute the
+     `key_scope: None` "reachable" row already promises. `20260913-trino-ledger`'s Spark twin
+     realises the identical fully-degraded posture, so this is very likely reachable on Spark too.
+
+  Each is documented with the exact live error text and root-cause trace in
+  `crates/smelt-cli/tests/trino_incremental_families.rs`'s doc comments (now a documentation-only
+  file naming the three gaps rather than a live CLI test, since the CLI dispatch path is what hits
+  all three). None is a small fix folded into this phase: gap 1 needs a design decision (global
+  ANSI-literal reformat vs. threading dialect-awareness through `partition_literal`/`Region`/
+  `inject_time_filter`/`inject_source_filters`, weighed against ~19 files pinning exact literal
+  text); gap 2 is mechanical but touches the shared run-window dispatch every family's real
+  execution goes through; gap 3 is a `smelt_logical::maintenance::choice` cell-derivation fix.
+  Candidate options for the next planner: (a) spin up one or more dedicated fix phases for gaps 1-3
+  before resuming phase 3's remaining CLI-level tests (recommended — phases 4-6 will very likely
+  hit the same gaps for any calendar-partitioned or snapshot-reconcile-shaped model), or (b) accept
+  the `backend_live.rs` statement-level proofs as sufficient for phase 3's own scope and rescope
+  Tests 7-8 into whichever fix phase lands gap 1/2/3. Full trace: `phases/03-summary.md`.

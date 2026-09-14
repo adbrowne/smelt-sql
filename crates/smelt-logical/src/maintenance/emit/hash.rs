@@ -22,6 +22,24 @@ pub(crate) fn hash_digest_expr(expr: &str, dialect: MaintenanceDialect) -> Strin
         MaintenanceDialect::DuckDb => format!("sha256({expr})"),
         MaintenanceDialect::Spark => format!("sha2({expr}, 256)"),
         MaintenanceDialect::BigQuery => format!("sha256({expr})"),
+        // Unlike DuckDB's and BigQuery's SHA256 (both accept a plain
+        // string and return one — BigQuery's is polymorphic over
+        // STRING/BYTES), Trino's `sha256` takes and returns `varbinary`
+        // only. This module's digest-of-digests composition
+        // (`fingerprint.rs`'s `column_fingerprint_expr`/`row_fingerprint_
+        // expr`) concatenates one call's output straight into the next
+        // call's input, so `hash_digest_expr` must return the same HEX
+        // STRING shape DuckDB's and Spark's already do — a raw `varbinary`
+        // digest would make that concatenation, and any later `to_utf8`
+        // wrap, fail on a type Trino's functions were never given a string
+        // to convert. Hex-encoding here (rather than only in
+        // `hash_hex_expr`) is what keeps `hash_digest_expr` and
+        // `hash_hex_expr` identical on Trino, exactly as they already are
+        // on DuckDB and Spark. Measured live: a raw `sha256(to_utf8(expr))`
+        // digest concatenated into another `to_utf8(...)` call failed with
+        // `Unexpected parameters (varbinary) for function to_utf8`
+        // (`crates/smelt-cli/tests/trino_incremental_families.rs`).
+        MaintenanceDialect::Trino => format!("to_hex(sha256(to_utf8({expr})))"),
     }
 }
 
@@ -33,6 +51,9 @@ pub(crate) fn hash_digest_expr(expr: &str, dialect: MaintenanceDialect) -> Strin
 pub(crate) fn hash_hex_expr(expr: &str, dialect: MaintenanceDialect) -> String {
     match dialect {
         MaintenanceDialect::BigQuery => format!("TO_HEX(SHA256({expr}))"),
+        // `hash_digest_expr` already hex-encodes on Trino (see its own doc
+        // comment), so Trino falls through to the shared arm exactly like
+        // DuckDB and Spark.
         _ => hash_digest_expr(expr, dialect),
     }
 }

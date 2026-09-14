@@ -61,7 +61,7 @@ pub fn emit_column_scoped_merge(
         .collect::<Vec<_>>()
         .join(" AND ");
     let set = whole_row_update_set(columns, "source", dialect);
-    let insert = whole_row_insert_arm(dialect);
+    let insert = whole_row_insert_arm(columns, "source", dialect);
     StatementGroup {
         statements: vec![MaintenanceStatement::new(format!(
             "MERGE INTO {table} AS target USING ({source_select}) AS source ON {on} \
@@ -86,7 +86,11 @@ fn whole_row_update_set(
 ) -> String {
     match dialect {
         MaintenanceDialect::DuckDb | MaintenanceDialect::Spark => "*".to_string(),
-        MaintenanceDialect::BigQuery => columns
+        // Trino's Iceberg `MERGE` refuses `UPDATE SET *` the same way
+        // GoogleSQL does (`mismatched input '*'. Expecting: <identifier>`,
+        // measured live — `crates/smelt-backend-trino/tests/
+        // merge_clause_forms.rs`), so it takes BigQuery's spelled-out form.
+        MaintenanceDialect::BigQuery | MaintenanceDialect::Trino => columns
             .iter()
             .map(|c| format!("{c} = {source_alias}.{c}"))
             .collect::<Vec<_>>()
@@ -94,13 +98,31 @@ fn whole_row_update_set(
     }
 }
 
-/// The `WHEN NOT MATCHED` arm of a whole-row upsert. Needs no column list in
-/// either grammar, so emitters that render their own explicit `UPDATE SET`
-/// (the keyed folds) use this alone.
-fn whole_row_insert_arm(dialect: MaintenanceDialect) -> &'static str {
+/// The `WHEN NOT MATCHED` arm of a whole-row upsert, over `columns` (the
+/// full row `source_alias` projects) — needed only by the dialects with no
+/// star/`ROW` shorthand.
+fn whole_row_insert_arm(
+    columns: &[String],
+    source_alias: &str,
+    dialect: MaintenanceDialect,
+) -> String {
     match dialect {
-        MaintenanceDialect::DuckDb | MaintenanceDialect::Spark => "INSERT *",
-        MaintenanceDialect::BigQuery => "INSERT ROW",
+        MaintenanceDialect::DuckDb | MaintenanceDialect::Spark => "INSERT *".to_string(),
+        MaintenanceDialect::BigQuery => "INSERT ROW".to_string(),
+        // Trino's Iceberg `MERGE` refuses both `INSERT *`
+        // (`mismatched input '*'. Expecting: '(', 'VALUES'`) and `INSERT
+        // ROW` (`mismatched input 'ROW'. Expecting: '(', 'VALUES'`) —
+        // measured live (`merge_clause_forms.rs`) — so it needs the
+        // explicit column-list form.
+        MaintenanceDialect::Trino => {
+            let col_list = columns.join(", ");
+            let val_list = columns
+                .iter()
+                .map(|c| format!("{source_alias}.{c}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("INSERT ({col_list}) VALUES ({val_list})")
+        }
     }
 }
 
@@ -151,7 +173,7 @@ pub fn emit_column_scoped_merge_suppressed(
         .collect::<Vec<_>>()
         .join(" OR ");
     let set = whole_row_update_set(columns, "source", dialect);
-    let insert = whole_row_insert_arm(dialect);
+    let insert = whole_row_insert_arm(columns, "source", dialect);
     StatementGroup {
         statements: vec![MaintenanceStatement::new(format!(
             "MERGE INTO {table} AS target USING ({source_select}) AS source ON {on} \
@@ -311,12 +333,17 @@ pub fn emit_keyed_fold(
         .map(|(col, expr)| format!("{col} = {expr}"))
         .collect::<Vec<_>>()
         .join(", ");
+    let insert_columns: Vec<String> = key
+        .iter()
+        .cloned()
+        .chain(folds.iter().map(|(col, _)| col.clone()))
+        .collect();
     StatementGroup {
         statements: vec![MaintenanceStatement::new(format!(
             "MERGE INTO {schema_table} AS target USING ({delta_select}) AS delta ON {on} \
              WHEN MATCHED THEN UPDATE SET {sets} \
              WHEN NOT MATCHED THEN {insert}",
-            insert = whole_row_insert_arm(dialect)
+            insert = whole_row_insert_arm(&insert_columns, "delta", dialect)
         ))],
         transactional: false,
     }
@@ -414,12 +441,17 @@ pub fn emit_keyed_fold_suppressed(
         .map(|(col, expr)| format!("{col} = {expr}"))
         .collect::<Vec<_>>()
         .join(", ");
+    let insert_columns: Vec<String> = key
+        .iter()
+        .cloned()
+        .chain(folds.iter().map(|(col, _)| col.clone()))
+        .collect();
     StatementGroup {
         statements: vec![MaintenanceStatement::new(format!(
             "MERGE INTO {schema_table} AS target USING ({delta_select}) AS delta ON {on} \
              WHEN MATCHED AND ({suppression}) THEN UPDATE SET {sets} \
              WHEN NOT MATCHED THEN {insert}",
-            insert = whole_row_insert_arm(dialect)
+            insert = whole_row_insert_arm(&insert_columns, "delta", dialect)
         ))],
         transactional: false,
     }
@@ -432,7 +464,9 @@ pub fn emit_keyed_fold_suppressed(
 /// for Spark.
 fn null_safe_eq(lhs: &str, rhs: &str, dialect: MaintenanceDialect) -> String {
     match dialect {
-        MaintenanceDialect::DuckDb | MaintenanceDialect::BigQuery => {
+        // Trino's Iceberg connector accepts `IS NOT DISTINCT FROM`, matching
+        // DuckDB and BigQuery (`multi_backend.md` §"Null-safe equality").
+        MaintenanceDialect::DuckDb | MaintenanceDialect::BigQuery | MaintenanceDialect::Trino => {
             format!("{lhs} IS NOT DISTINCT FROM {rhs}")
         }
         MaintenanceDialect::Spark => format!("{lhs} <=> {rhs}"),
@@ -543,6 +577,34 @@ mod column_scoped_merge_tests {
             MaintenanceDialect::DuckDb,
         );
     }
+
+    /// Trino's Iceberg `MERGE` has no star form on either arm (measured
+    /// live, `crates/smelt-backend-trino/tests/merge_clause_forms.rs`): the
+    /// matched arm renders `c = alias.c` per output column, never `*`, and
+    /// the not-matched arm renders an explicit column-list `INSERT`, never
+    /// `INSERT *`/`INSERT ROW`.
+    #[test]
+    fn trino_whole_row_upsert_spells_both_arms_column_by_column() {
+        let columns = vec!["id".to_string(), "email".to_string()];
+        let group = emit_column_scoped_merge(
+            "warehouse.dim_users",
+            &keys(),
+            "SELECT * FROM delta",
+            &columns,
+            MaintenanceDialect::Trino,
+        );
+        assert_eq!(group.statements.len(), 1);
+        assert_eq!(
+            group.statements[0].sql,
+            "MERGE INTO warehouse.dim_users AS target USING (SELECT * FROM delta) AS source ON \
+             target.id = source.id WHEN MATCHED THEN UPDATE SET id = source.id, email = \
+             source.email WHEN NOT MATCHED THEN INSERT (id, email) VALUES (source.id, \
+             source.email)"
+        );
+        assert!(!group.statements[0].sql.contains("SET *"));
+        assert!(!group.statements[0].sql.contains("INSERT *"));
+        assert!(!group.statements[0].sql.contains("INSERT ROW"));
+    }
 }
 
 #[cfg(test)]
@@ -593,6 +655,20 @@ mod departed_key_delete_tests {
                 .contains("main.device_daily.device_id <=> delta.device_id"),
             "{}",
             spark_stmt.sql
+        );
+
+        let trino_stmt = emit_departed_key_delete(
+            "main.device_daily",
+            &["device_id".to_string()],
+            "SELECT * FROM raw.devices",
+            MaintenanceDialect::Trino,
+        );
+        assert!(
+            trino_stmt
+                .sql
+                .contains("main.device_daily.device_id IS NOT DISTINCT FROM delta.device_id"),
+            "{}",
+            trino_stmt.sql
         );
     }
 }

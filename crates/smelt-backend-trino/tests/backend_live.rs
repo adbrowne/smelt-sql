@@ -18,7 +18,7 @@ use arrow::array::{
     RecordBatch, StringArray, TimestampMicrosecondArray,
 };
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
-use smelt_backend::{Backend, BackendError, Materialization};
+use smelt_backend::{Backend, BackendError, Materialization, PartitionAxis, PartitionRange};
 use smelt_backend_trino::{TrinoBackend, TrinoClientConfig};
 
 /// One live-run's connection, catalog and isolated schema.
@@ -636,4 +636,224 @@ async fn array_result_column_decodes_to_arrow() {
     );
 
     drop_schema(&env).await;
+}
+
+/// `20260913-trino-incremental` phase 3, test 6: `insert_into_from_query`
+/// appends the query's rows to an existing Iceberg table and leaves prior
+/// rows intact — the insert-only append family's write primitive.
+#[tokio::test]
+async fn insert_into_from_query_appends_and_leaves_prior_rows_intact() {
+    let Some(env) =
+        live_env_or_skip("insert_into_from_query_appends_and_leaves_prior_rows_intact").await
+    else {
+        return;
+    };
+
+    env.backend
+        .create_table_as(
+            &env.schema,
+            "smelt_p3_append",
+            "SELECT * FROM (VALUES (1, 'a'), (2, 'b')) AS t(id, label)",
+        )
+        .await
+        .expect("create_table_as must succeed");
+
+    env.backend
+        .insert_into_from_query(
+            &env.schema,
+            "smelt_p3_append",
+            "SELECT * FROM (VALUES (3, 'c'), (4, 'd')) AS t(id, label)",
+        )
+        .await
+        .expect("insert_into_from_query must succeed");
+
+    let count = env
+        .backend
+        .get_row_count(&env.schema, "smelt_p3_append")
+        .await
+        .expect("get_row_count must succeed");
+    assert_eq!(
+        count, 4,
+        "insert_into_from_query must append, leaving the original 2 rows plus the 2 new ones"
+    );
+
+    drop_schema(&env).await;
+}
+
+/// `20260913-trino-incremental` phase 3: the whole-row `MERGE` upsert family
+/// — `Backend::merge_into`'s default implementation, routed through
+/// `require_merge_columns` + `emit_column_scoped_merge`'s Trino spelling
+/// (column-by-column `UPDATE SET`/`INSERT`, never `SET *`/`INSERT *`/`INSERT
+/// ROW`) — matches a matched row, inserts an unmatched one, and is
+/// idempotent by key across two runs, the second mutating one key's value.
+#[tokio::test]
+async fn merge_into_upserts_matched_and_unmatched_rows_across_two_runs() {
+    let Some(env) =
+        live_env_or_skip("merge_into_upserts_matched_and_unmatched_rows_across_two_runs").await
+    else {
+        return;
+    };
+
+    env.backend
+        .create_table_as(
+            &env.schema,
+            "smelt_p3_merge",
+            "SELECT * FROM (VALUES (1, 10), (2, 20)) AS t(id, attr)",
+        )
+        .await
+        .expect("create_table_as must succeed");
+
+    let columns = vec!["id".to_string(), "attr".to_string()];
+    let unique_key = vec!["id".to_string()];
+
+    // First MERGE: id=2 matches and updates, id=3 is unmatched and inserts.
+    env.backend
+        .merge_into(
+            &env.schema,
+            "smelt_p3_merge",
+            "SELECT * FROM (VALUES (2, 99), (3, 30)) AS t(id, attr)",
+            &unique_key,
+            &columns,
+        )
+        .await
+        .expect("first merge_into must succeed");
+
+    let mut rows = fetch_id_attr_rows(&env, "smelt_p3_merge").await;
+    rows.sort();
+    assert_eq!(rows, vec![(1, 10), (2, 99), (3, 30)]);
+
+    // Second MERGE: id=1 matches and updates, id=2/3 are untouched.
+    env.backend
+        .merge_into(
+            &env.schema,
+            "smelt_p3_merge",
+            "SELECT * FROM (VALUES (1, 111)) AS t(id, attr)",
+            &unique_key,
+            &columns,
+        )
+        .await
+        .expect("second merge_into must succeed");
+
+    let mut rows = fetch_id_attr_rows(&env, "smelt_p3_merge").await;
+    rows.sort();
+    assert_eq!(
+        rows,
+        vec![(1, 111), (2, 99), (3, 30)],
+        "the whole-row MERGE upsert must be idempotent by key across separate runs"
+    );
+
+    drop_schema(&env).await;
+}
+
+/// Reads an integer column back as `i64` regardless of whether Trino's
+/// literal-type inference decoded it as Arrow `Int32` or `Int64`.
+fn int_column_as_i64(batch: &RecordBatch, idx: usize) -> Vec<i64> {
+    let column = batch.column(idx);
+    if let Some(a) = column.as_any().downcast_ref::<Int64Array>() {
+        return (0..a.len()).map(|i| a.value(i)).collect();
+    }
+    column
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .unwrap_or_else(|| panic!("expected an Int32 or Int64 column at index {idx}"))
+        .iter()
+        .map(|v| v.unwrap_or_default() as i64)
+        .collect()
+}
+
+/// `20260913-trino-incremental` phase 3: the insert-only append family —
+/// `Backend::delete_and_insert_transactional`'s default implementation,
+/// routed through `emit_delete_insert`'s dialect-invariant `Region`
+/// text — run over two disjoint integer-axis windows, ending
+/// multiset-equal to inserting the union directly. The integer axis is
+/// deliberate: it needs no per-dialect literal typing, so it isolates this
+/// family's own emitter/backend correctness from the separate, pre-existing
+/// calendar-literal gap this phase's `trino_incremental_families.rs` test
+/// documents (a bare quoted `'2026-01-01'` compared against a `DATE`/
+/// `TIMESTAMP` column, implicitly coerced by DuckDB/Spark/BigQuery but
+/// refused outright by Trino).
+#[tokio::test]
+async fn delete_and_insert_transactional_covers_two_disjoint_windows() {
+    let Some(env) =
+        live_env_or_skip("delete_and_insert_transactional_covers_two_disjoint_windows").await
+    else {
+        return;
+    };
+
+    env.backend
+        .create_table_as(
+            &env.schema,
+            "smelt_p3_append",
+            "SELECT * FROM (VALUES (CAST(0 AS INTEGER), CAST(0 AS INTEGER))) AS t(batch_id, val) WHERE 1=0",
+        )
+        .await
+        .expect("create_table_as must succeed");
+
+    env.backend
+        .delete_and_insert_transactional(
+            &env.schema,
+            "smelt_p3_append",
+            &PartitionRange {
+                column: "batch_id".to_string(),
+                start: "1".to_string(),
+                end: "2".to_string(),
+                axis: PartitionAxis::Integer,
+            },
+            "SELECT * FROM (VALUES (1, 1), (1, 2)) AS t(batch_id, val)",
+        )
+        .await
+        .expect("window 1's delete_and_insert_transactional must succeed");
+
+    env.backend
+        .delete_and_insert_transactional(
+            &env.schema,
+            "smelt_p3_append",
+            &PartitionRange {
+                column: "batch_id".to_string(),
+                start: "2".to_string(),
+                end: "3".to_string(),
+                axis: PartitionAxis::Integer,
+            },
+            "SELECT * FROM (VALUES (2, 3), (2, 4), (2, 5)) AS t(batch_id, val)",
+        )
+        .await
+        .expect("window 2's delete_and_insert_transactional must succeed");
+
+    let mut rows = fetch_two_int_columns(&env, "smelt_p3_append", "batch_id", "val").await;
+    rows.sort();
+    assert_eq!(
+        rows,
+        vec![(1, 1), (1, 2), (2, 3), (2, 4), (2, 5)],
+        "two disjoint windows' DELETE+INSERT must together equal the union, with window 1's \
+         rows untouched by window 2's write"
+    );
+
+    drop_schema(&env).await;
+}
+
+async fn fetch_two_int_columns(
+    env: &LiveEnv,
+    table: &str,
+    col_a: &str,
+    col_b: &str,
+) -> Vec<(i64, i64)> {
+    let batches = env
+        .backend
+        .execute_sql(&format!(
+            "SELECT {col_a}, {col_b} FROM {}",
+            qualified(&env.catalog, &env.schema, table)
+        ))
+        .await
+        .expect("execute_sql must succeed");
+    let mut rows = Vec::new();
+    for batch in &batches {
+        let a = int_column_as_i64(batch, 0);
+        let b = int_column_as_i64(batch, 1);
+        rows.extend(a.into_iter().zip(b));
+    }
+    rows
+}
+
+async fn fetch_id_attr_rows(env: &LiveEnv, table: &str) -> Vec<(i64, i64)> {
+    fetch_two_int_columns(env, table, "id", "attr").await
 }

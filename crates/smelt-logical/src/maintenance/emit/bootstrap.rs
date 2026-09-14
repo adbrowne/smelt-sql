@@ -35,6 +35,12 @@ pub fn emit_create_table_as(
         // plainly-created table is accepted, so the bootstrap needs nothing
         // extra. Confirmed live (scripts/bigquery-probe3.sh).
         MaintenanceDialect::BigQuery => "",
+        // Trino's Iceberg connector has one table format per catalog and no
+        // per-statement format clause; a plain `CREATE TABLE … AS SELECT`
+        // against the Iceberg catalog is what both families phase 3 executes
+        // (append, whole-row MERGE) need. Measured live
+        // (`crates/smelt-backend-trino/tests/merge_clause_forms.rs`).
+        MaintenanceDialect::Trino => "",
     };
     StatementGroup {
         statements: vec![MaintenanceStatement::new(format!(

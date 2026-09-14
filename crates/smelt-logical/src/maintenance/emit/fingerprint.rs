@@ -391,6 +391,12 @@ pub fn emit_repair_group_digest_select(
         }
         MaintenanceDialect::BigQuery => format!("BIT_XOR(FARM_FINGERPRINT({row_digest_expr}))"),
         MaintenanceDialect::Spark => format!("bit_xor(xxhash64({row_digest_expr}))"),
+        // The fingerprint-sidecar family maps to `StateStructure::
+        // FingerprintSidecar`, which Trino never realises
+        // (`20260913-trino-ledger`) — the plan layer downgrades before this
+        // is reached. Trino has `checksum`/`xxhash64` too; spelled for
+        // totality, not measured live.
+        MaintenanceDialect::Trino => format!("bit_xor(xxhash64({row_digest_expr}))"),
     };
     format!(
         "SELECT {key_expr} AS delta_key, CAST({combined} AS {cast_type}) AS delta_digest FROM \

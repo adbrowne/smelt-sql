@@ -61,6 +61,7 @@ pub enum MaintenanceDialect {
     DuckDb,
     Spark,
     BigQuery,
+    Trino,
 }
 
 /// A half-open region `[start, end)` on the output partition column; values
