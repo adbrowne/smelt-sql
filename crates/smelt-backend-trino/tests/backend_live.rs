@@ -11,6 +11,8 @@
 //!   cargo test -p smelt-backend-trino --test backend_live
 //!   bash scripts/trino-down.sh
 
+mod common;
+
 use std::sync::Arc;
 
 use arrow::array::{
@@ -21,77 +23,16 @@ use arrow::datatypes::{DataType, Field, Schema, SchemaRef, TimeUnit};
 use smelt_backend::{
     Backend, BackendError, Materialization, PartitionAxis, PartitionColumnType, PartitionRange,
 };
-use smelt_backend_trino::{TrinoBackend, TrinoClientConfig};
-
-/// One live-run's connection, catalog and isolated schema.
-struct LiveEnv {
-    backend: TrinoBackend,
-    catalog: String,
-    schema: String,
-}
-
-/// A schema name unique to this run, so two worktrees — or a developer beside
-/// an autonomy loop — never collide.
-fn unique_schema() -> String {
-    let base = std::env::var("SMELT_TRINO_SCHEMA").unwrap_or_else(|_| "smelt_dev".to_string());
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
-    format!("{base}_{}_{nanos}", std::process::id())
-}
-
 /// Quote and join a catalog-qualified name the same way `TrinoBackend`
 /// itself does — kept local since the backend's own quoting is crate-private.
 fn qualified(catalog: &str, schema: &str, name: &str) -> String {
     format!("\"{catalog}\".\"{schema}\".\"{name}\"")
 }
 
-/// Connect, create the run's isolated schema, and return the env — or
-/// `None` when `SMELT_TRINO_URL` is unset, meaning the caller should skip.
-async fn live_env_or_skip(test_name: &str) -> Option<LiveEnv> {
-    let Ok(base_url) = std::env::var("SMELT_TRINO_URL") else {
-        eprintln!("Skipping {test_name} — set SMELT_TRINO_URL");
-        return None;
-    };
-    let user = std::env::var("SMELT_TRINO_USER").unwrap_or_else(|_| "smelt".to_string());
-    let catalog = std::env::var("SMELT_TRINO_CATALOG").unwrap_or_else(|_| "iceberg".to_string());
-    let schema = unique_schema();
-
-    let backend = TrinoBackend::new(TrinoClientConfig {
-        base_url,
-        user,
-        catalog: catalog.clone(),
-        schema: schema.clone(),
-        password: None,
-    });
-    backend
-        .ensure_schema(&schema)
-        .await
-        .unwrap_or_else(|e| panic!("ensure_schema must succeed against a live tier: {e}"));
-
-    Some(LiveEnv {
-        backend,
-        catalog,
-        schema,
-    })
-}
-
-/// Best-effort teardown of the run's isolated schema. Not a hard assertion —
-/// a failure here should not fail the test whose assertions already ran.
-async fn drop_schema(env: &LiveEnv) {
-    let _ = env
-        .backend
-        .execute_sql(&format!(
-            "DROP SCHEMA IF EXISTS \"{}\".\"{}\"",
-            env.catalog, env.schema
-        ))
-        .await;
-}
-
 #[tokio::test]
 async fn ensure_schema_is_idempotent() {
-    let Some(env) = live_env_or_skip("ensure_schema_is_idempotent").await else {
+    let Some(env) = common::live_env_or_skip("ensure_schema_is_idempotent", "backend_live").await
+    else {
         return;
     };
     env.backend
@@ -99,12 +40,15 @@ async fn ensure_schema_is_idempotent() {
         .await
         .expect("second ensure_schema must be a no-op, not an error");
 
-    drop_schema(&env).await;
+    common::drop_schema(&env).await;
 }
 
 #[tokio::test]
 async fn table_exists_is_false_then_true_then_false() {
-    let Some(env) = live_env_or_skip("table_exists_is_false_then_true_then_false").await else {
+    let Some(env) =
+        common::live_env_or_skip("table_exists_is_false_then_true_then_false", "backend_live")
+            .await
+    else {
         return;
     };
 
@@ -134,12 +78,15 @@ async fn table_exists_is_false_then_true_then_false() {
         .await
         .unwrap());
 
-    drop_schema(&env).await;
+    common::drop_schema(&env).await;
 }
 
 #[tokio::test]
 async fn create_table_as_then_row_count_and_preview() {
-    let Some(env) = live_env_or_skip("create_table_as_then_row_count_and_preview").await else {
+    let Some(env) =
+        common::live_env_or_skip("create_table_as_then_row_count_and_preview", "backend_live")
+            .await
+    else {
         return;
     };
 
@@ -174,12 +121,14 @@ async fn create_table_as_then_row_count_and_preview() {
         .collect();
     assert_eq!(column_names, vec!["id".to_string(), "label".to_string()]);
 
-    drop_schema(&env).await;
+    common::drop_schema(&env).await;
 }
 
 #[tokio::test]
 async fn create_view_as_then_read_back_and_drop() {
-    let Some(env) = live_env_or_skip("create_view_as_then_read_back_and_drop").await else {
+    let Some(env) =
+        common::live_env_or_skip("create_view_as_then_read_back_and_drop", "backend_live").await
+    else {
         return;
     };
 
@@ -229,12 +178,17 @@ async fn create_view_as_then_read_back_and_drop() {
         .await
         .expect("drop_view_if_exists must succeed");
 
-    drop_schema(&env).await;
+    common::drop_schema(&env).await;
 }
 
 #[tokio::test]
 async fn execute_model_materializes_a_table_and_a_view() {
-    let Some(env) = live_env_or_skip("execute_model_materializes_a_table_and_a_view").await else {
+    let Some(env) = common::live_env_or_skip(
+        "execute_model_materializes_a_table_and_a_view",
+        "backend_live",
+    )
+    .await
+    else {
         return;
     };
 
@@ -273,12 +227,14 @@ async fn execute_model_materializes_a_table_and_a_view() {
     let total_rows: usize = preview.iter().map(|b| b.num_rows()).sum();
     assert_eq!(total_rows, 3);
 
-    drop_schema(&env).await;
+    common::drop_schema(&env).await;
 }
 
 #[tokio::test]
 async fn a_bad_statement_maps_to_a_typed_error() {
-    let Some(env) = live_env_or_skip("a_bad_statement_maps_to_a_typed_error").await else {
+    let Some(env) =
+        common::live_env_or_skip("a_bad_statement_maps_to_a_typed_error", "backend_live").await
+    else {
         return;
     };
 
@@ -295,12 +251,17 @@ async fn a_bad_statement_maps_to_a_typed_error() {
         "expected a typed BackendError, got: {err:?}"
     );
 
-    drop_schema(&env).await;
+    common::drop_schema(&env).await;
 }
 
 #[tokio::test]
 async fn drop_table_if_exists_on_a_missing_table_is_ok() {
-    let Some(env) = live_env_or_skip("drop_table_if_exists_on_a_missing_table_is_ok").await else {
+    let Some(env) = common::live_env_or_skip(
+        "drop_table_if_exists_on_a_missing_table_is_ok",
+        "backend_live",
+    )
+    .await
+    else {
         return;
     };
 
@@ -309,7 +270,7 @@ async fn drop_table_if_exists_on_a_missing_table_is_ok() {
         .await
         .expect("dropping a table that never existed must be Ok, not an error");
 
-    drop_schema(&env).await;
+    common::drop_schema(&env).await;
 }
 
 /// The whole seed type set of `seeds.md` §"Type inference", every column
@@ -372,7 +333,12 @@ fn seed_type_set_batch(schema: SchemaRef) -> RecordBatch {
 
 #[tokio::test]
 async fn load_table_round_trips_the_whole_seed_type_set() {
-    let Some(env) = live_env_or_skip("load_table_round_trips_the_whole_seed_type_set").await else {
+    let Some(env) = common::live_env_or_skip(
+        "load_table_round_trips_the_whole_seed_type_set",
+        "backend_live",
+    )
+    .await
+    else {
         return;
     };
 
@@ -470,12 +436,14 @@ async fn load_table_round_trips_the_whole_seed_type_set() {
     assert_eq!(strings.value(1), "hello");
     assert_eq!(strings.value(2), "it's ok");
 
-    drop_schema(&env).await;
+    common::drop_schema(&env).await;
 }
 
 #[tokio::test]
 async fn load_table_replaces_an_existing_table() {
-    let Some(env) = live_env_or_skip("load_table_replaces_an_existing_table").await else {
+    let Some(env) =
+        common::live_env_or_skip("load_table_replaces_an_existing_table", "backend_live").await
+    else {
         return;
     };
 
@@ -527,13 +495,16 @@ async fn load_table_replaces_an_existing_table() {
         2
     );
 
-    drop_schema(&env).await;
+    common::drop_schema(&env).await;
 }
 
 #[tokio::test]
 async fn load_table_rejects_null_in_non_nullable_against_the_live_tier() {
-    let Some(env) =
-        live_env_or_skip("load_table_rejects_null_in_non_nullable_against_the_live_tier").await
+    let Some(env) = common::live_env_or_skip(
+        "load_table_rejects_null_in_non_nullable_against_the_live_tier",
+        "backend_live",
+    )
+    .await
     else {
         return;
     };
@@ -562,12 +533,14 @@ async fn load_table_rejects_null_in_non_nullable_against_the_live_tier() {
         "no table must be left behind after a rejected load"
     );
 
-    drop_schema(&env).await;
+    common::drop_schema(&env).await;
 }
 
 #[tokio::test]
 async fn load_table_loads_a_multi_chunk_batch() {
-    let Some(env) = live_env_or_skip("load_table_loads_a_multi_chunk_batch").await else {
+    let Some(env) =
+        common::live_env_or_skip("load_table_loads_a_multi_chunk_batch", "backend_live").await
+    else {
         return;
     };
 
@@ -601,7 +574,7 @@ async fn load_table_loads_a_multi_chunk_batch() {
         .expect("get_row_count must succeed");
     assert_eq!(count, row_count as usize);
 
-    drop_schema(&env).await;
+    common::drop_schema(&env).await;
 }
 
 /// Phase 10 of `20260913-trino-emission`: decides whether the "array
@@ -618,7 +591,9 @@ async fn load_table_loads_a_multi_chunk_batch() {
 /// the divergence entry instead of updating the assertion.
 #[tokio::test]
 async fn array_result_column_decodes_to_arrow() {
-    let Some(env) = live_env_or_skip("array_result_column_decodes_to_arrow").await else {
+    let Some(env) =
+        common::live_env_or_skip("array_result_column_decodes_to_arrow", "backend_live").await
+    else {
         return;
     };
 
@@ -637,7 +612,7 @@ async fn array_result_column_decodes_to_arrow() {
         "expected the cell-decoder gap for List, got: {message}"
     );
 
-    drop_schema(&env).await;
+    common::drop_schema(&env).await;
 }
 
 /// `20260913-trino-incremental` phase 3, test 6: `insert_into_from_query`
@@ -645,8 +620,11 @@ async fn array_result_column_decodes_to_arrow() {
 /// rows intact — the insert-only append family's write primitive.
 #[tokio::test]
 async fn insert_into_from_query_appends_and_leaves_prior_rows_intact() {
-    let Some(env) =
-        live_env_or_skip("insert_into_from_query_appends_and_leaves_prior_rows_intact").await
+    let Some(env) = common::live_env_or_skip(
+        "insert_into_from_query_appends_and_leaves_prior_rows_intact",
+        "backend_live",
+    )
+    .await
     else {
         return;
     };
@@ -679,7 +657,7 @@ async fn insert_into_from_query_appends_and_leaves_prior_rows_intact() {
         "insert_into_from_query must append, leaving the original 2 rows plus the 2 new ones"
     );
 
-    drop_schema(&env).await;
+    common::drop_schema(&env).await;
 }
 
 /// `20260913-trino-incremental` phase 3: the whole-row `MERGE` upsert family
@@ -690,8 +668,11 @@ async fn insert_into_from_query_appends_and_leaves_prior_rows_intact() {
 /// idempotent by key across two runs, the second mutating one key's value.
 #[tokio::test]
 async fn merge_into_upserts_matched_and_unmatched_rows_across_two_runs() {
-    let Some(env) =
-        live_env_or_skip("merge_into_upserts_matched_and_unmatched_rows_across_two_runs").await
+    let Some(env) = common::live_env_or_skip(
+        "merge_into_upserts_matched_and_unmatched_rows_across_two_runs",
+        "backend_live",
+    )
+    .await
     else {
         return;
     };
@@ -744,7 +725,7 @@ async fn merge_into_upserts_matched_and_unmatched_rows_across_two_runs() {
         "the whole-row MERGE upsert must be idempotent by key across separate runs"
     );
 
-    drop_schema(&env).await;
+    common::drop_schema(&env).await;
 }
 
 /// Reads an integer column back as `i64` regardless of whether Trino's
@@ -776,8 +757,11 @@ fn int_column_as_i64(batch: &RecordBatch, idx: usize) -> Vec<i64> {
 /// refused outright by Trino).
 #[tokio::test]
 async fn delete_and_insert_transactional_covers_two_disjoint_windows() {
-    let Some(env) =
-        live_env_or_skip("delete_and_insert_transactional_covers_two_disjoint_windows").await
+    let Some(env) = common::live_env_or_skip(
+        "delete_and_insert_transactional_covers_two_disjoint_windows",
+        "backend_live",
+    )
+    .await
     else {
         return;
     };
@@ -832,11 +816,11 @@ async fn delete_and_insert_transactional_covers_two_disjoint_windows() {
          rows untouched by window 2's write"
     );
 
-    drop_schema(&env).await;
+    common::drop_schema(&env).await;
 }
 
 async fn fetch_two_int_columns(
-    env: &LiveEnv,
+    env: &common::LiveEnv,
     table: &str,
     col_a: &str,
     col_b: &str,
@@ -858,6 +842,6 @@ async fn fetch_two_int_columns(
     rows
 }
 
-async fn fetch_id_attr_rows(env: &LiveEnv, table: &str) -> Vec<(i64, i64)> {
+async fn fetch_id_attr_rows(env: &common::LiveEnv, table: &str) -> Vec<(i64, i64)> {
     fetch_two_int_columns(env, table, "id", "attr").await
 }

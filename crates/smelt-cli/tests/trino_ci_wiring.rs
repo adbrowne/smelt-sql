@@ -7,6 +7,9 @@
 //! up, and every Trino-gated test file uses the shared env gate rather than
 //! an ad-hoc one. Pure file assertions — no Docker, no network.
 
+mod common;
+
+use std::collections::HashSet;
 use std::fs;
 use std::path::PathBuf;
 
@@ -498,4 +501,68 @@ fn every_trino_gated_test_file_skips_through_the_shared_env_gate() {
          reads SMELT_TRINO_URL it has grown a live leg and belongs in live_gated_files above \
          with the shared-gate checks applied to it"
     );
+}
+
+/// Trino has no documented hard identifier-length cap, but every connector
+/// this repo targets (Iceberg via Hive Metastore/REST) is comfortable well
+/// under 128 bytes; this is the budget the generator is held to. Duplicated
+/// verbatim in `crates/smelt-backend-trino/tests/schema_isolation.rs` so
+/// `trino_schema`'s and `unique_schema`'s naming rules are held to the
+/// identical check and cannot drift apart.
+const MAX_IDENTIFIER_LEN: usize = 128;
+
+fn assert_legal_trino_identifier(name: &str) {
+    assert!(
+        !name.is_empty() && name.len() <= MAX_IDENTIFIER_LEN,
+        "schema name {name:?} must be 1..={MAX_IDENTIFIER_LEN} bytes long"
+    );
+    let first = name.chars().next().unwrap();
+    assert!(
+        first.is_ascii_alphabetic(),
+        "schema name {name:?} must start with an ASCII letter, found {first:?}"
+    );
+    assert!(
+        name.chars()
+            .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+        "schema name {name:?} must contain only [a-z0-9_]"
+    );
+}
+
+/// Test 1 (`docs/outcomes/20260913-trino-incremental/phases/03e-plan.md`):
+/// 1000 calls to `trino_schema` within one process never repeat, and every
+/// name is a legal Trino identifier.
+#[test]
+fn trino_schema_names_are_unique_within_a_process() {
+    let names: Vec<String> = (0..1000).map(|_| common::trino_schema("x")).collect();
+    let unique: HashSet<&String> = names.iter().collect();
+    assert_eq!(
+        unique.len(),
+        names.len(),
+        "1000 calls to trino_schema(\"x\") must yield 1000 distinct names"
+    );
+    for name in &names {
+        assert_legal_trino_identifier(name);
+    }
+}
+
+/// Test 5: the anti-regression gate. No live-gated Trino test file builds a
+/// schema name from its own inline `format!`/string literal (the exact bug
+/// `backend_live.rs` and `staged_relation_lifecycle.rs` carried before this
+/// phase: a private `fn unique_schema()` duplicating, and drifting from,
+/// the shared counter-based naming rule) — every one obtains its schema
+/// name from the shared `trino_schema(`/`unique_schema(` helper.
+#[test]
+fn every_live_trino_test_schema_name_comes_from_the_shared_helper() {
+    for bin in live_gated_census() {
+        let defines_private_helper =
+            bin.own.contains("fn unique_schema(") || bin.own.contains("fn trino_schema(");
+        assert!(
+            !defines_private_helper,
+            "crates/{}/tests/{} defines its own schema-naming helper instead of calling the \
+             shared trino_schema(/unique_schema( from common/mod.rs — a private duplicate \
+             drifts from the shared counter-based naming rule and reintroduces the collision \
+             this gate exists to prevent",
+            bin.krate, bin.binary
+        );
+    }
 }

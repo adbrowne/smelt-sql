@@ -23,13 +23,27 @@ pub struct LiveEnv {
     pub schema: String,
 }
 
-fn unique_schema(suffix: &str) -> String {
+/// Process-local counter backing [`unique_schema`]'s uniqueness: time alone
+/// is not a uniqueness source (`capability_probes.rs` draws 14 concurrent
+/// schema names from the same `"cap"` suffix, easily within one nanosecond
+/// of each other), so a monotonic counter guarantees no two calls in this
+/// process ever collide, and the nanosecond entropy suffix guards against
+/// two *processes* racing on the same counter value.
+static UNIQUE_SCHEMA_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A schema name unique to this run: guaranteed unique within this process
+/// via [`UNIQUE_SCHEMA_COUNTER`], and overwhelmingly likely unique across
+/// concurrent processes via the nanosecond entropy suffix. `suffix`
+/// distinguishes one test file's schemas from another's under concurrent
+/// `cargo test` runs.
+pub fn unique_schema(suffix: &str) -> String {
     let base = std::env::var("SMELT_TRINO_SCHEMA").unwrap_or_else(|_| "smelt_dev".to_string());
+    let n = UNIQUE_SCHEMA_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let nanos = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.subsec_nanos())
         .unwrap_or(0);
-    format!("{base}_{suffix}_{}_{nanos}", std::process::id())
+    format!("{base}_{suffix}_{}_{n}_{nanos}", std::process::id())
 }
 
 /// Connect and create the run's isolated schema, or `None` when

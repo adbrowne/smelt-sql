@@ -30,22 +30,33 @@ use tempfile::TempDir;
 /// test binary so it needs its own static, not a shared one.
 static TRINO_ENV_GUARD: Mutex<()> = Mutex::new(());
 
-fn has_trino_env() -> bool {
+/// Resolves `schema`'s target block under the guard, or `None` (skip) when
+/// `SMELT_TRINO_URL` is unset. Widened (this phase) to cover the
+/// `trino_target_block` read too, not just the `trino_env().is_some()`
+/// check — `trino_residency_legs_skip_not_pass_when_url_unset` removes and
+/// restores the var under this same guard, and an unguarded
+/// `trino_target_block` read elsewhere could observe the var mid-mutation.
+fn resolve_trino_target_block(schema: &str) -> Option<String> {
     let _guard = TRINO_ENV_GUARD.lock().unwrap();
-    trino_env().is_some()
+    trino_env()?;
+    Some(trino_target_block(schema))
 }
 
 /// A base `table` model plus a downstream one reading it as a model edge
 /// (`FROM smelt.base_table`), so the DAG has more than one node — matching
 /// `dag_kchain_b`'s edge shape in `trino_explain_downgrade.rs`.
-fn stage_residency_project(tmp: &TempDir, schema: &str, state_mode: &str) -> std::path::PathBuf {
+fn stage_residency_project(
+    tmp: &TempDir,
+    target_block: &str,
+    state_mode: &str,
+) -> std::path::PathBuf {
     let root = tmp.path().join("trino_residency_proj");
     fs::create_dir_all(root.join("models")).unwrap();
 
     let yml = format!(
         "name: trino_state_residency\nversion: 1\npaths:\n  - models\ntargets:\n{}\
          default_materialization: table\nstate:\n  mode: {state_mode}\n",
-        trino_target_block(schema)
+        target_block
     );
     fs::write(root.join("smelt.yml"), yml).unwrap();
 
@@ -84,15 +95,15 @@ fn run_smelt(project_dir: &Path) -> std::process::Output {
 /// `.smelt/` between two runs changes no maintained table's value.
 #[test]
 fn deleting_smelt_between_runs_changes_no_trino_table() {
-    if !has_trino_env() {
+    let schema = trino_schema("residency_delete");
+    let Some(target_block) = resolve_trino_target_block(&schema) else {
         eprintln!(
             "SMELT_TRINO_URL unset — skipping deleting_smelt_between_runs_changes_no_trino_table"
         );
         return;
-    }
-    let schema = trino_schema("residency_delete");
+    };
     let tmp = TempDir::new().unwrap();
-    let root = stage_residency_project(&tmp, &schema, "intervals");
+    let root = stage_residency_project(&tmp, &target_block, "intervals");
 
     let first = run_smelt(&root);
     assert!(
@@ -141,13 +152,13 @@ fn deleting_smelt_between_runs_changes_no_trino_table() {
 /// status is success.
 #[test]
 fn the_second_run_really_reran_after_the_delete() {
-    if !has_trino_env() {
+    let schema = trino_schema("residency_rerun");
+    let Some(target_block) = resolve_trino_target_block(&schema) else {
         eprintln!("SMELT_TRINO_URL unset — skipping the_second_run_really_reran_after_the_delete");
         return;
-    }
-    let schema = trino_schema("residency_rerun");
+    };
     let tmp = TempDir::new().unwrap();
-    let root = stage_residency_project(&tmp, &schema, "intervals");
+    let root = stage_residency_project(&tmp, &target_block, "intervals");
 
     let first = run_smelt(&root);
     assert!(first.status.success(), "first run must succeed");
@@ -171,15 +182,15 @@ fn the_second_run_really_reran_after_the_delete() {
 /// `state.mode: stateless` writes nothing under `.smelt/` on Trino.
 #[test]
 fn stateless_mode_writes_nothing_under_smelt_on_trino() {
-    if !has_trino_env() {
+    let schema = trino_schema("residency_stateless_nowrite");
+    let Some(target_block) = resolve_trino_target_block(&schema) else {
         eprintln!(
             "SMELT_TRINO_URL unset — skipping stateless_mode_writes_nothing_under_smelt_on_trino"
         );
         return;
-    }
-    let schema = trino_schema("residency_stateless_nowrite");
+    };
     let tmp = TempDir::new().unwrap();
-    let root = stage_residency_project(&tmp, &schema, "stateless");
+    let root = stage_residency_project(&tmp, &target_block, "stateless");
 
     let out = run_smelt(&root);
     assert!(
@@ -200,15 +211,19 @@ fn stateless_mode_writes_nothing_under_smelt_on_trino() {
 /// intervals` run produces for the same project.
 #[test]
 fn stateless_mode_changes_no_trino_table_value() {
-    if !has_trino_env() {
-        eprintln!("SMELT_TRINO_URL unset — skipping stateless_mode_changes_no_trino_table_value");
-        return;
-    }
     let intervals_schema = trino_schema("residency_intervals_cmp");
     let stateless_schema = trino_schema("residency_stateless_cmp");
+    let Some(intervals_target_block) = resolve_trino_target_block(&intervals_schema) else {
+        eprintln!("SMELT_TRINO_URL unset — skipping stateless_mode_changes_no_trino_table_value");
+        return;
+    };
+    let Some(stateless_target_block) = resolve_trino_target_block(&stateless_schema) else {
+        eprintln!("SMELT_TRINO_URL unset — skipping stateless_mode_changes_no_trino_table_value");
+        return;
+    };
     let tmp = TempDir::new().unwrap();
 
-    let intervals_root = stage_residency_project(&tmp, &intervals_schema, "intervals");
+    let intervals_root = stage_residency_project(&tmp, &intervals_target_block, "intervals");
     let intervals_out = run_smelt(&intervals_root);
     assert!(
         intervals_out.status.success(),
@@ -216,7 +231,7 @@ fn stateless_mode_changes_no_trino_table_value() {
         String::from_utf8_lossy(&intervals_out.stderr)
     );
 
-    let stateless_root = stage_residency_project(&tmp, &stateless_schema, "stateless");
+    let stateless_root = stage_residency_project(&tmp, &stateless_target_block, "stateless");
     let stateless_out = run_smelt(&stateless_root);
     assert!(
         stateless_out.status.success(),

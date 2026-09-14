@@ -697,11 +697,23 @@ pub fn trino_env() -> Option<TrinoEnv> {
     })
 }
 
-/// A schema name unique to this run, so two worktrees — or a developer
-/// beside an autonomy loop — never collide. `label` scopes two suites in
+/// Process-local counter backing [`trino_schema`]'s uniqueness: time alone is
+/// not a uniqueness source (two tests can call this within the same
+/// nanosecond, and `SystemTime` resolution is coarser than that on some
+/// platforms), so a monotonic counter guarantees no two calls in this
+/// process ever collide, and the random suffix guards against two
+/// *processes* (two worktrees, or a developer beside an autonomy loop)
+/// racing on the same counter value.
+static TRINO_SCHEMA_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// A schema name unique to this run: guaranteed unique within this process
+/// via [`TRINO_SCHEMA_COUNTER`], and overwhelmingly likely unique across
+/// concurrent processes via the random suffix. `label` scopes two suites in
 /// the same binary apart.
 pub fn trino_schema(label: &str) -> String {
-    format!("smelt_seed_{label}_{}", std::process::id())
+    let n = TRINO_SCHEMA_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let r: u64 = rand::random();
+    format!("smelt_seed_{label}_{}_{n}_{r:016x}", std::process::id())
 }
 
 /// The body of a `trino` target block (4-space indented, no leading key),

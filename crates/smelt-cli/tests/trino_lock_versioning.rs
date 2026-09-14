@@ -26,13 +26,25 @@ use tempfile::TempDir;
 /// it needs its own static, not a shared one.
 static TRINO_ENV_GUARD: Mutex<()> = Mutex::new(());
 
-fn stage_lock_project(tmp: &TempDir, schema: &str) -> std::path::PathBuf {
+/// Resolves `schema`'s target block under the guard, or `None` (skip) when
+/// `SMELT_TRINO_URL` is unset. Widened (this phase) to cover the
+/// `trino_target_block` read too, not just the `trino_env().is_some()`
+/// check — `trino_lock_legs_skip_not_pass_when_url_unset` removes and
+/// restores the var under this same guard, and an unguarded
+/// `trino_target_block` read elsewhere could observe the var mid-mutation.
+fn resolve_trino_target_block(schema: &str) -> Option<String> {
+    let _guard = TRINO_ENV_GUARD.lock().unwrap();
+    trino_env()?;
+    Some(trino_target_block(schema))
+}
+
+fn stage_lock_project(tmp: &TempDir, target_block: &str) -> std::path::PathBuf {
     let root = tmp.path().join("trino_lock_proj");
     fs::create_dir_all(root.join("models")).unwrap();
 
     let yml = format!(
         "name: trino_lock_versioning\nversion: 1\npaths:\n  - models\ntargets:\n{}default_materialization: table\nstate:\n  mode: intervals\n",
-        trino_target_block(schema)
+        target_block
     );
     fs::write(root.join("smelt.yml"), yml).unwrap();
 
@@ -89,17 +101,13 @@ fn run_artifacts_empty(project_dir: &Path) -> bool {
 
 #[test]
 fn held_lock_refuses_a_second_trino_run_by_pid() {
-    let has_env = {
-        let _guard = TRINO_ENV_GUARD.lock().unwrap();
-        trino_env().is_some()
-    };
-    if !has_env {
+    let schema = trino_schema("lock_pid");
+    let Some(target_block) = resolve_trino_target_block(&schema) else {
         eprintln!("SMELT_TRINO_URL unset — skipping held_lock_refuses_a_second_trino_run_by_pid");
         return;
-    }
-    let schema = trino_schema("lock_pid");
+    };
     let tmp = TempDir::new().unwrap();
-    let root = stage_lock_project(&tmp, &schema);
+    let root = stage_lock_project(&tmp, &target_block);
 
     // Hold the project-wide `.smelt/lock` from this process for the duration
     // of the subprocess run below.
@@ -135,19 +143,15 @@ fn held_lock_refuses_a_second_trino_run_by_pid() {
 
 #[test]
 fn releasing_the_lock_lets_the_next_trino_run_proceed() {
-    let has_env = {
-        let _guard = TRINO_ENV_GUARD.lock().unwrap();
-        trino_env().is_some()
-    };
-    if !has_env {
+    let schema = trino_schema("lock_release");
+    let Some(target_block) = resolve_trino_target_block(&schema) else {
         eprintln!(
             "SMELT_TRINO_URL unset — skipping releasing_the_lock_lets_the_next_trino_run_proceed"
         );
         return;
-    }
-    let schema = trino_schema("lock_release");
+    };
     let tmp = TempDir::new().unwrap();
-    let root = stage_lock_project(&tmp, &schema);
+    let root = stage_lock_project(&tmp, &target_block);
 
     let file_store = FileStore::new(&root, "trino");
     let guard = file_store.lock().unwrap();
@@ -175,19 +179,15 @@ fn releasing_the_lock_lets_the_next_trino_run_proceed() {
 
 #[test]
 fn future_state_version_refuses_a_trino_run_before_any_write() {
-    let has_env = {
-        let _guard = TRINO_ENV_GUARD.lock().unwrap();
-        trino_env().is_some()
-    };
-    if !has_env {
+    let schema = trino_schema("future_ver");
+    let Some(target_block) = resolve_trino_target_block(&schema) else {
         eprintln!(
             "SMELT_TRINO_URL unset — skipping future_state_version_refuses_a_trino_run_before_any_write"
         );
         return;
-    }
-    let schema = trino_schema("future_ver");
+    };
     let tmp = TempDir::new().unwrap();
-    let root = stage_lock_project(&tmp, &schema);
+    let root = stage_lock_project(&tmp, &target_block);
 
     fs::create_dir_all(root.join(".smelt")).unwrap();
     fs::write(root.join(".smelt/meta.json"), r#"{"state_version": 99}"#).unwrap();

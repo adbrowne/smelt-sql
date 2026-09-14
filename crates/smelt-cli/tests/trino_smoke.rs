@@ -25,13 +25,25 @@ use tempfile::TempDir;
 /// `trino_smoke_materializes_table_and_view`'s own read of it.
 static TRINO_ENV_GUARD: Mutex<()> = Mutex::new(());
 
-fn stage_trino_spine(tmp: &TempDir, schema: &str) -> std::path::PathBuf {
+/// Resolves `schema`'s target block under the guard, or `None` (skip) when
+/// `SMELT_TRINO_URL` is unset. Widened (this phase) to cover the
+/// `trino_target_block` read too, not just the `trino_env().is_some()`
+/// check — `trino_legs_skip_not_pass_when_url_unset` removes and restores
+/// the var under this same guard, and an unguarded `trino_target_block`
+/// read elsewhere could observe the var mid-mutation.
+fn resolve_trino_target_block(schema: &str) -> Option<String> {
+    let _guard = TRINO_ENV_GUARD.lock().unwrap();
+    trino_env()?;
+    Some(trino_target_block(schema))
+}
+
+fn stage_trino_spine(tmp: &TempDir, target_block: &str) -> std::path::PathBuf {
     let root = tmp.path().join("trino_spine_proj");
     fs::create_dir_all(root.join("models")).unwrap();
 
     let yml = format!(
         "name: trino_spine_smoke\nversion: 1\npaths:\n  - models\ntargets:\n{}default_materialization: table\nstate:\n  mode: intervals\n",
-        trino_target_block(schema)
+        target_block
     );
     fs::write(root.join("smelt.yml"), yml).unwrap();
 
@@ -108,18 +120,14 @@ fn only_report_run_id(project_dir: &Path) -> String {
 /// status.
 #[test]
 fn trino_smoke_materializes_table_and_view() {
-    let has_env = {
-        let _guard = TRINO_ENV_GUARD.lock().unwrap();
-        trino_env().is_some()
-    };
-    if !has_env {
+    let schema = trino_schema("spine_smoke");
+    let Some(target_block) = resolve_trino_target_block(&schema) else {
         eprintln!("SMELT_TRINO_URL unset — skipping trino_smoke_materializes_table_and_view");
         return;
-    }
-    let schema = trino_schema("spine_smoke");
+    };
 
     let tmp = TempDir::new().unwrap();
-    let root = stage_trino_spine(&tmp, &schema);
+    let root = stage_trino_spine(&tmp, &target_block);
 
     let out = run_smelt(&root);
     assert!(

@@ -18,7 +18,7 @@
 mod common;
 use common::{
     assert_table_parity, bq_target_block, drop_bq_dataset, drop_trino_schema, fetch_rows,
-    spark_connect_url, targets_to_run_with_trino, trino_schema, trino_target_block, TargetKind,
+    spark_connect_url, targets_to_run_with_trino, trino_target_block, TargetKind,
 };
 use std::process::Command;
 use tempfile::TempDir;
@@ -60,7 +60,16 @@ fn expected_rows() -> Vec<Vec<String>> {
     rows
 }
 
-fn stage_mat_workspace(tmp: &TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
+/// `trino_schema` is the exact schema [`targets_to_run_with_trino`] already
+/// resolved for this run's `TargetKind::Trino` entry (or `None` when Trino
+/// is absent) — resolved once by the caller and threaded through here,
+/// never re-derived, since `trino_schema()` is guaranteed-unique per call
+/// and a second independent call would embed a different schema in the yml
+/// than the one the backend loop actually reads from and drops.
+fn stage_mat_workspace(
+    tmp: &TempDir,
+    trino_schema: Option<&str>,
+) -> (std::path::PathBuf, std::path::PathBuf) {
     let root = tmp.path().join("mat_proj");
     let warehouse = tmp.path().join("warehouse");
     std::fs::create_dir_all(root.join("models")).unwrap();
@@ -71,6 +80,7 @@ fn stage_mat_workspace(tmp: &TempDir) -> (std::path::PathBuf, std::path::PathBuf
     let wh_str = warehouse
         .to_str()
         .expect("warehouse path must be valid UTF-8");
+    let trino_block = trino_schema.map(trino_target_block).unwrap_or_default();
 
     let yml = format!(
         "name: mat_proj\n\
@@ -81,7 +91,6 @@ fn stage_mat_workspace(tmp: &TempDir) -> (std::path::PathBuf, std::path::PathBuf
            schema: {SPARK_SCHEMA}\n    warehouse: {wh_str}\n    format: delta\n{bq_block}{trino_block}\
          default_materialization: table\n",
         bq_block = bq_target_block(BQ_LABEL),
-        trino_block = trino_target_block(&trino_schema(BQ_LABEL))
     );
     std::fs::write(root.join("smelt.yml"), yml).unwrap();
     std::fs::write(root.join("models").join("view_model.sql"), VIEW_MODEL).unwrap();
@@ -112,14 +121,19 @@ fn run_smelt(project_dir: &std::path::Path, target: &str) -> std::process::Outpu
 #[test]
 fn view_and_table_materialize_consistently_on_both() {
     let tmp = TempDir::new().unwrap();
-    let (root, warehouse) = stage_mat_workspace(&tmp);
+    let targets = targets_to_run_with_trino(BQ_LABEL);
+    let trino_schema_for_yml = targets.iter().find_map(|kind| match kind {
+        TargetKind::Trino { schema } => Some(schema.as_str()),
+        _ => None,
+    });
+    let (root, warehouse) = stage_mat_workspace(&tmp, trino_schema_for_yml);
     let db_path = root.join("target/dev.duckdb");
 
     let expected = expected_rows();
     let mut ref_view: Vec<Vec<String>> = Vec::new();
     let mut ref_table: Vec<Vec<String>> = Vec::new();
 
-    for kind in targets_to_run_with_trino(BQ_LABEL) {
+    for kind in targets {
         let (target_name, schema) = match &kind {
             TargetKind::DuckDb => ("dev", "main"),
             TargetKind::Spark => ("spark", SPARK_SCHEMA),

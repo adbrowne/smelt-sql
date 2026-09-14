@@ -27,96 +27,30 @@
 //!   cargo test -p smelt-backend-trino --test staged_relation_lifecycle
 //!   bash scripts/trino-down.sh
 
+mod common;
+
 use smelt_backend::Backend;
-use smelt_backend_trino::{TrinoBackend, TrinoClientConfig};
 use smelt_logical::maintenance::emit::{StagedRelation, StagedRelationResidence};
 
-struct LiveEnv {
-    backend: TrinoBackend,
-    catalog: String,
-    schema: String,
-}
-
-fn unique_schema() -> String {
-    let base = std::env::var("SMELT_TRINO_SCHEMA").unwrap_or_else(|_| "smelt_dev".to_string());
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.subsec_nanos())
-        .unwrap_or(0);
-    format!("{base}_lifecycle_{}_{nanos}", std::process::id())
-}
-
-async fn live_env_or_skip(test_name: &str) -> Option<LiveEnv> {
-    let Ok(base_url) = std::env::var("SMELT_TRINO_URL") else {
-        eprintln!("Skipping {test_name} — set SMELT_TRINO_URL");
-        return None;
-    };
-    let user = std::env::var("SMELT_TRINO_USER").unwrap_or_else(|_| "smelt".to_string());
-    let catalog = std::env::var("SMELT_TRINO_CATALOG").unwrap_or_else(|_| "iceberg".to_string());
-    let schema = unique_schema();
-
-    let backend = TrinoBackend::new(TrinoClientConfig {
-        base_url,
-        user,
-        catalog: catalog.clone(),
-        schema: schema.clone(),
-        password: None,
-    });
-    backend
-        .ensure_schema(&schema)
+async fn row_count(env: &common::LiveEnv, table: &str) -> i64 {
+    *env.select_i64_col(&format!("SELECT count(*) AS n FROM {}", env.q(table)))
         .await
-        .unwrap_or_else(|e| panic!("ensure_schema must succeed against a live tier: {e}"));
-
-    Some(LiveEnv {
-        backend,
-        catalog,
-        schema,
-    })
+        .first()
+        .expect("row count query must return exactly one row")
 }
 
-async fn drop_schema(env: &LiveEnv) {
-    let _ = env
-        .backend
-        .execute_sql(&format!(
-            "DROP SCHEMA IF EXISTS \"{}\".\"{}\" CASCADE",
-            env.catalog, env.schema
-        ))
-        .await;
-}
-
-impl LiveEnv {
-    fn q(&self, name: &str) -> String {
-        format!("\"{}\".\"{}\".\"{name}\"", self.catalog, self.schema)
-    }
-
-    async fn row_count(&self, table: &str) -> i64 {
-        let result = self
-            .backend
-            .execute_sql(&format!("SELECT count(*) AS n FROM {}", self.q(table)))
-            .await
-            .expect("row count query must succeed");
-        let batch = &result[0];
-        let col = batch
-            .column(0)
-            .as_any()
-            .downcast_ref::<arrow::array::Int64Array>()
-            .expect("count column is Int64");
-        col.value(0)
-    }
-
-    async fn table_exists(&self, table: &str) -> bool {
-        self.backend
-            .execute_sql(&format!("SELECT * FROM {} LIMIT 0", self.q(table)))
-            .await
-            .is_ok()
-    }
+async fn table_exists(env: &common::LiveEnv, table: &str) -> bool {
+    env.ok(&format!("SELECT * FROM {} LIMIT 0", env.q(table)))
+        .await
 }
 
 #[tokio::test]
 async fn staged_relation_lifecycle_survives_interruption_between_stage_and_apply() {
-    let Some(env) =
-        live_env_or_skip("staged_relation_lifecycle_survives_interruption_between_stage_and_apply")
-            .await
+    let Some(env) = common::live_env_or_skip(
+        "staged_relation_lifecycle_survives_interruption_between_stage_and_apply",
+        "lifecycle",
+    )
+    .await
     else {
         return;
     };
@@ -165,9 +99,9 @@ async fn staged_relation_lifecycle_survives_interruption_between_stage_and_apply
         .expect("stage INSERT must succeed");
 
     // The target is untouched, and exactly one orphan staged relation exists.
-    assert_eq!(env.row_count("lifecycle_target").await, 0);
-    assert!(env.table_exists(&staged.name).await);
-    assert_eq!(env.row_count(&staged.name).await, 2);
+    assert_eq!(row_count(&env, "lifecycle_target").await, 0);
+    assert!(table_exists(&env, &staged.name).await);
+    assert_eq!(row_count(&env, &staged.name).await, 2);
 
     // --- Run 2: re-run the whole group from the top, despite the orphan. ---
     if let Some(reclaim) = staged.reclaim_statement() {
@@ -208,12 +142,12 @@ async fn staged_relation_lifecycle_survives_interruption_between_stage_and_apply
 
     // The target is correct (only run 2's candidates), and no staged
     // relation remains.
-    assert_eq!(env.row_count("lifecycle_target").await, 3);
-    assert!(!env.table_exists(&staged.name).await);
+    assert_eq!(row_count(&env, "lifecycle_target").await, 3);
+    assert!(!table_exists(&env, &staged.name).await);
 
     env.backend
         .execute_sql(&format!("DROP TABLE {}", env.q("lifecycle_target")))
         .await
         .expect("cleanup target table");
-    drop_schema(&env).await;
+    common::drop_schema(&env).await;
 }
