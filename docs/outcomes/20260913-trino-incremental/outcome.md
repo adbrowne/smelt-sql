@@ -149,7 +149,7 @@ approximated.
 | 2 | Spec delta: `multi_backend.md` §"Whole-row MERGE" / §"Column-scoped merge and conditional-write capabilities" / §"Incremental & schema evolution per backend" stated for Trino, including which families are reachable and which take T3's downgrade, plus the refusal diagnostics any absent clause needs | done |
 | 3 | The append and whole-row-`MERGE` upsert families executing end-to-end through `execute_project` — including landing `maintenance_dialect` for `SqlDialect::Trino`, which returns `Err` today and blocks every family — with their `statement_parity` executed-vs-emitted legs | blocked |
 | 3a | Real (non-dry-run) execution resolves each model's run window and every batch `TimeRange` in that model's OWN partition axis (gap 2), so an integer-axis model's injected predicates render bare rather than quoted | done |
-| 3b | Typed ANSI partition literals (`DATE '…'` / `TIMESTAMP '…'`) from the single `partition_literal` owner, so a calendar-axis predicate type-checks on a strict engine (gap 1) | pending |
+| 3b | Typed ANSI partition literals (`DATE '…'` / `TIMESTAMP '…'`) from the single `partition_literal` owner, so a calendar-axis predicate type-checks on a strict engine (gap 1) | planned |
 | 3c | A `ColumnScopedMerge` cell downgraded to `PerGroupRecompute` for an `UpstreamMutation`-triggered (unclocked) cell resolves `key_scope: None` — the full-scan recompute the reachable row already promises — instead of demanding a `ScanClamp` that cannot exist (gap 3) | pending |
 | 3d | Phase 3's deferred live legs, now unblocked: the append and whole-row-`MERGE` upsert families end-to-end through `execute_project` on Trino, plus `statement_parity`'s Trino executed-vs-emitted leg | pending |
 | 4 | The emulated delete-and-insert window: `DELETE` range exactly covering the insert's write window, asserted directly and under out-of-order and repeated application | pending |
@@ -161,6 +161,16 @@ approximated.
 | 10 | Mid-stream schema evolution under maintenance, still oracle-equal; then close: divergences rewritten, `docs-site/` page stating plainly which incremental features Trino does and does not support and why, `verify-phase.sh` green | pending |
 
 ## Decision log
+
+- **2026-09-15 — phase 3b planning: the third calendar shape fails loud rather than falling back
+  to an untyped string.** The 2026-09-14 ruling fixed the direction (typed ANSI literals on every
+  dialect, one spelling, no dialect threading) but not what happens to a calendar-axis value that
+  is neither date- nor timestamp-shaped. `partition_literal` returns `Err` for it, matching the
+  integer arm's existing fail-closed discipline and CLAUDE.md's fail-loud rule, rather than
+  reverting to `'…'` — a silent untyped fallback is exactly the shape that let gap 1 reach a live
+  Trino run undetected. Cost: `emit_statements.rs`'s `"it's"` → `'it''s'` escaping assertion
+  becomes an error-case assertion. No row added, split or reordered; no reshape was needed, since
+  3a's summary reported the phase landing cleanly with 3b already scoped as the next blocker.
 
 - **2026-09-14 — reshape at phase 4 planning: phase 3's three blocking gaps become four rows
   (3a/3b/3c/3d) ahead of phase 4, option (a) of the block report.** Phase 3's summary recommends
