@@ -1,7 +1,7 @@
 # Outcome: The incremental families reachable on Trino execute correctly, and the equivalence invariant holds there under full degradation
 
 **Created:** 2026-09-13
-**Status:** queued
+**Status:** active
 **Driver:** loop. Docker only, no credential, no human gate. Live-tier phases must emit
 `<<PHASE_BLOCKED>>` when the coordinator is unreachable, never skip green — a conformance gate
 that skips looks exactly like a conformance gate that passes.
@@ -145,9 +145,9 @@ approximated.
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Characterise Iceberg `MERGE` by execution: each clause form run against the live tier, the three merge capability flags confirmed or corrected in the spec matrix, measured errors quoted | pending |
+| 1 | Characterise Iceberg `MERGE` by execution: each clause form run against the live tier, the three merge capability flags confirmed or corrected in the spec matrix, measured errors quoted | planned |
 | 2 | Spec delta: `multi_backend.md` §"Whole-row MERGE" / §"Column-scoped merge and conditional-write capabilities" / §"Incremental & schema evolution per backend" stated for Trino, including which families are reachable and which take T3's downgrade, plus the refusal diagnostics any absent clause needs | pending |
-| 3 | The append and whole-row-`MERGE` upsert families executing end-to-end through `execute_project`, with their `statement_parity` executed-vs-emitted legs | pending |
+| 3 | The append and whole-row-`MERGE` upsert families executing end-to-end through `execute_project` — including landing `maintenance_dialect` for `SqlDialect::Trino`, which returns `Err` today and blocks every family — with their `statement_parity` executed-vs-emitted legs | pending |
 | 4 | The emulated delete-and-insert window: `DELETE` range exactly covering the insert's write window, asserted directly and under out-of-order and repeated application | pending |
 | 5 | Column-scoped merge and the merge-less conditional write over T3's staged relation — or by-name refusals where phase 1 measured the clause absent | pending |
 | 6 | The degraded routes: per-group recompute, the succession grain's full rebuild in place of the patch route (presented table row- and column-identical to the ledger-bearing rebuild's presented arm), and the sidecar-less key-addressed downgrade — each recorded on the cell and explain-visible | pending |
@@ -157,6 +157,14 @@ approximated.
 | 10 | Mid-stream schema evolution under maintenance, still oracle-equal; then close: divergences rewritten, `docs-site/` page stating plainly which incremental features Trino does and does not support and why, `verify-phase.sh` green | pending |
 
 ## Decision log
+
+- **2026-09-14 — reshape at phase 1 planning.** Phase 3's row now names landing
+  `maintenance_dialect` for `SqlDialect::Trino` explicitly. The T1 hand-forward measured it
+  returning `Err` (`crates/smelt-backend/src/lib.rs`, guarded by
+  `maintenance_dialect_is_ok_for_the_three_implemented_dialects_and_err_for_trino`), so *no*
+  maintenance family runs on a `trino` target until it lands — it is the gate in front of
+  criterion 2, not an incidental detail of the first family. No row added, split or removed; the
+  work was already inside phase 3's scope and is now visible in its title.
 
 - **2026-09-14 — hand-forward from `20260913-trino-target-spine` phase 11.** Measured, for this
   outcome to act on: `maintenance_dialect` returns `Err` for `SqlDialect::Trino` today, so no
