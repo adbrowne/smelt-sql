@@ -147,7 +147,7 @@ approximated.
 |---|-------|--------|
 | 1 | Characterise Iceberg `MERGE` by execution: each clause form run against the live tier, the three merge capability flags confirmed or corrected in the spec matrix, measured errors quoted | done |
 | 2 | Spec delta: `multi_backend.md` §"Whole-row MERGE" / §"Column-scoped merge and conditional-write capabilities" / §"Incremental & schema evolution per backend" stated for Trino, including which families are reachable and which take T3's downgrade, plus the refusal diagnostics any absent clause needs | done |
-| 3 | The append and whole-row-`MERGE` upsert families executing end-to-end through `execute_project` — including landing `maintenance_dialect` for `SqlDialect::Trino`, which returns `Err` today and blocks every family — with their `statement_parity` executed-vs-emitted legs | pending |
+| 3 | The append and whole-row-`MERGE` upsert families executing end-to-end through `execute_project` — including landing `maintenance_dialect` for `SqlDialect::Trino`, which returns `Err` today and blocks every family — with their `statement_parity` executed-vs-emitted legs | planned |
 | 4 | The emulated delete-and-insert window: `DELETE` range exactly covering the insert's write window, asserted directly and under out-of-order and repeated application | pending |
 | 5 | The merge-less conditional write over T3's staged relation (the departed-row delete as a separate scoped `DELETE`, since `WHEN NOT MATCHED BY SOURCE` is absent), and the column-scoped merge — executing where its cell needs no merge ledger, taking T3's `MaintenanceStateDowngraded` route where it does, per Spark's precedent | pending |
 | 6 | The degraded routes: per-group recompute, the succession grain's full rebuild in place of the patch route (presented table row- and column-identical to the ledger-bearing rebuild's presented arm), and the sidecar-less key-addressed downgrade — each recorded on the cell and explain-visible | pending |
@@ -157,6 +157,22 @@ approximated.
 | 10 | Mid-stream schema evolution under maintenance, still oracle-equal; then close: divergences rewritten, `docs-site/` page stating plainly which incremental features Trino does and does not support and why, `verify-phase.sh` green | pending |
 
 ## Decision log
+
+- **2026-09-14 — reshape at phase 3 planning: no row changed; phase 3 absorbs the three
+  consequences of landing `maintenance_dialect`.** Turning
+  `maintenance_dialect(SqlDialect::Trino)` from `Err` into `Ok` is not local: it deletes
+  `multi_backend.md` §Known Divergences' "No maintenance dialect on Trino" entry, it un-skips
+  `contract_probes.rs`'s `frozen_horizon` late-arrival probe on Trino (the skip-with-warning route
+  survives for any dialect that still has no maintenance dialect), and it re-points the tests that
+  pin today's `Err` (`staged_relation_atomicity.rs`, `trino_contract_points.rs`,
+  `trino_explain_downgrade.rs`, `trino_posture_plan_invariance.rs`). All of that is inside phase
+  3's existing scope — landing the gate means landing what depends on it — so no row was added,
+  split or reordered. *Proving* the `frozen_horizon` probe on Trino remains criterion 9 / phase 9;
+  phase 3 only stops the spec from claiming it is skipped. Also settled while planning: the
+  new-variant match arms across the emit layer are filled under a stated three-way discipline
+  (executed-and-measured here / spelled with the later phase that proves it named / refused where
+  the site returns a `Result`), so a family phase 3 does not execute cannot acquire an unproven
+  Trino spelling without a written owner.
 
 - **2026-09-14 — reshape at phase 2 planning: criterion 2's "column-scoped merge" split in two.**
   `smelt_logical::maintenance::availability::required_state_structure` maps `Technique::
