@@ -505,10 +505,10 @@ jobs:
             exit 1
           fi
 
-      - name: Run Trino CLI parity legs (trino_smoke, seed_parity, materialization_parity)
+      - name: Run Trino CLI parity legs
         run: |
           set -o pipefail
-          cargo test -p smelt-cli --test trino_smoke --test seed_parity --test materialization_parity --quiet 2>&1 | tee trino-cli-test.log | tail -60
+          cargo test -p smelt-cli --test trino_smoke --test seed_parity --test materialization_parity --test trino_ddl_live --test trino_state_residency --test trino_lock_versioning --test trino_incremental_families --quiet 2>&1 | tee trino-cli-test.log | tail -60
           if grep -qi skipping trino-cli-test.log; then
             echo "::error::a Trino leg in smelt-cli skipped with the tier up — SMELT_TRINO_URL should be set in this job"
             exit 1

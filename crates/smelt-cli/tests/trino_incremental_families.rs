@@ -34,6 +34,49 @@
 //! 20260913-trino-incremental/phases/03b2-plan.md`) —
 //! `calendar_axis_incremental_model_runs_on_trino` below is the real
 //! CLI-level proof.
+//!
+//! Phase 3d (`docs/outcomes/20260913-trino-incremental/phases/03d-plan.md`)
+//! landed the **append family**'s full-refresh-oracle proof —
+//! `append_family_matches_full_refresh_on_trino` below — over two disjoint
+//! windowed runs. It also *attempted* the whole-row `MERGE` upsert (keyed-fold)
+//! family live and found it blocked by two further, previously-undiscovered
+//! gaps, neither owned by this phase's task list:
+//!
+//! - **Gap 4** — the windowed-keyed-maintenance driver's own per-step
+//!   driving-source pushdown filter (`crates/smelt-runtime/src/
+//!   maintenance_driver/driver.rs` / `cumulative.rs`, stepping over the
+//!   driving source's own timeseries partition column) renders the run
+//!   window's bound as a bare string against the driving source's own column,
+//!   regardless of that column's real type — the same *class* of bug gaps 1
+//!   and 2 named, but in a THIRD emission site neither of those phases' fixes
+//!   touched (3a/3b2 fixed `transformer.rs`'s `inject_time_filter`/
+//!   `inject_source_filters` and the mart's own declared `partition_column`
+//!   type resolution; this is the driving-source stepping loop inside the
+//!   windowed-keyed driver itself). Measured live: a `grain: key` model over a
+//!   clocked `events` source with an `INTEGER` `partition_column` fails
+//!   `Cannot apply operator: bigint <= varchar(10)`; the same model over a
+//!   `DATE` `partition_column` fails `Cannot apply operator: date <=
+//!   varchar(10)`. Blocks the idempotent (`MIN`/`MAX`-style) keyed-fold shape
+//!   before the write mechanism is ever chosen.
+//! - **Gap 5** — `Technique::KeyedFold`'s `Grade::Additive` branch (a
+//!   fold-eligible combiner such as `SUM`) has no plan-time downgrade: unlike
+//!   the repair family's `smelt_logical::maintenance::availability::
+//!   resolve_availability`, the windowed-keyed driver checks
+//!   `realises_reconciliation_ledger` at EXECUTION time and hard-refuses
+//!   (`BackendError::unsupported("additive-fold windowed-keyed maintenance
+//!   ledger (never-fold-twice)")`) rather than falling back to
+//!   `PerGroupRecompute`. Since `realisable_state_structures` returns `vec![]`
+//!   for both `SqlDialect::SparkSQL` and `SqlDialect::Trino` (the 2026-09-13
+//!   fully-degraded ruling), this refusal is unconditional on Trino today —
+//!   measured live, independent of gap 4 (reached even on a `DATE` axis with
+//!   no literal-typing issue at all).
+//!
+//! Neither gap has a fix task in phase 3d's plan (pure test-infrastructure
+//! scope), so the whole-row `MERGE` upsert family's live leg and
+//! `statement_parity`'s Trino leg are deferred to a follow-up phase that can
+//! scope the fix (or the accepted-degradation ruling) for gap 4 and gap 5.
+//! See `docs/outcomes/20260913-trino-incremental/outcome.md`'s Blocked log
+//! (2026-09-15) for the full writeup.
 
 mod common;
 use common::{
@@ -299,6 +342,88 @@ fn calendar_axis_incremental_model_runs_on_trino() {
     assert_eq!(rows, expected, "unexpected row set after the phased run");
 
     drop_trino_schema(&schema);
+}
+
+/// Phase 3d (`docs/outcomes/20260913-trino-incremental/phases/03d-plan.md`)
+/// — the append family's live leg: an insert-only `grain: partition` model
+/// over an append-only integer-axis source, run as two disjoint windowed
+/// `smelt run --target trino` invocations (`[1, 3)` then `[3, 5)`, each its
+/// own first-touch batch — never a repeat window — so the family exercised
+/// is the plain `CREATE TABLE … AS`/`INSERT INTO … FROM` append path, not
+/// the region `DELETE`+`INSERT` recompute family
+/// `integer_axis_incremental_model_runs_on_trino` above already covers.
+/// Asserted **result**-equal (multiset, not pinned rows) to a
+/// `--full-refresh` rebuild of the identical project into a second,
+/// independent schema — the oracle shape this phase's plan calls for.
+#[test]
+fn append_family_matches_full_refresh_on_trino() {
+    let Some(_env) = trino_env() else {
+        eprintln!("SMELT_TRINO_URL unset — skipping append_family_matches_full_refresh_on_trino");
+        return;
+    };
+    let schema = trino_schema("append_family");
+    let oracle_schema = trino_schema("append_family_oracle");
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = stage_int_partition_project(&tmp, &schema);
+
+    let first = run_smelt(
+        &root,
+        &[
+            "--target",
+            "trino",
+            "--event-time-start",
+            "1",
+            "--event-time-end",
+            "3",
+        ],
+    );
+    assert!(
+        first.status.success(),
+        "first disjoint window [1, 3) failed.\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr),
+    );
+
+    let second = run_smelt(
+        &root,
+        &[
+            "--target",
+            "trino",
+            "--event-time-start",
+            "3",
+            "--event-time-end",
+            "5",
+        ],
+    );
+    assert!(
+        second.status.success(),
+        "second disjoint window [3, 5) failed.\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&second.stdout),
+        String::from_utf8_lossy(&second.stderr),
+    );
+
+    let oracle_tmp = tempfile::TempDir::new().unwrap();
+    let oracle_root = stage_int_partition_project(&oracle_tmp, &oracle_schema);
+    let oracle_run = run_smelt(&oracle_root, &["--target", "trino", "--full-refresh"]);
+    assert!(
+        oracle_run.status.success(),
+        "full-refresh oracle run failed.\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&oracle_run.stdout),
+        String::from_utf8_lossy(&oracle_run.stderr),
+    );
+
+    let mut actual = fetch_trino_rows(&schema, "int_partition_mart");
+    actual.sort();
+    let mut expected = fetch_trino_rows(&oracle_schema, "int_partition_mart");
+    expected.sort();
+    assert_eq!(
+        actual, expected,
+        "two disjoint windowed append runs must be multiset-equal to a full-refresh rebuild"
+    );
+
+    drop_trino_schema(&schema);
+    drop_trino_schema(&oracle_schema);
 }
 
 /// Gap 3 (landed, `docs/outcomes/20260913-trino-incremental/

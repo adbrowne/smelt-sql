@@ -152,7 +152,7 @@ approximated.
 | 3b | Typed ANSI partition literals (`DATE '…'` / `TIMESTAMP '…'`) from the single `partition_literal` owner, so a calendar-axis predicate type-checks on a strict engine (gap 1) | blocked |
 | 3c | A `ColumnScopedMerge` cell downgraded to `PerGroupRecompute` for an `UpstreamMutation`-triggered (unclocked) cell resolves `key_scope: None` — the full-scan recompute the reachable row already promises — instead of demanding a `ScanClamp` that cannot exist (gap 3) | done |
 | 3b2 | Gap 1, re-attempted under the 2026-09-15 column-type ruling: the referenced partition column's declared SQL type reaches the single literal renderer, so a calendar predicate renders typed against a DATE/TIMESTAMP column and bare-quoted against a declared-VARCHAR one; plus the `render_time_literal` symbolic-placeholder fix 3b found | done |
-| 3d | Phase 3's deferred live legs, now unblocked: the append and whole-row-`MERGE` upsert families end-to-end through `execute_project` on Trino, plus `statement_parity`'s Trino executed-vs-emitted leg | planned |
+| 3d | Phase 3's deferred live legs, now unblocked: the append and whole-row-`MERGE` upsert families end-to-end through `execute_project` on Trino, plus `statement_parity`'s Trino executed-vs-emitted leg | blocked |
 | 3e | Live-Trino test isolation: every live-tier test gets a guaranteed-unique schema/namespace (or one process-wide guard), and `trino_state_residency.rs`'s `TRINO_ENV_GUARD` lock scope is widened to cover `stage_residency_project`'s own `SMELT_TRINO_URL` read — so the conformance and family gates fail for real reasons only | pending |
 | 4 | The emulated delete-and-insert window: `DELETE` range exactly covering the insert's write window, asserted directly and under out-of-order and repeated application | pending |
 | 5 | The merge-less conditional write over T3's staged relation (the departed-row delete as a separate scoped `DELETE`, since `WHEN NOT MATCHED BY SOURCE` is absent), and the column-scoped merge — executing where its cell needs no merge ledger, taking T3's `MaintenanceStateDowngraded` route where it does, per Spark's precedent | pending |
@@ -163,6 +163,13 @@ approximated.
 | 10 | Mid-stream schema evolution under maintenance, still oracle-equal; then close: divergences rewritten, `docs-site/` page stating plainly which incremental features Trino does and does not support and why, `verify-phase.sh` green | pending |
 
 ## Decision log
+
+- **2026-09-15 — phase 3d: landed the append family + the derived CI-wiring census; deferred the
+  whole-row `MERGE` upsert family (gaps 4/5, see Blocked log below).** Full writeup in the Blocked
+  entry; the one-line version: the append family's live leg
+  (`append_family_matches_full_refresh_on_trino`) and `trino_ci_wiring.rs`'s directory-scan census
+  are done, but the keyed-fold `MERGE` family and `statement_parity`'s Trino leg are unreachable
+  today for reasons outside this phase's task list, so row 3d stays `blocked` rather than `done`.
 
 - **2026-09-15 — reshape at phase 3d planning: no row added, split or reordered; 3d absorbs phase 3's
   unlanded Test 9 (CI wiring) and generalizes the live-gated census from a hardcoded list to a
@@ -421,6 +428,67 @@ approximated.
      with `MaintenanceRepairSliceMissing` instead of falling back to the full-scan recompute the
      `key_scope: None` "reachable" row already promises. `20260913-trino-ledger`'s Spark twin
      realises the identical fully-degraded posture, so this is very likely reachable on Spark too.
+
+- **2026-09-15 — phase 3d blocked on the whole-row `MERGE` upsert (keyed-fold) family and
+  `statement_parity`'s Trino leg; the append family and the CI-wiring census landed.** Gaps 1-3
+  above were closed by 3a/3b2/3c, so this phase attempted the two live legs phase 3 deferred. The
+  **append family** (insert-only `grain: partition`, over two disjoint windowed runs, oracle-compared
+  to a `--full-refresh` rebuild) now runs end-to-end
+  (`append_family_matches_full_refresh_on_trino`, `crates/smelt-cli/tests/
+  trino_incremental_families.rs`) — landed. The **whole-row `MERGE` upsert (keyed-fold) family**
+  does not run, live-measured against a real coordinator (`scripts/trino-up.sh`), for two further
+  gaps neither closed by 3a/3b2/3c nor owned by this phase's task list (pure test-infrastructure
+  scope — no fix task for either):
+  - **Gap 4** — the windowed-keyed-maintenance driver's own per-step driving-source pushdown filter
+    (`crates/smelt-runtime/src/maintenance_driver/{driver.rs,cumulative.rs}`, stepping over the
+    driving source's own timeseries axis) renders the run window's bound as a bare string against
+    the driving source's own partition column regardless of its real type — the same class of bug
+    as gaps 1/2, in a third emission site neither of those phases' fixes touched (they fixed
+    `transformer.rs`'s injected filters and the mart's own declared `partition_column` type
+    resolution, not the driving-source stepping loop inside the windowed-keyed driver itself).
+    Measured live: an `INTEGER`-axis driving source fails `Cannot apply operator: bigint <=
+    varchar(10)`; a `DATE`-axis one fails `Cannot apply operator: date <= varchar(10)`. Blocks the
+    idempotent (`MIN`/`MAX`-style) keyed-fold shape before a write mechanism is ever chosen.
+  - **Gap 5** — `Technique::KeyedFold`'s `Grade::Additive` branch (a fold-eligible combiner such as
+    `SUM`) has no plan-time downgrade, unlike the repair family's `resolve_availability`: the
+    windowed-keyed driver checks `realises_reconciliation_ledger` at EXECUTION time and hard-refuses
+    (`BackendError::unsupported("additive-fold windowed-keyed maintenance ledger
+    (never-fold-twice)")`). Since `realisable_state_structures` is `vec![]` for both
+    `SqlDialect::SparkSQL` and `SqlDialect::Trino` (the fully-degraded ruling recorded in the
+    outcome-backlog's queued-next header), this refusal is unconditional on Trino today — measured
+    live, independent of gap 4 (reached even on a `DATE` axis with no literal-typing issue at all).
+    Worse: `required_state_structure` maps **every** `Technique::KeyedFold` cell (both grades) to
+    `StateStructure::ReconciliationLedger`, so even the idempotent shape — if gap 4 is fixed first —
+    would still need its OWN downgrade path added to the windowed-keyed driver (mirroring
+    `resolve_availability`) before a real `MERGE` could ever be reached on a fully-degraded backend.
+  Given neither gap has a fix task in this phase's scope, and the row's own acceptance criteria name
+  the whole-row `MERGE` family explicitly, this phase does not close row 3d. What it verified is
+  useful independent of the fix: the append family's live leg, and the CI-wiring gates (tests 4/5 in
+  `trino_ci_wiring.rs`) now derive their live-gated census from a directory scan
+  (`crates/smelt-{cli,backend-trino}/tests`, matching on real call-site markers —
+  `trino_env(`/`targets_to_run_with_trino(`/`live_env_or_skip(`/a raw `SMELT_TRINO_URL` lookup, not
+  a filename convention) rather than a hardcoded list, and the `trino-integration` job's smelt-cli
+  step now runs `trino_ddl_live`, `trino_state_residency`, `trino_lock_versioning`,
+  `trino_incremental_families` and `materialization_parity` alongside the two it already ran — all
+  five confirmed passing live. Note for the next planner: the 2026-09-15 decision log entry above
+  this one names `trino_posture_plan_invariance` and `trino_broken_foreign_keys` as additional
+  live-gated files the phase-planning survey found missing from CI — the derived, marker-based
+  census in this phase found BOTH to be fully offline (`smelt explain`/`Config::load` against a
+  placeholder target, no live connection at all, already running in the ordinary `cargo test -p
+  smelt-cli` suite with no Docker tier needed) — that survey's filename-based method over-counted;
+  no CI change was needed for them.
+
+  **Candidate next steps for gap 4 + gap 5** (not decided here — a planner call): (a) fix gap 4 by
+  routing the windowed-keyed driver's driving-source pushdown through the same
+  `resolve_partition_column_type`/typed-literal path 3b2 landed, then separately decide gap 5 —
+  either add a plan-time downgrade for `Technique::KeyedFold` mirroring `resolve_availability` (so a
+  fully-degraded backend falls back to `PerGroupRecompute` the way the repair family already does),
+  or accept the keyed-fold MERGE family as a **declared, permanent** Trino gap (parallel to T3/T4's
+  fully-degraded ruling) and rescope row 3d/the outcome's remaining criteria accordingly. (b) If (a)
+  is taken, re-attempt this phase's deferred tests 2/3 verbatim — `trino.rs`'s `RecordingBackend`
+  generalization and `smelt-backend-trino` dev-dependency were drafted and verified compiling during
+  this phase's investigation, then reverted (unused code, since the family the test needs is
+  unreachable today) — both are cheap to redo once gap 4/5 land.
 
   Each is documented with the exact live error text and root-cause trace in
   `crates/smelt-cli/tests/trino_incremental_families.rs`'s doc comments (now a documentation-only
