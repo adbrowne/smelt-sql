@@ -1,7 +1,7 @@
 # Outcome: Trino takes Spark's state-residency posture — correctness structures unrealisable, every dependent cell recorded as downgraded
 
 **Created:** 2026-09-13
-**Status:** active
+**Status:** done
 **Driver:** loop. Docker only, no credential, no human gate. Live-tier phases must emit
 `<<PHASE_BLOCKED>>` when the coordinator is unreachable, never skip green.
 **Depends on:** `20260913-trino-target-spine` (T1) for the backend and the tier.
@@ -163,6 +163,48 @@ land near or above Delta's.
 | 11 | Surface and close: `smelt explain` rendering Trino's downgrades (text + `--json`), diagnostics catalogue and `examples/broken/` fixtures, `docs-site/` state page updated with what Trino costs and why, `verify-phase.sh` green with no baseline bumped | done |
 
 ## Decision log
+
+- **2026-09-14 — outcome complete: all eleven success criteria met, judged against the phase
+  summaries.** Evidence, criterion by criterion. (1) `scripts/trino-probe-state.sh` ran against
+  the live tier and measured a *stronger* refusal than assumed — Iceberg refuses **all** writes
+  inside an explicit transaction (`Catalog only supports writes using autocommit: iceberg`), not
+  merely cross-table ones; no cross-table atomicity was found, so nothing escalated and the
+  Spark-shaped posture holds a fortiori (`phases/01-summary.md`). (2) `state.md`'s realisability
+  table carries the `Trino (Iceberg)` column with five `**no**` cells and the permanence stated
+  from the measured error text; `multi_backend.md` §"Incremental & schema evolution per backend"
+  and §"Parity contract" say the same, pinned by
+  `crates/smelt-logical/tests/state_realisability_docs.rs`. (3)+(4) Phase 4 removed the refusal
+  `maintenance_dialect` returned for `SqlDialect::Trino` — the exact claim-without-builder /
+  refusal-instead-of-downgrade shape these criteria exclude — threading `Result`/`Option` through
+  `explain`, `profile.rs` and the UI diagnostics endpoint rather than substituting DuckDB's
+  spelling; phase 5 turned both invariants into standing tests. (5) `contract.deferral` refuses on
+  Trino with `DeclaredContractRequiresState`; phase 6 found and fixed a second sibling gap in the
+  same batch loop, and defined no new lattice point. (6) `ddl_trino/` maps every `SchemaOperation`
+  with each row executed against a live Iceberg table; all five of T1's schema capability cells
+  confirmed with no corrections, plus one measured coordinator quirk (quoted column name breaks
+  `ALTER COLUMN … DROP NOT NULL` on `trinodb/trino:483`) documented in generator, spec and header.
+  (7) `crates/smelt-state/src/ddl_trino/` is a module directory (`mod.rs`, `operations.rs`,
+  `types.rs`), not a file. (8) `StagedRelation` landed as capability data
+  (`staged_relation_residence`/`staged_relation_group_is_atomic`); Trino takes `TargetSchema`/
+  `false`; four emitters re-keyed with DuckDB's statements byte-unchanged; the interrupted-run
+  lifecycle is live-proved to leave no partial data and exactly one reclaimable orphan.
+  (9) Locking resolves to *realised*: a held lock refuses a second live `smelt run --target trino`
+  by PID, `state_version: 99` refuses before any write, and the one genuine no-op (`stateless`)
+  is now a stated behaviour with a structural gate pinning the single `lock()` call site — no lock
+  that never locks. (10) `.smelt/` proved non-correctness-bearing both live (delete-between-runs
+  equality, 5/5) and offline (`explain --json` cells byte-identical across postures, 2/2); the
+  live reruns incidentally exposed and fixed a pre-existing cross-kind `DROP … IF EXISTS` bug in
+  `smelt-backend-trino`. (11) Re-verified at completion on a clean tree:
+  `bash .claude/scripts/verify-phase.sh` → **ALL GREEN** (fmt, clippy both feature sets,
+  shellcheck, workspace tests, example_diagnostics) and `large-file-check.sh` → OK. No new
+  `DiagnosticCode` landed this outcome (`git diff` over `smelt-db/src/diagnostics_types/`
+  confirmed), so criterion 11's `examples/broken/` fixture clause is satisfied vacuously. One
+  honest deviation from criterion 11's "respected rather than bumped": phase 4 bumped three
+  `large-file-baseline.txt` entries (7–14 lines each, in-place `Result`/`Option` threading) and
+  one `hardening-baseline.txt` count (`smelt-cli println` 189→190, the `eprintln!`-matches-
+  `println!`-substring quirk), each with a sign-off note in the baseline file as the discipline
+  requires. Handed on, not fixed here: tightening Spark's now-shared column is out of scope by
+  declaration. Outcome set to `done`; T4 (`20260913-trino-incremental`) is next in the backlog.
 
 - **2026-09-14 — phase 11 done: user docs published, gated against the spec.** New
   `## Which backends realise these structures` section in `docs-site/docs/reference/state.md`
