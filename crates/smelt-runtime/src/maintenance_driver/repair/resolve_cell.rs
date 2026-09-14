@@ -7,7 +7,9 @@ use smelt_logical::analysis::walk::model_property_vector;
 use smelt_logical::maintenance::availability::StateAvailability;
 use smelt_logical::maintenance::choice::{effective_override, resolve_cell_choice};
 use smelt_logical::maintenance::derive::SourceReferentialIntegrity;
-use smelt_logical::maintenance::repair::{discovery_posture, RepairDiscoveryPosture};
+use smelt_logical::maintenance::repair::{
+    discovery_posture, has_repair_family_lowering, RepairDiscoveryPosture,
+};
 use smelt_logical::maintenance::{PlanCell, SourceFacts, Technique, Trigger};
 use std::collections::HashSet;
 
@@ -111,6 +113,17 @@ pub fn resolve_live_per_group_recompute_cell(
                 if cell.technique != Technique::PerGroupRecompute {
                     continue;
                 }
+                // A `PerGroupRecompute` cell reached by availability's own
+                // downgrade (no key, no clamp) never passed the repair
+                // family's admission obligations and has no lowering here —
+                // the run shape's own whole-target route performs its
+                // full-scan recompute instead (`state.md` §"The degradation
+                // contract" step 2). This check must precede
+                // `repair_cell_key` — that fail-loud path is reserved for a
+                // cell the repair family *did* admit.
+                if !has_repair_family_lowering(cell) {
+                    continue;
+                }
                 // Fail-loud BEFORE the choice ladder: an unprovable group
                 // key is an internal inconsistency, not an override
                 // outcome.
@@ -166,23 +179,7 @@ pub fn resolve_live_per_group_recompute_cell(
                 else {
                     continue;
                 };
-                // The cell's own derived slice — obligation 4's bounded
-                // per-group read footprint, matched to the trigger's own
-                // source (never another source's clamp).
-                let Some(slice) = cell
-                    .scans
-                    .iter()
-                    .find(|c| c.source == facts.name)
-                    .or_else(|| cell.scans.first())
-                else {
-                    bail!(
-                        "MaintenanceRepairSliceMissing: a Technique::PerGroupRecompute cell for \
-                         group '{}' on source '{}' carries no derived ScanClamp — the bounded \
-                         per-group read slice is admission obligation 4 and is never assumed",
-                        cell.group,
-                        facts.name,
-                    );
-                };
+                let slice = super::repair_cell_slice(cell, &facts.name)?;
                 // P9 (`docs/specs/incremental_models.md` §"The repair
                 // family" — "Obligation 7 over a `mutable_snapshot`
                 // source"): a source with no native change feed and no

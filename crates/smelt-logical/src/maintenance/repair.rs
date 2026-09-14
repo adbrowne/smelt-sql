@@ -274,6 +274,27 @@ pub fn derive_repair_cell(admitted: &AdmittedRepair, trigger: Trigger, group: St
     }
 }
 
+/// Whether `cell` has a repair-family lowering at all (`docs/specs/state.md`
+/// §"The degradation contract" step 2, the paragraph after the
+/// `EnrichmentKeyed`/`SuccessionPatch` fallbacks): a
+/// [`Technique::PerGroupRecompute`] cell reached by
+/// [`super::availability::resolve_availability`]'s downgrade — a recorded
+/// [`super::availability::StateDowngrade`], no [`KeyScope`], no derived
+/// [`ScanClamp`] — never passed the repair family's own admission
+/// obligations (it holds no group key, no bounded slice), so it has no
+/// `resolve_live_per_group_recompute_cell`-shaped lowering
+/// (`smelt-runtime::maintenance_driver::repair::resolve_cell`); the run
+/// shape's own whole-target route performs its recompute instead
+/// (`required_state_structure`'s `key_scope: None ⇒ None` row already
+/// promises a full-scan recompute here). A clamp-less cell that the repair
+/// family *did* admit (no recorded downgrade) is never given this pass — it
+/// remains the fail-loud `MaintenanceRepairSliceMissing` internal
+/// inconsistency, so this relaxation cannot widen into a silent unbounded
+/// scan.
+pub fn has_repair_family_lowering(cell: &PlanCell) -> bool {
+    !(cell.state_downgrade.is_some() && cell.key_scope.is_none() && cell.scans.is_empty())
+}
+
 /// Which affected-key discovery read a source's [`MutationProfile`] needs
 /// (`docs/specs/incremental_models.md` §"The repair family" — "Obligation 7
 /// over a `mutable_snapshot` source"): the ordinary clamped current-source
@@ -351,6 +372,60 @@ mod tests {
                 .into_iter()
                 .collect::<BTreeSet<_>>()
         );
+    }
+
+    fn base_repair_cell() -> PlanCell {
+        PlanCell {
+            group: "{amount}".to_string(),
+            trigger: Trigger::UpstreamMutation {
+                source: "orders".to_string(),
+            },
+            corner: Corner::ColumnMerge,
+            technique: Technique::PerGroupRecompute,
+            partition_local: PartitionLocal::Yes,
+            scans: vec![],
+            ledger_catch_up: false,
+            row_identity: RowIdentityVerdict {
+                identity: RowIdentity::Key(vec!["customer_id".to_string()]),
+                proven_mismatch: None,
+            },
+            skeleton_source_closure: None,
+            fingerprint_projections: std::collections::BTreeMap::new(),
+            key_scope: None,
+            state_downgrade: None,
+        }
+    }
+
+    #[test]
+    fn downgraded_clampless_cell_has_no_repair_family_lowering() {
+        let mut cell = base_repair_cell();
+        cell.state_downgrade = Some(super::super::availability::StateDowngrade {
+            original: Technique::ColumnScopedMerge,
+            missing: super::super::availability::StateStructure::MergeLedger,
+            reason: "test".to_string(),
+        });
+        assert!(!has_repair_family_lowering(&cell));
+    }
+
+    #[test]
+    fn repair_admitted_cell_has_repair_family_lowering() {
+        let mut clamp_bearing = base_repair_cell();
+        clamp_bearing.scans = vec![ScanClamp {
+            source: "orders".to_string(),
+            column: "order_date".to_string(),
+            before: crate::analysis::source_bounds::Seconds::ZERO,
+            after: crate::analysis::source_bounds::Seconds::ZERO,
+            write_footprint: None,
+        }];
+        assert!(has_repair_family_lowering(&clamp_bearing));
+
+        let mut key_addressed = base_repair_cell();
+        key_addressed.key_scope = Some(KeyScope {
+            keys: vec!["order_id".to_string()],
+            from: "upstream_model".to_string(),
+            discovery: KeyDiscovery::UpstreamKeyed,
+        });
+        assert!(has_repair_family_lowering(&key_addressed));
     }
 
     #[test]

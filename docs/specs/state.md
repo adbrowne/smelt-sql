@@ -420,6 +420,18 @@ Statefulness is an **admission input resolved late**. Plan derivation proceeds i
    caught ahead of time by the probe — the second cost the contract trades for correctness on
    such a backend.
 
+   A `PerGroupRecompute` cell reached **by this downgrade** never passed the repair family's own
+   admission obligations (`incremental_models.md` §"The repair family"): it carries neither a
+   derived bounded slice nor a `key_scope`, because its trigger is `UpstreamMutation`, not a
+   clock, so no `ScanClamp` could ever be derived for it. Such a cell has **no repair-family
+   lowering** — its recompute is performed by the run shape's own whole-target route instead, the
+   full-scan recompute the `key_scope: None` row above already promises. A run must not refuse it
+   for the absent slice. The discriminator is exact: a recorded downgrade, no `key_scope`, and no
+   derived `ScanClamp`. A `PerGroupRecompute` cell the repair family *did* admit — one reached
+   without a recorded downgrade — remains subject to the repair family's own fail-loud rule: a
+   clamp-less admitted cell is an internal inconsistency, never treated as declinable, so this
+   relaxation cannot widen into a silent unbounded scan.
+
 The downgrade is sound by construction: every recompute-family technique satisfies the same
 equivalence invariant (`incremental_models.md` §"The equivalence invariant"), so availability
 resolution changes a cell's *cost*, never its *result*. This is the same shape as SQL-driven

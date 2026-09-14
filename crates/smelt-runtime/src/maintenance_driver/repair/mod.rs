@@ -160,6 +160,36 @@ pub fn repair_cell_key(cell: &PlanCell) -> Result<Vec<String>> {
     Ok(key.clone())
 }
 
+/// The cell's own derived bounded read slice for `source` — obligation 4's
+/// per-group read footprint, matched to the trigger's own source (never
+/// another source's clamp). A repair-family-admitted cell always carries
+/// exactly the one clamp [`smelt_logical::maintenance::repair::
+/// admit_per_group_recompute`] proved; only a cell this lowering has already
+/// declined (`smelt_logical::maintenance::repair::has_repair_family_lowering`
+/// returning `false`) may reach here with an empty `scans` — the caller must
+/// filter those out first. Refuse by name rather than assuming a slice, so a
+/// genuine internal inconsistency (an admitted cell that somehow lost its
+/// clamp) is never silently treated as an unbounded scan.
+///
+/// Pure and independently unit-testable, split out of
+/// `resolve_live_per_group_recompute_cell`'s loop body for the same reason as
+/// [`repair_cell_key`].
+pub fn repair_cell_slice<'a>(cell: &'a PlanCell, source: &str) -> Result<&'a ScanClamp> {
+    cell.scans
+        .iter()
+        .find(|c| c.source == source)
+        .or_else(|| cell.scans.first())
+        .ok_or_else(|| {
+            anyhow::anyhow!(
+                "MaintenanceRepairSliceMissing: a Technique::PerGroupRecompute cell for group \
+                 '{}' on source '{}' carries no derived ScanClamp — the bounded per-group read \
+                 slice is admission obligation 4 and is never assumed",
+                cell.group,
+                source,
+            )
+        })
+}
+
 /// Find the first source whose `Trigger::NewData` cell resolves live to
 /// `Technique::PerGroupRecompute` — the repair family's counterpart of
 /// [`resolve_live_column_scoped_cell`]/[`resolve_live_membership_recompute_cell`]

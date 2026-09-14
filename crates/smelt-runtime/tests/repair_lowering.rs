@@ -482,6 +482,120 @@ fn resolve_live_per_group_recompute_cell_fails_loud_on_whole_row_identity() {
     );
 }
 
+// ── 3c ───────────────────────────────────────────────────────────────────
+/// Gap 3 (`docs/outcomes/20260913-trino-incremental/phases/03c-plan.md`): a
+/// `ColumnScopedMerge` cell downgraded to `PerGroupRecompute` for an
+/// `UpstreamMutation`-triggered (unclocked) cell never passed the repair
+/// family's own admission — it carries no `ScanClamp` and never could, its
+/// trigger being a mutation rather than a clock. Under an EMPTY
+/// `StateAvailability` (every state structure unavailable, so the
+/// `ColumnScopedMerge` ideal technique is downgraded), the resolver must
+/// decline this cell (`Ok(None)`) rather than refuse the whole run with
+/// `MaintenanceRepairSliceMissing` — the run shape's own whole-target route
+/// performs the full-scan recompute instead.
+#[test]
+fn resolve_live_per_group_recompute_cell_declines_a_downgraded_clampless_cell() {
+    // A single unclocked `mutable_snapshot` source with no partition column:
+    // the fold family refuses both combiners (the source is not
+    // append-only, so no un-fold mechanism exists), AND the repair family
+    // refuses too (`RepairSliceUnbounded` — no partition column to bound the
+    // per-group read), so `NewData` derives no cell at all. The ONLY cell
+    // this model derives is the `UpstreamMutation` column-scoped merge —
+    // ideal technique `ColumnScopedMerge`, `key_scope: None`, `scans: []`
+    // (unclocked, `allow_full_scan: true`) — which is exactly the shape
+    // that, downgraded under an unavailable merge ledger, has no repair-
+    // family lowering.
+    let text = "---\n\
+        materialization: table\n\
+        refresh: incremental\n\
+        grain: key\n\
+        unique_key: customer_id\n\
+        maintenance:\n\
+        \x20\x20scan_bounds:\n\
+        \x20\x20\x20\x20per_source:\n\
+        \x20\x20\x20\x20\x20\x20raw.orders:\n\
+        \x20\x20\x20\x20\x20\x20\x20\x20allow_full_scan: true\n\
+        ---\n\
+        SELECT customer_id, SUM(amount) AS total_amount, MAX(tier_rank) AS max_tier \
+        FROM smelt.sources.raw.orders \
+        GROUP BY customer_id\n";
+    let (metadata, sql) = metadata_and_sql(text);
+
+    let sources = vec![SourceFacts {
+        name: "raw.orders".to_string(),
+        mutation: MutationProfile::MutableSnapshot,
+        partition_col: None,
+        unique_key: vec!["order_id".to_string()],
+        allow_full_scan: true,
+    }];
+    let mut explicitly_mutable = HashSet::new();
+    explicitly_mutable.insert("raw.orders".to_string());
+
+    let resolved = resolve_live_per_group_recompute_cell(
+        &sql,
+        "customer_totals",
+        &metadata,
+        &sources,
+        &explicitly_mutable,
+        &[],
+        smelt_dialect::SqlDialect::DuckDB,
+        true,
+        &smelt_logical::maintenance::availability::StateAvailability::none(),
+    )
+    .expect("a downgraded, clamp-less cell must be declined, never a refusal");
+    assert!(
+        resolved.is_none(),
+        "the resolver must decline a downgrade-derived clamp-less cell rather than resolving \
+         it as a live repair cell, got {resolved:?}"
+    );
+}
+
+// ── 3c fence ─────────────────────────────────────────────────────────────
+/// The relaxation's fence: an admitted (non-downgraded) `PerGroupRecompute`
+/// cell whose `scans` are empty is a genuine internal inconsistency — the
+/// repair family's own admission (`admit_per_group_recompute`) always
+/// produces exactly one clamp, so this shape is structurally impossible
+/// today (mirrors `resolve_live_per_group_recompute_cell_fails_loud_on_whole_row_identity`'s
+/// own rationale) but must still fail loud by name rather than silently
+/// being treated as declinable.
+#[test]
+fn resolve_live_per_group_recompute_cell_still_fails_loud_on_a_missing_clamp() {
+    use smelt_logical::maintenance::{
+        Corner, PartitionLocal, PlanCell, RowIdentity, RowIdentityVerdict, Trigger,
+    };
+
+    let cell = PlanCell {
+        group: "{max_amount}".to_string(),
+        trigger: Trigger::UpstreamMutation {
+            source: "raw.orders".to_string(),
+        },
+        corner: Corner::ColumnMerge,
+        technique: Technique::PerGroupRecompute,
+        partition_local: PartitionLocal::Yes,
+        scans: vec![],
+        ledger_catch_up: false,
+        row_identity: RowIdentityVerdict {
+            identity: RowIdentity::Key(vec!["customer_id".to_string()]),
+            proven_mismatch: None,
+        },
+        skeleton_source_closure: None,
+        fingerprint_projections: std::collections::BTreeMap::new(),
+        key_scope: None,
+        state_downgrade: None,
+    };
+
+    assert!(
+        smelt_logical::maintenance::repair::has_repair_family_lowering(&cell),
+        "a non-downgraded cell must still be treated as admitted by the predicate"
+    );
+    let err = smelt_runtime::maintenance_driver::repair_cell_slice(&cell, "raw.orders")
+        .expect_err("an admitted cell with no derived ScanClamp must fail loud");
+    assert!(
+        err.to_string().contains("MaintenanceRepairSliceMissing"),
+        "{err}"
+    );
+}
+
 // ── 4 ────────────────────────────────────────────────────────────────────
 #[test]
 fn affected_keys_select_bounds_the_read_with_the_cells_scan_clamp() {
@@ -910,6 +1024,20 @@ pub fn select_request(
         invoke_external_steps: true,
         assume_external_steps_fresh: false,
     }
+}
+
+/// A windowless request (no `--event-time-start`/`--event-time-end`) — the
+/// snapshot-reconcile run shape (no clocked driving source,
+/// `docs/specs/incremental_models.md` §"The two run shapes") refuses an
+/// event-time window outright.
+pub fn windowless_select_request(
+    target: &str,
+    model: &str,
+) -> smelt_runtime::types::ExecuteRequest {
+    let mut request = select_request(target, model, "unused", "unused");
+    request.start = None;
+    request.end = None;
+    request
 }
 
 pub struct DuckDbBackendFactory {
@@ -1568,5 +1696,189 @@ async fn keyless_recompute_rewrites_the_region_when_the_candidate_differs() {
         )
         .await,
         "a changed candidate must leave stored state equal to the candidate"
+    );
+}
+
+// ── 3c DuckDB leg ────────────────────────────────────────────────────────
+//
+// Criterion 8 in miniature (`docs/outcomes/20260913-trino-incremental/
+// phases/03c-plan.md`): the downgraded cell's full-scan recompute is
+// compared to the full-refresh oracle, not exempted from it.
+
+const DOWNGRADE_SOURCE_YML: &str = r#"description: Unclocked mutable customer snapshot — no timeseries block, so `partition_col` resolves `None`
+columns:
+- name: order_id
+  type: INTEGER
+- name: customer_id
+  type: INTEGER
+- name: amount
+  type: DECIMAL(10,2)
+- name: tier_rank
+  type: INTEGER
+unique_key: [order_id]
+mutation_profile:
+  kind: mutable_snapshot
+"#;
+
+/// Ideal derivation: neither `ANY_VALUE` combiner is fold-eligible (no
+/// additive/extremal algebra to un-fold) nor repair-eligible (`raw.
+/// customer_snapshot` is unclocked — `RepairSliceUnbounded`, no partition
+/// column to bound a per-group read), so `Trigger::NewData` admits no cell
+/// at all (unlike `SUM`/`MAX`, `ANY_VALUE` also clears the pre-execution
+/// `KeyedSnapshotSourceUnsupportedColumn` diagnostic gate, which refuses an
+/// additive/extremal fold column outright under the snapshot-reconcile run
+/// shape). The only cell this model derives is `Trigger::
+/// UpstreamMutation`'s `Technique::ColumnScopedMerge` (`key_scope: None`,
+/// `scans: []`), which downgrades to a clamp-less `PerGroupRecompute` once
+/// `state.warehouse_tables: none` makes the merge ledger unavailable.
+const DOWNGRADE_MODEL_FILE: &str = "---\n\
+     materialization: table\n\
+     refresh: incremental\n\
+     grain: key\n\
+     unique_key: customer_id\n\
+     maintenance:\n\
+     \x20\x20scan_bounds:\n\
+     \x20\x20\x20\x20per_source:\n\
+     \x20\x20\x20\x20\x20\x20raw.customer_snapshot:\n\
+     \x20\x20\x20\x20\x20\x20\x20\x20allow_full_scan: true\n\
+     ---\n";
+const DOWNGRADE_MODEL_SQL: &str = "SELECT customer_id, ANY_VALUE(amount) AS total_amount, \
+     ANY_VALUE(tier_rank) AS max_tier \
+     FROM smelt.sources.raw.customer_snapshot \
+     GROUP BY customer_id";
+const DOWNGRADE_ORACLE_SQL: &str = "SELECT customer_id, ANY_VALUE(amount) AS total_amount, \
+     ANY_VALUE(tier_rank) AS max_tier \
+     FROM main.sources_raw_customer_snapshot \
+     GROUP BY customer_id";
+
+#[tokio::test]
+async fn downgraded_keyed_model_recomputes_full_scan_and_matches_a_full_refresh() {
+    use std::sync::Arc;
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project_dir = tmp.path().join("project");
+    let db_path = tmp.path().join("run.duckdb");
+
+    let source_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+    copy_dir_recursive(&source_dir, &project_dir);
+    std::fs::write(
+        project_dir.join("models/sources/raw/customer_snapshot.yml"),
+        DOWNGRADE_SOURCE_YML,
+    )
+    .expect("write customer_snapshot source yml");
+    std::fs::write(
+        project_dir.join("models/customer_totals.sql"),
+        format!("{DOWNGRADE_MODEL_FILE}{DOWNGRADE_MODEL_SQL}\n"),
+    )
+    .expect("write downgrade model fixture");
+
+    // `state.warehouse_tables: none` (`docs/specs/state.md` §"Opting out of
+    // warehouse bookkeeping") is what makes `StateAvailability::none()`
+    // reach the real run — the same lever `smelt.yml` exposes, not a
+    // test-only backdoor.
+    let smelt_yml_path = project_dir.join("smelt.yml");
+    let mut yml = std::fs::read_to_string(&smelt_yml_path).expect("read smelt.yml");
+    yml.push_str("\nstate:\n  warehouse_tables: none\n");
+    std::fs::write(&smelt_yml_path, yml).expect("append warehouse_tables: none");
+
+    let config = Arc::new(smelt_core::config::Config::load(&project_dir).expect("load smelt.yml"));
+
+    {
+        use smelt_backend::Backend;
+        let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("open duckdb");
+        backend
+            .execute_sql(
+                "CREATE TABLE main.sources_raw_customer_snapshot (order_id INTEGER, customer_id \
+                 INTEGER, amount DECIMAL(10,2), tier_rank INTEGER)",
+            )
+            .await
+            .expect("create source table");
+        backend
+            .execute_sql(
+                // One row per customer — `ANY_VALUE` is deterministic only
+                // when there is exactly one candidate row to pick.
+                "INSERT INTO main.sources_raw_customer_snapshot VALUES \
+                 (1, 1, 100.00, 1), (3, 2, 70.00, 1)",
+            )
+            .await
+            .expect("seed source table");
+    }
+
+    // Run 1: creation.
+    {
+        let (db, graph) = build_db_and_graph(&project_dir, &config);
+        smelt_runtime::execute_project(
+            "downgrade-run-1".to_string(),
+            windowless_select_request("dev", "customer_totals"),
+            Arc::clone(&config),
+            graph,
+            db,
+            &project_dir,
+            &DuckDbBackendFactory {
+                db_path: db_path.to_path_buf(),
+            },
+            &smelt_runtime::NoOpReporter,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("first run (create) must succeed");
+    }
+
+    // Mutate: change customer 1's row in place. `ANY_VALUE` is not
+    // fold-eligible, and no `ScanClamp` exists for this unclocked source —
+    // before this phase's fix, this run refused with
+    // `MaintenanceRepairSliceMissing` instead of taking the whole-target
+    // full-scan route the `key_scope: None` row already promises.
+    {
+        let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("reopen duckdb");
+        use smelt_backend::Backend;
+        backend
+            .execute_sql(
+                "UPDATE main.sources_raw_customer_snapshot SET amount = 10.00, tier_rank = 5 \
+                 WHERE order_id = 1",
+            )
+            .await
+            .expect("retract");
+    }
+
+    // Run 2: must succeed via the whole-target route, never refuse.
+    let (db, graph) = build_db_and_graph(&project_dir, &config);
+    smelt_runtime::execute_project(
+        "downgrade-run-2".to_string(),
+        windowless_select_request("dev", "customer_totals"),
+        Arc::clone(&config),
+        graph,
+        db,
+        &project_dir,
+        &DuckDbBackendFactory {
+            db_path: db_path.to_path_buf(),
+        },
+        &smelt_runtime::NoOpReporter,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .expect(
+        "second run (downgraded PerGroupRecompute cell, no ScanClamp) must succeed via the \
+         whole-target route rather than refusing MaintenanceRepairSliceMissing",
+    );
+
+    let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("reopen duckdb");
+    assert!(
+        multiset_equal(
+            &backend,
+            "SELECT customer_id, total_amount, max_tier FROM main.customer_totals",
+            DOWNGRADE_ORACLE_SQL,
+        )
+        .await,
+        "the downgraded cell's full-scan recompute must equal a full refresh over the same inputs"
     );
 }

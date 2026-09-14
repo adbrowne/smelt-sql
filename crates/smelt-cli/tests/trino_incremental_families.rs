@@ -27,10 +27,15 @@
 //! Gap 2 was landed in phase 3a (`docs/outcomes/20260913-trino-incremental/
 //! phases/03a-plan.md`) — `integer_axis_incremental_model_runs_on_trino`
 //! below is the real CLI-level proof, replacing what was a documentation-only
-//! anchor function. Gaps 1 and 3 are still open.
+//! anchor function. Gap 3 was landed in phase 3c (`docs/outcomes/
+//! 20260913-trino-incremental/phases/03c-plan.md`) —
+//! `snapshot_reconcile_keyed_model_runs_on_trino` below is the real
+//! CLI-level proof. Gap 1 is still open.
 
 mod common;
-use common::{drop_trino_schema, fetch_trino_rows, trino_env, trino_schema, trino_target_block};
+use common::{
+    drop_trino_schema, fetch_trino_rows, trino_backend, trino_env, trino_schema, trino_target_block,
+};
 
 use std::fs;
 use std::path::Path;
@@ -184,31 +189,143 @@ fn integer_axis_incremental_model_runs_on_trino() {
     drop_trino_schema(&schema);
 }
 
-/// Gap 3 — a snapshot-reconcile-shaped keyed model's `ColumnScopedMerge`
-/// downgrade assumes a `ScanClamp` that does not exist for it.
-///
-/// The natural model shape for "the whole-row MERGE upsert" — `refresh:
-/// incremental`, `grain: key`, a plain `ANY_VALUE`-aggregate passthrough of
-/// an **unclocked** `mutable_snapshot` source, no upstream model edge —
-/// does not dispatch through `smelt-runtime/src/cumulative.rs`'s
-/// `execute_snapshot_reconcile` (as its own doc comments and
-/// `crates/smelt-runtime/tests/keyed_frontier_bookkeeping.rs`'s ledger-
-/// absence test might suggest). It dispatches through the general
-/// `smelt_logical::maintenance::choice` cell-derivation system instead,
-/// whose *ideal* technique for this cell is `ColumnScopedMerge` (confirmed
-/// via `smelt explain --json`'s `state_downgrade.original`). On a fully
-/// degraded dialect (`realisable_state_structures` empty — Trino and Spark
-/// alike), `ColumnScopedMerge` downgrades to `PerGroupRecompute`, and that
-/// downgrade route assumes a derivable `ScanClamp` — sound for a *clocked*,
-/// windowed `PerGroupRecompute` cell, but this cell's trigger is
-/// `UpstreamMutation`, not a clock, so no `ScanClamp` exists to derive.
-/// Execution refuses with `MaintenanceRepairSliceMissing` rather than
-/// falling back to the full-scan recompute the `key_scope: None`
-/// "reachable" row in `docs/specs/multi_backend.md`'s landing table already
-/// promises. `20260913-trino-ledger`'s Spark twin realises the identical
-/// fully-degraded posture, so this is very likely reachable on Spark too
-/// for the same model shape — not Trino-specific, and it sits in
-/// `smelt_logical::maintenance::choice`'s cell-derivation layer, not in
-/// this phase's (`MaintenanceDialect::Trino`) emitters.
-#[allow(dead_code)]
-fn gap_3_column_scoped_merge_downgrade_needs_no_scan_clamp_route() {}
+/// Gap 3 (landed, `docs/outcomes/20260913-trino-incremental/
+/// phases/03c-plan.md`) — the live leg: a keyed model whose only `NewData`-
+/// eligible technique is refused (neither `ANY_VALUE` combiner is
+/// fold-eligible, and the repair family refuses `RepairSliceUnbounded` — no
+/// partition column on the unclocked source), so the model's only derived
+/// cell is `Trigger::UpstreamMutation`'s `Technique::ColumnScopedMerge`
+/// (`key_scope: None`, `scans: []`). On Trino's fully-degraded dialect
+/// (`realisable_state_structures` empty), that cell downgrades to a
+/// clamp-less `PerGroupRecompute`. Before this phase's fix
+/// (`smelt_logical::maintenance::repair::has_repair_family_lowering`,
+/// `docs/specs/state.md` §"The degradation contract"), execution refused
+/// with `MaintenanceRepairSliceMissing` instead of taking the whole-target
+/// full-scan route the `key_scope: None` "reachable" row in
+/// `docs/specs/multi_backend.md`'s landing table already promises. Run
+/// twice through `smelt run --target trino`: creation, then a mutation to
+/// the seeded source row, asserting the maintained table reflects it.
+#[test]
+fn snapshot_reconcile_keyed_model_runs_on_trino() {
+    let Some(_env) = trino_env() else {
+        eprintln!("SMELT_TRINO_URL unset — skipping snapshot_reconcile_keyed_model_runs_on_trino");
+        return;
+    };
+    let schema = trino_schema("snapshot_reconcile");
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path().join("snapshot_reconcile_trino");
+    fs::create_dir_all(root.join("models/sources")).unwrap();
+
+    let yml = format!(
+        "name: snapshot_reconcile_trino\nversion: 1\npaths:\n  - models\ntargets:\n{}\
+         default_materialization: table\nstate:\n  warehouse_tables: none\n",
+        trino_target_block(&schema)
+    );
+    fs::write(root.join("smelt.yml"), yml).unwrap();
+
+    fs::write(
+        root.join("models/sources/customer_snapshot.yml"),
+        "description: unclocked mutable customer snapshot.\n\
+         mutation_profile: mutable_snapshot\n\
+         unique_key: [order_id]\n\
+         columns:\n\
+         - name: order_id\n  type: INTEGER\n\
+         - name: customer_id\n  type: INTEGER\n\
+         - name: amount\n  type: DECIMAL(10,2)\n\
+         - name: tier_rank\n  type: INTEGER\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("models/customer_totals.sql"),
+        "---\n\
+         refresh: incremental\n\
+         grain: key\n\
+         unique_key: customer_id\n\
+         maintenance:\n\
+         \x20\x20scan_bounds:\n\
+         \x20\x20\x20\x20per_source:\n\
+         \x20\x20\x20\x20\x20\x20customer_snapshot:\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20allow_full_scan: true\n\
+         ---\n\
+         SELECT customer_id, ANY_VALUE(amount) AS total_amount, \
+         ANY_VALUE(tier_rank) AS max_tier\n\
+         FROM smelt.sources.customer_snapshot\n\
+         GROUP BY customer_id\n",
+    )
+    .unwrap();
+
+    let backend = trino_backend(&schema);
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    {
+        use smelt_backend::Backend;
+        rt.block_on(async {
+            backend
+                .execute_sql(&format!("CREATE SCHEMA IF NOT EXISTS {schema}"))
+                .await
+                .expect("create schema");
+            backend
+                .execute_sql(&format!(
+                    "CREATE TABLE {schema}.sources_customer_snapshot (order_id INTEGER, \
+                     customer_id INTEGER, amount DECIMAL(10,2), tier_rank INTEGER)"
+                ))
+                .await
+                .expect("create source table");
+            backend
+                .execute_sql(&format!(
+                    "INSERT INTO {schema}.sources_customer_snapshot VALUES \
+                     (1, 1, 100.00, 1), (2, 2, 70.00, 1)"
+                ))
+                .await
+                .expect("seed source table");
+        });
+    }
+
+    let first = run_smelt(&root, &["--target", "trino"]);
+    assert!(
+        first.status.success(),
+        "first run (create) failed.\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr),
+    );
+
+    // Mutate customer 1's row in place. Before the fix, this exact shape
+    // (a downgraded, clamp-less `PerGroupRecompute` cell on
+    // `Trigger::UpstreamMutation`) refused the run with
+    // `MaintenanceRepairSliceMissing`.
+    {
+        use smelt_backend::Backend;
+        rt.block_on(async {
+            backend
+                .execute_sql(&format!(
+                    "UPDATE {schema}.sources_customer_snapshot SET amount = 999.00, \
+                     tier_rank = 5 WHERE order_id = 1"
+                ))
+                .await
+                .expect("mutate source row");
+        });
+    }
+
+    let second = run_smelt(&root, &["--target", "trino"]);
+    assert!(
+        second.status.success(),
+        "second run (downgraded PerGroupRecompute cell, no ScanClamp) must succeed via the \
+         whole-target route rather than refusing MaintenanceRepairSliceMissing.\nstdout: {}\n\
+         stderr: {}",
+        String::from_utf8_lossy(&second.stdout),
+        String::from_utf8_lossy(&second.stderr),
+    );
+
+    let mut rows = fetch_trino_rows(&schema, "customer_totals");
+    rows.sort();
+    let expected = vec![
+        vec!["1".to_string(), "999.00".to_string(), "5".to_string()],
+        vec!["2".to_string(), "70.00".to_string(), "1".to_string()],
+    ];
+    assert_eq!(
+        rows, expected,
+        "customer 1's mutated row must be reflected after the repair"
+    );
+
+    drop_trino_schema(&schema);
+}

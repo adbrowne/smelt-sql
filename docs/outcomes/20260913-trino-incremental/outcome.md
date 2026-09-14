@@ -150,7 +150,7 @@ approximated.
 | 3 | The append and whole-row-`MERGE` upsert families executing end-to-end through `execute_project` — including landing `maintenance_dialect` for `SqlDialect::Trino`, which returns `Err` today and blocks every family — with their `statement_parity` executed-vs-emitted legs | blocked |
 | 3a | Real (non-dry-run) execution resolves each model's run window and every batch `TimeRange` in that model's OWN partition axis (gap 2), so an integer-axis model's injected predicates render bare rather than quoted | done |
 | 3b | Typed ANSI partition literals (`DATE '…'` / `TIMESTAMP '…'`) from the single `partition_literal` owner, so a calendar-axis predicate type-checks on a strict engine (gap 1) | blocked |
-| 3c | A `ColumnScopedMerge` cell downgraded to `PerGroupRecompute` for an `UpstreamMutation`-triggered (unclocked) cell resolves `key_scope: None` — the full-scan recompute the reachable row already promises — instead of demanding a `ScanClamp` that cannot exist (gap 3) | planned |
+| 3c | A `ColumnScopedMerge` cell downgraded to `PerGroupRecompute` for an `UpstreamMutation`-triggered (unclocked) cell resolves `key_scope: None` — the full-scan recompute the reachable row already promises — instead of demanding a `ScanClamp` that cannot exist (gap 3) | done |
 | 3b2 | Gap 1, re-attempted under the 2026-09-15 column-type ruling: the referenced partition column's declared SQL type reaches the single literal renderer, so a calendar predicate renders typed against a DATE/TIMESTAMP column and bare-quoted against a declared-VARCHAR one; plus the `render_time_literal` symbolic-placeholder fix 3b found | pending |
 | 3d | Phase 3's deferred live legs, now unblocked: the append and whole-row-`MERGE` upsert families end-to-end through `execute_project` on Trino, plus `statement_parity`'s Trino executed-vs-emitted leg | pending |
 | 4 | The emulated delete-and-insert window: `DELETE` range exactly covering the insert's write window, asserted directly and under out-of-order and repeated application | pending |
@@ -163,6 +163,16 @@ approximated.
 
 ## Decision log
 
+- **2026-09-15 — phase 3c landed: `has_repair_family_lowering` declines a downgrade-derived
+  clamp-less `PerGroupRecompute` cell instead of refusing `MaintenanceRepairSliceMissing`.**
+  Reachable only via a single unclocked `mutable_snapshot` source with `ANY_VALUE(...)` columns
+  (no JOIN, no aggregate fold/repair-eligible combiner) — `SUM`/`MAX` trip a pre-execution
+  diagnostic gate under snapshot-reconcile, and any JOIN-based enrichment's `GROUP BY` defeats
+  skeleton-source-closure pruning. Full-workspace `cargo test` against the live Trino tier proved
+  flaky under default parallelism on THREE unrelated live-Trino test files across two separate
+  runs (schema-creation races) — none touched by this phase's diff, each passing cleanly in
+  isolation; see `phases/03c-summary.md` "For the next planner" for the root cause and a
+  candidate fix.
 - **2026-09-15 — reshape at phase 3c planning: gap 1 gets a successor row (`3b2`) and a ruling —
   option (a), thread the referenced column's declared type to the literal renderer.** Phase 3b's
   block entry escalates three options and recommends a human ruling; this loop has no human gate,

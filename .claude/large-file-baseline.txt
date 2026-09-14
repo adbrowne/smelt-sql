@@ -8,6 +8,14 @@
 # smaller files are left unconstrained (see BASELINE_MIN_LINES in the script).
 # Regenerate with: .claude/scripts/large-file-check.sh --update
 #
+# 2026-09-15 (docs/outcomes/20260913-trino-incremental phase 03c, sign-off:
+# Andrew Browne): repair_lowering.rs 1572 -> 1884, adding the gap-3 unit legs
+# (`downgraded_clampless_cell_has_no_repair_family_lowering`'s runtime-level
+# sibling tests, the `repair_cell_slice` fence test) and the DuckDB-backed
+# `downgraded_keyed_model_recomputes_full_scan_and_matches_a_full_refresh`
+# conformance leg, in the same shape as the file's existing per-scenario test
+# fixtures — not a new abstraction, so grown in place rather than split.
+#
 # 2026-09-15 (docs/outcomes/20260913-trino-incremental phase 03a, sign-off:
 # Andrew Browne): execute/project/mod.rs 5098 -> 5115, documenting (one-line
 # comments) which of the hardcoded-`PartitionAxis::Calendar` sites the phase's
@@ -170,7 +178,7 @@ crates/smelt-runtime/tests/contract_deferral_skip_e2e.rs 1061
 crates/smelt-runtime/tests/fingerprint_sidecar.rs 1717
 crates/smelt-runtime/tests/key_addressed_model_edge_lowering.rs 1201
 crates/smelt-runtime/tests/observed_delta/main.rs 1066
-crates/smelt-runtime/tests/repair_lowering.rs 1572
+crates/smelt-runtime/tests/repair_lowering.rs 1884
 crates/smelt-runtime/tests/since_upstream_propagation.rs 2326
 crates/smelt-runtime/tests/technique_lowering/basic.rs 1122
 crates/smelt-runtime/tests/windowing_parity.rs 1150
