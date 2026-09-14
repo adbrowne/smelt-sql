@@ -23,6 +23,7 @@ fn synthetic_cell(technique: Technique, row_identity: RowIdentity) -> PlanCell {
         fingerprint_projections: Default::default(),
         key_scope: None,
         state_downgrade: None,
+        fold_grade: None,
     }
 }
 
@@ -358,6 +359,7 @@ fn choice_rs_execution_semantics_unchanged() {
             fingerprint_projections: Default::default(),
             key_scope: None,
             state_downgrade: None,
+            fold_grade: None,
         }],
         refusals: vec![],
         key_locality: None,

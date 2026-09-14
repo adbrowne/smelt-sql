@@ -71,6 +71,7 @@ fn explain_prints_observed_delta_recording_status_for_a_conditional_cell() {
         fingerprint_projections: Default::default(),
         key_scope: None,
         state_downgrade: None,
+        fold_grade: None,
     };
     let result = MaintenancePlanResult {
         plan: MaintenancePlan {
@@ -179,6 +180,7 @@ fn explain_prints_no_recording_for_a_whole_row_identity_conditional_cell() {
         fingerprint_projections: Default::default(),
         key_scope: None,
         state_downgrade: None,
+        fold_grade: None,
     };
     let sibling_cell = PlanCell {
         group: "{event_type, user_id}".to_string(),
@@ -201,6 +203,7 @@ fn explain_prints_no_recording_for_a_whole_row_identity_conditional_cell() {
         fingerprint_projections: Default::default(),
         key_scope: None,
         state_downgrade: None,
+        fold_grade: None,
     };
     let result = MaintenancePlanResult {
         plan: MaintenancePlan {

@@ -439,6 +439,7 @@ async fn yes_corner_clamps_the_merge_to_the_horizon_and_leaves_the_rest_untouche
         fingerprint_projections: std::collections::BTreeMap::new(),
         key_scope: None,
         state_downgrade: None,
+        fold_grade: None,
     };
 
     let dispatch = decide_column_merge_dispatch(

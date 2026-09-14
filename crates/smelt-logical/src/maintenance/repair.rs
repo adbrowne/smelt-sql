@@ -271,6 +271,7 @@ pub fn derive_repair_cell(admitted: &AdmittedRepair, trigger: Trigger, group: St
         fingerprint_projections: std::collections::BTreeMap::new(),
         key_scope: None,
         state_downgrade: None,
+        fold_grade: None,
     }
 }
 
@@ -393,6 +394,7 @@ mod tests {
             fingerprint_projections: std::collections::BTreeMap::new(),
             key_scope: None,
             state_downgrade: None,
+            fold_grade: None,
         }
     }
 

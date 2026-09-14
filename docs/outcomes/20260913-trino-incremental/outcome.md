@@ -155,7 +155,7 @@ approximated.
 | 3d | Phase 3's deferred live legs, now unblocked: the append and whole-row-`MERGE` upsert families end-to-end through `execute_project` on Trino, plus `statement_parity`'s Trino executed-vs-emitted leg | blocked |
 | 3e | Live-Trino test isolation: every live-tier test gets a guaranteed-unique schema/namespace (or one process-wide guard), and `trino_state_residency.rs`'s `TRINO_ENV_GUARD` lock scope is widened to cover `stage_residency_project`'s own `SMELT_TRINO_URL` read — so the conformance and family gates fail for real reasons only | done |
 | 3f | Gap 4: every partition literal the windowed-keyed maintenance driver emits goes through 3b2's single literal-renderer owner, typed against the referenced column — the driving-source pushdown filter (`smelt-runtime/src/maintenance_driver/{driver.rs,cumulative.rs}`) and the target-scan slice bound (`TargetSlicePredicate::Range` in both keyed-fold emitters, plus `emit_recurrence_bound_probe`'s reuse of it) — the third and fourth emission sites of the class 3a/3b2 fixed | done |
-| 3g | Gap 5: `Technique::KeyedFold` gets a **plan-time** availability resolution mirroring the repair family's `resolve_availability` — the idempotent grade downgrades to a reachable technique on a structure-less backend, the additive grade takes a named, explain-visible downgrade or refuses with a diagnostic naming the backend and the missing structure (criterion 3's never-fold-twice route). An execution-time `BackendError::unsupported` is not sufficient: criterion 3 requires the verdict on the cell and explain-visible | planned |
+| 3g | Gap 5: `Technique::KeyedFold` gets a **plan-time** availability resolution mirroring the repair family's `resolve_availability` — the idempotent grade downgrades to a reachable technique on a structure-less backend, the additive grade takes a named, explain-visible downgrade or refuses with a diagnostic naming the backend and the missing structure (criterion 3's never-fold-twice route). An execution-time `BackendError::unsupported` is not sufficient: criterion 3 requires the verdict on the cell and explain-visible | done |
 | 3h | Phase 3d's deferred legs, re-attempted on 3f+3g: the whole-row `MERGE` upsert (keyed-fold) family end-to-end through `execute_project` on Trino, plus `statement_parity`'s Trino executed-vs-emitted leg (3d's reverted `RecordingBackend`/`emit_keyed_fold` byte-identity design redone) | pending |
 | 4 | The emulated delete-and-insert window: `DELETE` range exactly covering the insert's write window, asserted directly and under out-of-order and repeated application | pending |
 | 5 | The merge-less conditional write over T3's staged relation (the departed-row delete as a separate scoped `DELETE`, since `WHEN NOT MATCHED BY SOURCE` is absent), and the column-scoped merge — executing where its cell needs no merge ledger, taking T3's `MaintenanceStateDowngraded` route where it does, per Spark's precedent | pending |
@@ -191,6 +191,17 @@ approximated.
   it serves criteria 3 and 8 and is not deferred out. Folded into row 6 rather than given its
   own row, because whether that route emits a partition literal at all is unverified; row 6
   runs it live and will settle it. No row added, split or reordered.
+- **2026-09-15 — 3g implementation: `AVG`/`STDDEV_*`/`VAR_*` graded `Additive`, not
+  `Idempotent`.** The planned predicate (fold combiner → `is_additive_combiner`, `Sum`/`BitXor`
+  only) graded a decomposed `AVG` fold idempotent, since `combiner_for_function(Avg)` returns
+  `None` (it is not a direct monoid). That is wrong: `AVG`'s decomposed state is a
+  Welford-style `(sum, count)` pair, which double-counts on re-merge exactly like a bare `SUM`
+  (`analysis::discriminants::combiner_discriminants`'s `decomposable` flag names this family).
+  Caught by two pre-existing `smelt-db` diagnostic fixtures (`device_avg`, an `AVG` model)
+  failing after the naive predicate landed — added `is_additive_fold_function` (additive
+  directly, or via `decomposable`) and re-graded. `examples/github_activity`'s `events_deduped`
+  (`MIN`-only) legitimately lost its downgrade under the correct grading — updated that
+  fixture's expected-diagnostics list rather than treating it as a regression.
 
 - **2026-09-15 — phase 3f done.** All five identified sites of the class now render through
   `partition_literal`: the two `TargetSlicePredicate::Range` emitters, `emit_recurrence_bound_probe`,

@@ -359,6 +359,50 @@ pub fn resolve_live_in_place_update_cell(
     Some((cell, assignments))
 }
 
+/// Whether this model's own `Trigger::NewData` fold cell — the `keyed`
+/// classifier's `Technique::KeyedFold` cell — was downgraded by availability
+/// resolution (`docs/specs/state.md` §"The degradation contract" step 2): an
+/// additive-graded fold whose reconciliation ledger has no realisation on
+/// this target. `None` when the model carries no maintenance plan or its
+/// fold cell carries no such downgrade (an idempotent grade, or a fully
+/// available ledger) — the caller's default is the ordinary window-forward
+/// fold loop, unchanged. `Some` names the missing structure and the
+/// downgraded technique the plan layer chose (`PerGroupRecompute`, with no
+/// `key_scope`/`ScanClamp` — `recompute_equivalent`'s corner fallback for a
+/// `Corner::FoldDelta` cell), which the caller does not itself dispatch:
+/// there is no repair-family lowering for a keyless, clamp-less
+/// `PerGroupRecompute` cell (`has_repair_family_lowering`), so a downgrade
+/// reported here instead routes to the run shape's own whole-target rebuild
+/// (`docs/outcomes/20260913-trino-incremental/phases/03g-plan.md`).
+pub fn resolve_keyed_fold_state_downgrade(
+    sql: &str,
+    table: &str,
+    metadata: &smelt_core::ModelMetadata,
+    sources: &[SourceFacts],
+    explicitly_mutable: &HashSet<String>,
+    availability: &StateAvailability,
+) -> Option<smelt_logical::maintenance::availability::StateDowngrade> {
+    let result = crate::maintenance_availability::derive_resolved(
+        sql,
+        table,
+        metadata,
+        sources,
+        explicitly_mutable,
+        None,
+        &[],
+        &[],
+        &SourceReferentialIntegrity::new(),
+        None,
+        None,
+        availability,
+        &[],
+    )?;
+    result.plan.cells.into_iter().find_map(|cell| {
+        let downgrade = cell.state_downgrade?;
+        (downgrade.original == Technique::KeyedFold).then_some(downgrade)
+    })
+}
+
 /// Widen a derived [`ScanClamp`]'s forward reach to at least `batch_width`
 /// before handing it to [`execute_column_scoped_merge`] as the horizon `H`.
 ///

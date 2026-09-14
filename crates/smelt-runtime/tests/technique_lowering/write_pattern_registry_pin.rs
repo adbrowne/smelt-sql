@@ -55,6 +55,7 @@ fn composed_keyed_fold_plan(source: &str) -> MaintenancePlan {
             fingerprint_projections: std::collections::BTreeMap::new(),
             key_scope: None,
             state_downgrade: None,
+            fold_grade: None,
         }],
         refusals: vec![],
         key_locality: None,

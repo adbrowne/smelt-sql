@@ -67,6 +67,7 @@ fn text_report_technique_matches_the_profile_technique() {
         fingerprint_projections: Default::default(),
         key_scope: None,
         state_downgrade: None,
+        fold_grade: None,
     };
     let result = MaintenancePlanResult {
         plan: MaintenancePlan {

@@ -1624,6 +1624,27 @@ pub async fn execute_project(
                 }
                 None => None,
             };
+            // A `Technique::KeyedFold` cell downgraded by availability
+            // resolution (`docs/specs/state.md` §"The degradation contract"
+            // step 2, phase 3g `docs/outcomes/20260913-trino-incremental/
+            // phases/03g-plan.md`): an additive-graded fold whose
+            // reconciliation ledger has no realisation here. Unlike
+            // `per_group_recompute_cell` above, the resulting cell has no
+            // repair-family lowering at all (no `key_scope`, no
+            // `ScanClamp`) — it is dispatched below by forcing the run
+            // shape's own whole-target rebuild every run, never the
+            // window-forward fold loop.
+            let keyed_fold_state_downgrade = match plan.model_file.metadata.as_deref() {
+                Some(metadata) => crate::maintenance_driver::resolve_keyed_fold_state_downgrade(
+                    &clean_sql_for_merge,
+                    &db_table_name,
+                    metadata,
+                    &maint_source_facts,
+                    &explicitly_mutable,
+                    &availability,
+                ),
+                None => None,
+            };
             // A key-addressed model-edge cell (`docs/specs/incremental_models.md`
             // §"Upstream model edges"): an upstream maintained model whose own
             // derived output-delta shape is `KeyedUpsert` folds via the repair
@@ -1704,7 +1725,50 @@ pub async fn execute_project(
             // own create path is what materializes the table
             // (`table_exists_before_run` was captured before any of this
             // model's writes).
-            let exec_result = match key_edge_dispatch {
+            let exec_result = if let Some(downgrade) = &keyed_fold_state_downgrade {
+                // The additive fold's own downgrade (`state.md` §"The
+                // degradation contract" step 2): no repair-family lowering
+                // exists for the keyless, clamp-less `PerGroupRecompute` cell
+                // `resolve_keyed_fold_state_downgrade` reported, so the run
+                // shape's own whole-target route runs unconditionally —
+                // ignoring any requested run window, the same drop+recreate
+                // shape the `--full-refresh`-without-a-window arm below
+                // takes for an ordinary window-forward keyed model.
+                tracing::debug!(
+                    model = %plan.name,
+                    missing = downgrade.missing.as_str(),
+                    "additive keyed fold downgraded to a whole-target rebuild: {}",
+                    downgrade.reason
+                );
+                let clean_sql = smelt_parser::strip_frontmatter(&plan.sql);
+                let compiled = compiler.compile_with_sql_and_ephemerals(
+                    &plan.model_file,
+                    schema,
+                    &clean_sql,
+                    resolver,
+                )?;
+                backend
+                    .drop_table_if_exists(schema, &db_table_name)
+                    .await
+                    .map_err(|err| anyhow::anyhow!("Failed to drop {}: {}", db_table_name, err))?;
+                backend
+                    .create_table_as(schema, &db_table_name, &compiled.sql)
+                    .await
+                    .map_err(|err| {
+                        anyhow::anyhow!("Failed to create keyed model {}: {}", plan.name, err)
+                    })?;
+                let row_count = backend
+                    .get_row_count(schema, &db_table_name)
+                    .await
+                    .unwrap_or(0);
+                Ok(smelt_backend::ExecutionResult {
+                    model_name: plan.name.clone(),
+                    duration: StdDuration::from_millis(0),
+                    row_count,
+                    preview: None,
+                })
+            } else {
+                match key_edge_dispatch {
                 Some(dispatch) => {
                     used_per_group_recompute = dispatch.used_per_group_recompute;
                     used_diff_patch = dispatch.used_diff_patch;
@@ -2048,7 +2112,7 @@ pub async fn execute_project(
                 }
                 }
                 }
-            ;
+            };
 
             let exec_result = match exec_result {
                 Ok(r) => r,

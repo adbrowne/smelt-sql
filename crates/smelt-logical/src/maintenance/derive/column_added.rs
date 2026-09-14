@@ -264,6 +264,7 @@ pub(super) fn derive_column_added(
                         fingerprint_projections: BTreeMap::new(),
                         key_scope: None,
                         state_downgrade: None,
+                        fold_grade: None,
                     });
                 }
                 (Some(DefinitionChangeClass::UpstreamRederive), None) => {
@@ -365,6 +366,7 @@ pub(super) fn derive_column_added(
             fingerprint_projections: BTreeMap::new(),
             key_scope: None,
             state_downgrade: None,
+            fold_grade: None,
         });
     }
 }

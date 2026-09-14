@@ -824,6 +824,7 @@ mod tests {
             fingerprint_projections: Default::default(),
             key_scope: None,
             state_downgrade: None,
+            fold_grade: None,
         }
     }
 

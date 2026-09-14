@@ -81,6 +81,7 @@ fn merge_probe_cell(trigger: Trigger, ledger_catch_up: bool) -> PlanCell {
         fingerprint_projections: Default::default(),
         key_scope: None,
         state_downgrade: None,
+        fold_grade: None,
     }
 }
 

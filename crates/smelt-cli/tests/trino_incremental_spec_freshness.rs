@@ -149,8 +149,11 @@ fn spec_downgrade_table_matches_the_pure_availability_functions() {
     let mapping = &source[mapping_start..];
 
     assert!(
-        mapping.contains("Technique::KeyedFold => Some("),
-        "required_state_structure no longer maps KeyedFold to a required structure"
+        mapping.contains("Technique::KeyedFold => match cell.fold_grade")
+            && mapping.contains("Some(StateStructure::ReconciliationLedger)"),
+        "required_state_structure no longer maps an additive-graded (or undetermined-grade) \
+         KeyedFold cell to the reconciliation ledger (`docs/specs/state.md` §\"The degradation \
+         contract\" step 2 — the requirement is grade-dependent since phase 3g)"
     );
     assert!(
         mapping.contains("Technique::ColumnScopedMerge | Technique::InPlaceUpdate => {")

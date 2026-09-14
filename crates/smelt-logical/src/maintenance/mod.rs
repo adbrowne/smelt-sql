@@ -58,9 +58,9 @@ pub use retention::{
     RetainedSource, RetentionDowngrade, RetentionReach, SourceRetentions,
 };
 pub use types::{
-    cell_trigger_address, ColumnGroup, Corner, Grain, KeyDiscovery, KeyScope, MutationProfile,
-    OutputSpec, PartitionLocal, PlanCell, RowIdentity, RowIdentityVerdict, ScanClamp, SourceFacts,
-    Technique, Trigger,
+    cell_trigger_address, ColumnGroup, Corner, FoldGrade, Grain, KeyDiscovery, KeyScope,
+    MutationProfile, OutputSpec, PartitionLocal, PlanCell, RowIdentity, RowIdentityVerdict,
+    ScanClamp, SourceFacts, Technique, Trigger,
 };
 pub use write_pattern::{
     admissible_write_patterns, cell_equivalence_proof, lookup_write_pattern, pattern_admissible,

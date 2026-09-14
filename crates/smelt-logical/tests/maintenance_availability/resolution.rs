@@ -5,7 +5,7 @@ use smelt_logical::maintenance::availability::{
     realisable_state_structures, recompute_equivalent, required_state_structure,
     resolve_availability, StateAvailability, StateStructure,
 };
-use smelt_logical::maintenance::{Corner, KeyDiscovery, KeyScope, Technique};
+use smelt_logical::maintenance::{Corner, FoldGrade, KeyDiscovery, KeyScope, Technique};
 
 use super::{base_cell, keyed_fold_plan, strings};
 
@@ -283,6 +283,58 @@ fn trino_downgrades_every_dependent_cell_to_its_recompute_equivalent() {
             .expect("cell must carry a StateDowngrade recording the ideal technique");
         assert_eq!(downgrade.original, ideal);
     }
+}
+
+/// Gap 5 test 1 (`docs/outcomes/20260913-trino-incremental/phases/
+/// 03g-plan.md`): an idempotent-graded `KeyedFold` cell (every combiner
+/// outside the additive family) requires no correctness structure and is not
+/// downgraded on a structure-less backend — the key-addressed `MERGE` stays
+/// its correct maintenance there.
+#[test]
+fn idempotent_keyed_fold_is_not_downgraded_without_a_ledger() {
+    let mut cell = base_cell(Corner::FoldDelta, Technique::KeyedFold);
+    cell.fold_grade = Some(FoldGrade::Idempotent);
+    assert_eq!(required_state_structure(&cell), None);
+
+    let mut cells = vec![cell];
+    resolve_availability(&mut cells, &StateAvailability::none());
+    assert_eq!(cells[0].technique, Technique::KeyedFold);
+    assert!(cells[0].state_downgrade.is_none());
+}
+
+/// Gap 5 test 2: an additive-graded `KeyedFold` cell (`Sum`/`BitXor` among
+/// its combiners) requires the reconciliation ledger, and downgrades to the
+/// recompute family — carrying neither `key_scope` nor a `ScanClamp` — when
+/// the ledger has no realisation.
+#[test]
+fn additive_keyed_fold_downgrades_to_per_group_recompute_without_a_ledger() {
+    let mut cell = base_cell(Corner::FoldDelta, Technique::KeyedFold);
+    cell.fold_grade = Some(FoldGrade::Additive);
+    assert_eq!(
+        required_state_structure(&cell),
+        Some(StateStructure::ReconciliationLedger)
+    );
+
+    let mut cells = vec![cell];
+    resolve_availability(&mut cells, &StateAvailability::none());
+    assert_eq!(cells[0].technique, Technique::PerGroupRecompute);
+    assert!(cells[0].key_scope.is_none());
+    let downgrade = cells[0].state_downgrade.as_ref().unwrap();
+    assert_eq!(downgrade.original, Technique::KeyedFold);
+    assert_eq!(downgrade.missing, StateStructure::ReconciliationLedger);
+}
+
+/// Gap 5 test 3: a `KeyedFold` cell whose grade could not be determined
+/// fails closed — treated exactly like `Additive`, requiring the ledger and
+/// downgrading when it is unavailable.
+#[test]
+fn keyed_fold_of_unknown_grade_still_requires_the_ledger() {
+    let cell = base_cell(Corner::FoldDelta, Technique::KeyedFold);
+    assert!(cell.fold_grade.is_none());
+    assert_eq!(
+        required_state_structure(&cell),
+        Some(StateStructure::ReconciliationLedger)
+    );
 }
 
 #[test]

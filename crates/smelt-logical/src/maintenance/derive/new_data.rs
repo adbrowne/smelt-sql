@@ -1,4 +1,5 @@
 use super::*;
+use crate::rules::cumulative::is_additive_fold_function;
 
 /// Creation: new rows in the driving source. Partition grain recomputes the
 /// new region (today's mechanism — for a pure append the RMW corner
@@ -32,6 +33,7 @@ pub(super) fn derive_new_data(
                 fingerprint_projections: BTreeMap::new(),
                 key_scope: None,
                 state_downgrade: None,
+                fold_grade: None,
             });
         }
         Grain::Key { unique_key } => {
@@ -413,6 +415,27 @@ pub(super) fn derive_new_data(
                 return;
             }
 
+            // Grade-dependent state requirement (`state.md` §"The
+            // degradation contract" step 2): additive iff any combiner
+            // folds through the additive family, directly (`SUM`/`BIT_XOR`)
+            // or via a sum-based decomposed state (`AVG`/`STDDEV_*`/`VAR_*`)
+            // — a re-merged window through either double-counts. Every
+            // other admitted combiner (extremal/lattice, order-monotone,
+            // once-write) is idempotent under re-merge, so the fold is
+            // graded additive on any single additive column, never
+            // partially.
+            let fold_grade = Some(
+                if fold
+                    .add_columns
+                    .iter()
+                    .any(|(_, combiner)| is_additive_fold_function(*combiner))
+                {
+                    FoldGrade::Additive
+                } else {
+                    FoldGrade::Idempotent
+                },
+            );
+
             plan.cells.push(PlanCell {
                 group: format!(
                     "{{{}}}",
@@ -435,6 +458,7 @@ pub(super) fn derive_new_data(
                 fingerprint_projections: BTreeMap::new(),
                 key_scope: None,
                 state_downgrade: None,
+                fold_grade,
             });
         }
         Grain::Succession { .. } => {

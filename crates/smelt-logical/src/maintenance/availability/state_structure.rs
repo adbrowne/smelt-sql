@@ -2,7 +2,7 @@ use serde::Serialize;
 
 use smelt_dialect::SqlDialect;
 
-use crate::maintenance::{KeyDiscovery, PlanCell, Technique};
+use crate::maintenance::{FoldGrade, KeyDiscovery, PlanCell, Technique};
 
 /// The [`StateStructure`]s `dialect` has a builder for, independent of
 /// `state.warehouse_tables`. Exhaustive over [`SqlDialect`]: a new dialect
@@ -121,14 +121,19 @@ impl StateStructure {
 /// The state structure `cell` needs to be correct, or `None` for a cell
 /// needing no bookkeeping. The requirement is a function of the **cell**, not
 /// of its technique alone (`docs/specs/state.md` §"The degradation
-/// contract" step 2): every technique other than the recompute family
-/// (`DeleteInsert`/`PerGroupRecompute`) requires its own structure
-/// unconditionally, but a `PerGroupRecompute` cell requires the
-/// **fingerprint sidecar** exactly when it is addressed by a key-addressed
-/// model edge — its affected-key discovery is a group-grain sidecar diff
+/// contract" step 2): `ColumnScopedMerge`/`InPlaceUpdate`/`SuccessionPatch`
+/// require their own structure unconditionally, `DeleteInsert` requires
+/// nothing, and two techniques are cell-dependent rather than blanket. A
+/// `PerGroupRecompute` cell requires the **fingerprint sidecar** exactly when
+/// it is addressed by a key-addressed model edge — its affected-key
+/// discovery is a group-grain sidecar diff
 /// (`crate::maintenance::repair::admit_key_addressed_recompute`,
-/// `incremental_models.md` §"Upstream model edges"). A `PerGroupRecompute`
-/// cell with no `key_scope` (a plain clamp-bounded repair) needs nothing.
+/// `incremental_models.md` §"Upstream model edges"); a `PerGroupRecompute`
+/// cell with no `key_scope` (a plain clamp-bounded repair) needs nothing. A
+/// `KeyedFold` cell requires the reconciliation ledger exactly when its
+/// [`FoldGrade`] is `Additive` or undetermined; an `Idempotent` grade needs
+/// nothing, since its ledger record is skippable re-run-tolerance
+/// bookkeeping rather than a correctness dependency.
 ///
 /// The two `KeyDiscovery` routes that admit a `PerGroupRecompute` cell
 /// (`UpstreamKeyed`, `DownstreamGrainOverUpstream`) both need the sidecar;
@@ -147,7 +152,16 @@ impl StateStructure {
 /// inconsistent inputs, never a second source of truth.
 pub fn required_state_structure(cell: &PlanCell) -> Option<StateStructure> {
     match cell.technique {
-        Technique::KeyedFold => Some(StateStructure::ReconciliationLedger),
+        // Grade-dependent (`state.md` §"The degradation contract" step 2):
+        // an idempotent fold's ledger record is skippable re-run-tolerance
+        // bookkeeping, so it requires nothing; an additive fold's ledger is
+        // the only source of exact delta identities, so it requires the
+        // ledger unconditionally; an undetermined grade fails closed and
+        // requires the ledger too.
+        Technique::KeyedFold => match cell.fold_grade {
+            Some(FoldGrade::Idempotent) => None,
+            Some(FoldGrade::Additive) | None => Some(StateStructure::ReconciliationLedger),
+        },
         Technique::ColumnScopedMerge | Technique::InPlaceUpdate => {
             Some(StateStructure::MergeLedger)
         }

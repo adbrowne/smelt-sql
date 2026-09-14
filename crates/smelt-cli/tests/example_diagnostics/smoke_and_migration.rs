@@ -78,7 +78,6 @@ fn github_activity_no_diagnostics() {
         "examples/github_activity",
         &[
             "MaintenanceStateDowngraded: cell NewData { source: \"raw.github_events\" } downgraded from SuccessionPatch to its recompute-family equivalent — SuccessionPatch requires the tombstone ledger, which is unavailable for this project; downgraded to DeleteInsert, the cheapest recompute-family technique that preserves the equivalence invariant",
-            "MaintenanceStateDowngraded: cell NewData { source: \"raw.github_events\" } downgraded from KeyedFold to its recompute-family equivalent — KeyedFold requires the reconciliation ledger (frontier record), which is unavailable for this project; downgraded to PerGroupRecompute, the cheapest recompute-family technique that preserves the equivalence invariant",
             "MaintenanceStateDowngraded: cell UpstreamMutation { source: \"raw.github_events\" } downgraded from ColumnScopedMerge to its recompute-family equivalent — ColumnScopedMerge requires the transactional merge ledger, which is unavailable for this project; downgraded to PerGroupRecompute, the cheapest recompute-family technique that preserves the equivalence invariant",
             "MaintenanceStateDowngraded: cell NewData { source: \"raw.github_events_arrival\" } downgraded from SuccessionPatch to its recompute-family equivalent — SuccessionPatch requires the tombstone ledger, which is unavailable for this project; downgraded to DeleteInsert, the cheapest recompute-family technique that preserves the equivalence invariant",
         ],

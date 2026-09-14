@@ -80,6 +80,7 @@ fn admitted_in_place_update_plan() -> PlanCell {
         fingerprint_projections: Default::default(),
         key_scope: None,
         state_downgrade: None,
+        fold_grade: None,
     }
 }
 

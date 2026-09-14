@@ -420,6 +420,22 @@ Statefulness is an **admission input resolved late**. Plan derivation proceeds i
    caught ahead of time by the probe — the second cost the contract trades for correctness on
    such a backend.
 
+   A `Technique::KeyedFold` cell's required structure is likewise **grade-dependent**, not a
+   blanket property of the technique: an **idempotent** keyed fold — every cross-partition
+   combiner outside the additive family — requires no correctness structure at all. Its
+   reconciliation-ledger record is re-run-tolerance bookkeeping only, skipped where
+   unrealisable, because re-merging the same window converges to the same result; such a cell
+   is **not** downgraded on a structure-less backend — the key-addressed `MERGE` remains its
+   correct, undowngraded maintenance there. An **additive** keyed fold (`Sum`/`BitXor` among its
+   combiners anywhere in the cell) requires the `ReconciliationLedger`, because without exact
+   delta identities a re-merged window double-counts or cancels; on a backend with no
+   realisable ledger it downgrades to the recompute family exactly as above, carrying neither a
+   `key_scope` nor a `ScanClamp`, and is executed by the run shape's own whole-target route
+   every run — the same shape a downgrade-reached `PerGroupRecompute` cell above already takes,
+   and the same shape the succession grain's ledger-less full rebuild takes. A cell whose grade
+   cannot be determined requires the ledger, fail-closed, like any other cell whose technique is
+   unresolvable.
+
    A `PerGroupRecompute` cell reached **by this downgrade** never passed the repair family's own
    admission obligations (`incremental_models.md` §"The repair family"): it carries neither a
    derived bounded slice nor a `key_scope`, because its trigger is `UpstreamMutation`, not a

@@ -178,6 +178,7 @@ pub fn append_model_edge_cells(
                     fingerprint_projections: BTreeMap::new(),
                     key_scope: Some(key_scope),
                     state_downgrade: None,
+                    fold_grade: None,
                 });
             }
             Err(refusal) => {
@@ -329,6 +330,7 @@ pub fn append_model_edge_cells(
             fingerprint_projections: BTreeMap::new(),
             key_scope: None,
             state_downgrade: None,
+            fold_grade: None,
         });
     }
 }
@@ -445,6 +447,7 @@ fn admit_enrichment_keyed_merge(
                 fingerprint_projections: BTreeMap::new(),
                 key_scope: Some(key_scope.clone()),
                 state_downgrade: None,
+                fold_grade: None,
             })
             .collect(),
     ))

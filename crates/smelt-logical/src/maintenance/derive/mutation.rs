@@ -161,6 +161,7 @@ pub(super) fn derive_mutation(
             fingerprint_projections: BTreeMap::new(),
             key_scope: None,
             state_downgrade: None,
+            fold_grade: None,
         });
     }
 }

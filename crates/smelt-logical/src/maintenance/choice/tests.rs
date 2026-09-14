@@ -22,6 +22,7 @@ fn admitted_plan(source: &str, technique: Technique, corner: Corner) -> Maintena
             fingerprint_projections: std::collections::BTreeMap::new(),
             key_scope: None,
             state_downgrade: None,
+            fold_grade: None,
         }],
         refusals: vec![],
         key_locality: None,
@@ -348,6 +349,7 @@ fn pin_scoped_to_a_sibling_cell_is_consulted_not_only_the_first() {
             fingerprint_projections: std::collections::BTreeMap::new(),
             key_scope: None,
             state_downgrade: None,
+            fold_grade: None,
         }
     }
     let plan = MaintenancePlan {

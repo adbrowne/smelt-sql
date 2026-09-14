@@ -471,6 +471,7 @@ fn resolve_live_per_group_recompute_cell_fails_loud_on_whole_row_identity() {
         fingerprint_projections: std::collections::BTreeMap::new(),
         key_scope: None,
         state_downgrade: None,
+        fold_grade: None,
     };
 
     let err = smelt_runtime::maintenance_driver::repair_cell_key(&cell)
@@ -582,6 +583,7 @@ fn resolve_live_per_group_recompute_cell_still_fails_loud_on_a_missing_clamp() {
         fingerprint_projections: std::collections::BTreeMap::new(),
         key_scope: None,
         state_downgrade: None,
+        fold_grade: None,
     };
 
     assert!(

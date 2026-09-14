@@ -206,6 +206,25 @@ pub enum Technique {
     SuccessionPatch,
 }
 
+/// A [`Technique::KeyedFold`] cell's grade (`docs/specs/state.md` §"The
+/// degradation contract" step 2): whether its required correctness structure
+/// is unconditional or none at all. Derived once, at plan derivation, from
+/// the fold's own combiners (`crate::rules::cumulative::is_additive_combiner`)
+/// — never re-derived downstream (`maintenance-plan purity`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+pub enum FoldGrade {
+    /// Every cross-partition combiner is outside the additive family: the
+    /// reconciliation ledger's record is re-run-tolerance bookkeeping only,
+    /// skipped where unrealisable — re-merging the same window converges.
+    /// Never downgraded on a structure-less backend.
+    Idempotent,
+    /// At least one combiner is additive (`Sum`/`BitXor`): without the
+    /// reconciliation ledger's exact delta identities, a re-merged window
+    /// double-counts or cancels. Downgrades to the recompute family when the
+    /// ledger has no realisation.
+    Additive,
+}
+
 /// Whether a cell's maintenance is partition-local in each source it reads
 /// (`01-framework.md` §5 "Partition-local maintenance").
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -354,6 +373,13 @@ pub struct PlanCell {
     /// consults (maintenance-plan purity, `state.md` §"The degradation
     /// contract" step 1 "Ideal derivation").
     pub state_downgrade: Option<crate::maintenance::availability::StateDowngrade>,
+    /// The fold grade a [`Technique::KeyedFold`] cell carries
+    /// (`state.md` §"The degradation contract" step 2) — `None` for every
+    /// other technique. Populated once at derivation
+    /// (`derive::new_data::derive_new_data`'s `Grain::Key` arm) from the
+    /// fold's own combiners; `availability::required_state_structure`
+    /// reads it rather than re-deriving it.
+    pub fold_grade: Option<FoldGrade>,
 }
 
 /// A key-addressed read restriction: recompute only the rows identified by

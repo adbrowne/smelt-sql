@@ -211,6 +211,7 @@ pub fn derive_succession_plan(verdict: &SuccessionVerdict, table: &str) -> Succe
                 fingerprint_projections: BTreeMap::new(),
                 key_scope: None,
                 state_downgrade: None,
+                fold_grade: None,
             };
             SuccessionDerivation {
                 output,

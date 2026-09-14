@@ -1,0 +1,30 @@
+# Phase 3g summary — gap 5: `Technique::KeyedFold` resolves its state requirement by grade
+
+**Shipped:**
+- `docs/specs/state.md` §"The degradation contract" step 2: a `KeyedFold` cell's required structure is now stated as grade-dependent (idempotent = no structure; additive = the ledger; undetermined = fail-closed).
+- `smelt-logical`: `FoldGrade { Idempotent, Additive }` (`maintenance/types.rs`), `PlanCell::fold_grade: Option<FoldGrade>`, populated in `derive_new_data`'s `Grain::Key` arm (`maintenance/derive/new_data.rs`) from the fold's own combiners.
+- `required_state_structure`'s `KeyedFold` arm (`maintenance/availability/state_structure.rs`) matches on `cell.fold_grade`: `Idempotent` → `None`, `Additive`/`None` → `Some(ReconciliationLedger)`.
+- Single-owner additive predicates in `rules/cumulative.rs`: `is_additive_combiner(&CrossPartitionCombiner) -> bool` (used by `execution_postures` too, replacing its inline `matches!`), `combiner_for_function(SqlFunction) -> Option<CrossPartitionCombiner>` (the direct-monoid lookup `combiner_for` now delegates to), and `is_additive_fold_function(SqlFunction) -> bool` — additive directly (`Sum`/`BitXor`) **or** via a decomposed sum-based state (`AVG`/`STDDEV_*`/`VAR_*`, `analysis::discriminants::combiner_discriminants`'s `decomposable` flag). The decomposed leg was a red-green catch: an initial version only checked `combiner_for_function`, silently grading `AVG` idempotent and breaking two `smelt-db` diagnostic fixtures.
+- `smelt-runtime`: `resolve_keyed_fold_state_downgrade` (`maintenance_driver/resolve/live_cells.rs`) — resolves whether the model's own `NewData` `KeyedFold` cell was downgraded. Wired into the keyed dispatch (`execute/project/mod.rs`): a downgraded cell now forces the SAME whole-target drop+recreate the `--full-refresh`-without-a-window arm already used, unconditionally and every run, instead of ever reaching the window-forward fold loop.
+- `run_windowed_keyed_maintenance`'s `Grade::Additive` ledger-unsupported bail (`maintenance_driver/driver.rs`) is now provably unreachable in production; its message says so.
+
+**Decisions:**
+- 2026-09-15: An additive fold's downgrade reuses the existing "no-window `--full-refresh`" drop+recreate arm rather than inventing a new execution path — matches the spec's existing "whole-target route" language for a keyless, clamp-less `PerGroupRecompute` cell.
+- 2026-09-15: `AVG`/`STDDEV_*`/`VAR_*` are graded `Additive`, not `Idempotent`, because their decomposed state accumulates through a sum — re-merging double-counts exactly like a bare `SUM`. This is the fail-safe direction; getting it backwards would have silently double-counted a decomposed fold on a structure-less backend.
+- 2026-09-15: Plan test 8 (Trino explain-visibility) was already fully covered by pre-existing `trino_explain_downgrade.rs` (landed in phase 3f's programme) using a `SUM` fixture — added no duplicate test, just verified it still passes.
+
+**For the next planner:**
+- Phase 3h is next: the whole-row `MERGE` upsert (keyed-fold) family's live Trino leg, re-attempted on 3f+3g. This phase's whole-target-rebuild route is DuckDB-proven (tests 6/7 via `state.warehouse_tables: none`); 3h still owns proving it against a live Trino coordinator.
+- Untouched watch item: `run_windowed_keyed_maintenance`'s `Grade::Idempotent` arm skips merge-ledger bookkeeping based on `realises_merge_ledger(backend.dialect())` — dialect-only, not `warehouse_tables`-aware. On DuckDB with `warehouse_tables: none`, this arm would still attempt to write ledger bookkeeping DDL/DML that the plan layer's `MergeLedger` structure classifies as unavailable. Out of this phase's scope (gap 5 is about `KeyedFold`'s *own* requirement, not the separate `MergeLedger` bookkeeping's own guard), but a real gap if it surfaces in 3h or a later Trino idempotent-fold test — Trino's `realises_merge_ledger` already returns `false` regardless (dialect has no builder), so it is invisible on the live tier; only a hypothetical "DuckDB + `warehouse_tables: none`" combination would expose it.
+- The two existing `smelt-cli`/`smelt-db` fixtures this phase's fix (correctly) changed behavior for: `examples/github_activity`'s `events_deduped` model (`MIN` combiner, idempotent — no longer downgraded) and `smelt-db`'s `device_avg` fixture (`AVG` combiner, additive via decomposition — still downgraded, but now for the right underlying reason). Both required updating hard-coded expected-diagnostics lists; worth a note that any FUTURE combiner-grading change should grep `MaintenanceStateDowngraded.*KeyedFold` across `tests/` before assuming a fixture is stale.
+
+**Gates:**
+- `bash .claude/scripts/verify-phase.sh` — ALL GREEN (fmt, clippy both feature sets, shellcheck, full workspace `cargo test`, `example_diagnostics`).
+- `cargo test -p smelt-logical --test maintenance_availability --test walk_coverage` — pass (35 + 14 tests).
+- `cargo test -p smelt-logical --test maintenance_plan_admission` — pass (15 tests, includes new `sum_fold_derives_additive_grade`/`max_fold_derives_idempotent_grade`/`avg_fold_derives_additive_grade_via_its_decomposed_state`).
+- `cargo test -p smelt-runtime --test statement_parity --test availability_seam --test state_guard_census --test execute_parity --test dry_run_statements` — pass.
+- `cargo test -p smelt-runtime --test keyed_fold_grade_parity` (new) — plan-derived `FoldGrade` agrees with `WindowedKeyedRule::ledger_grade()` for `SUM`/`MAX`.
+- `cargo test -p smelt-runtime --test keyed_fold_state_downgrade_execution` (new) — end-to-end DuckDB run under `state.warehouse_tables: none`: additive fold rebuilds whole-target and matches a full-refresh oracle over two windows; idempotent fold still merges and matches the oracle.
+- `cargo test -p smelt-cli --test maintenance_conformance --test explain_maintenance --test property_profile_parity --test trino_explain_downgrade --test trino_incremental_spec_freshness --test example_diagnostics` — pass.
+- `cargo test -p smelt-lsp --test example_workspaces` — pass (38 tests).
+- Live Trino tier not exercised (3h's own scope per the plan).

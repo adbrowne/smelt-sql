@@ -13,7 +13,8 @@ use smelt_logical::maintenance::derive::{
 };
 use smelt_logical::maintenance::grouping::derive_column_groups;
 use smelt_logical::maintenance::{
-    ColumnGroup, Grain, MutationProfile, OutputSpec, Refusal, SourceFacts, Trigger,
+    ColumnGroup, FoldGrade, Grain, MutationProfile, OutputSpec, Refusal, SourceFacts, Technique,
+    Trigger,
 };
 use smelt_types::SqlFunction;
 
@@ -533,4 +534,41 @@ fn setop_model_admits_a_narrower_cell_than_whole_model_recompute() {
          blanket whole-model group: {:?}",
         plan.cells[0].group
     );
+}
+
+/// Gap 5 test 4 (`docs/outcomes/20260913-trino-incremental/phases/
+/// 03g-plan.md`): a `SUM` fold derives the additive [`FoldGrade`] on its
+/// admitted `KeyedFold` cell.
+#[test]
+fn sum_fold_derives_additive_grade() {
+    let (inputs, trigger) = inputs(SqlFunction::Sum, MutationProfile::AppendOnly);
+    let plan = derive_maintenance_plan(&inputs, &[trigger]);
+    assert_eq!(plan.cells.len(), 1, "{:?}", plan.cells);
+    assert_eq!(plan.cells[0].technique, Technique::KeyedFold);
+    assert_eq!(plan.cells[0].fold_grade, Some(FoldGrade::Additive));
+}
+
+/// Gap 5 test 4, idempotent leg: a `MAX` fold derives the idempotent
+/// [`FoldGrade`] — re-merging the same window converges, so no correctness
+/// structure is needed.
+#[test]
+fn max_fold_derives_idempotent_grade() {
+    let (inputs, trigger) = inputs(SqlFunction::Max, MutationProfile::AppendOnly);
+    let plan = derive_maintenance_plan(&inputs, &[trigger]);
+    assert_eq!(plan.cells.len(), 1, "{:?}", plan.cells);
+    assert_eq!(plan.cells[0].technique, Technique::KeyedFold);
+    assert_eq!(plan.cells[0].fold_grade, Some(FoldGrade::Idempotent));
+}
+
+/// An `AVG` fold decomposes into a sum-based (sum, count) state
+/// (`analysis::discriminants::combiner_discriminants`'s `decomposable`
+/// flag) — a re-merged window through it double-counts exactly like a bare
+/// `SUM`, so it must derive the additive grade too, not idempotent.
+#[test]
+fn avg_fold_derives_additive_grade_via_its_decomposed_state() {
+    let (inputs, trigger) = inputs(SqlFunction::Avg, MutationProfile::AppendOnly);
+    let plan = derive_maintenance_plan(&inputs, &[trigger]);
+    assert_eq!(plan.cells.len(), 1, "{:?}", plan.cells);
+    assert_eq!(plan.cells[0].technique, Technique::KeyedFold);
+    assert_eq!(plan.cells[0].fold_grade, Some(FoldGrade::Additive));
 }

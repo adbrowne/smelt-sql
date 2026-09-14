@@ -500,19 +500,29 @@ pub async fn run_windowed_keyed_maintenance(
                 // asked of `realises_reconciliation_ledger`, **derived from
                 // the availability layer** rather than compared against a
                 // dialect name here (same posture as `realises_merge_ledger`
-                // and `records_observed_deltas`). Reaching a `false` means the
-                // plan layer failed to downgrade first —
-                // `required_state_structure(KeyedFold)` is
-                // `ReconciliationLedger` — so this fails loudly rather than
-                // silently double-counting (`CLAUDE.md` §"Fail-loud
-                // discipline"). It is not a guard the census has to be told
-                // about, because it can never disagree with the row.
+                // and `records_observed_deltas`). Since phase 3g
+                // (`docs/outcomes/20260913-trino-incremental/phases/
+                // 03g-plan.md`), `required_state_structure(KeyedFold)` is
+                // grade-aware and an `Additive`-graded cell whose ledger has
+                // no realisation is downgraded to a whole-target rebuild
+                // BEFORE ever reaching this driver (`execute/project/mod.rs`'s
+                // `keyed_fold_state_downgrade` dispatch) — so this branch is
+                // unreachable by construction in production, not a
+                // user-facing capability verdict. Reaching it anyway means
+                // the plan layer failed to downgrade first; it fails loudly
+                // rather than silently double-counting (`CLAUDE.md`
+                // §"Fail-loud discipline") rather than being folded into the
+                // census, since it can never legitimately disagree with the
+                // row.
                 if !super::realises_reconciliation_ledger(backend.dialect()) {
                     bail!(
                         "{}",
                         BackendError::unsupported(
                             backend.dialect().name(),
-                            "additive-fold windowed-keyed maintenance ledger (never-fold-twice)",
+                            "additive-fold windowed-keyed maintenance ledger (never-fold-twice) — \
+                             internal inconsistency: the plan layer should have downgraded this \
+                             cell to a whole-target rebuild before dispatch (`docs/specs/state.md` \
+                             §\"The degradation contract\" step 2)",
                         )
                     );
                 }

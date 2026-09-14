@@ -84,5 +84,6 @@ fn base_cell(corner: Corner, technique: Technique) -> PlanCell {
         fingerprint_projections: std::collections::BTreeMap::new(),
         key_scope: None,
         state_downgrade: None,
+        fold_grade: None,
     }
 }

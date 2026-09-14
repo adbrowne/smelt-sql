@@ -588,7 +588,35 @@ fn group_by_source_columns(group_by_exprs: &[String]) -> std::collections::BTree
 /// combiner is admitted; `None` means the aggregator is not a monoid (either
 /// holistic, e.g. `AVG`/`STRING_AGG`, or unrecognised).
 pub fn combiner_for(agg_name: &str) -> Option<CrossPartitionCombiner> {
-    let function = SqlFunction::from_name(agg_name)?;
+    combiner_for_function(SqlFunction::from_name(agg_name)?)
+}
+
+/// Whether `function`, as a keyed fold's per-partition aggregator, belongs to
+/// the additive fold family for [`crate::maintenance::FoldGrade`] purposes
+/// (`docs/specs/state.md` §"The degradation contract" step 2) — either
+/// directly (`Sum`/`BitXor`, [`is_additive_combiner`]) or because its
+/// decomposed state accumulates through one (`AVG`/`STDDEV_*`/`VAR_*`
+/// decompose into a Welford-style sum-based triple,
+/// `analysis::discriminants::combiner_discriminants`'s `decomposable` flag):
+/// re-merging the same window through either double-counts. Every other
+/// admitted combiner (extremal/lattice, order-monotone, once-write) is
+/// idempotent under re-merge. Takes the raw [`SqlFunction`] a
+/// [`crate::maintenance::derive::fold::FoldSpec`] carries, unlike
+/// [`combiner_for_function`], which only classifies the direct-monoid
+/// family and returns `None` for a decomposable one.
+pub fn is_additive_fold_function(function: SqlFunction) -> bool {
+    combiner_for_function(function)
+        .as_ref()
+        .is_some_and(is_additive_combiner)
+        || crate::analysis::discriminants::combiner_discriminants(function, false).decomposable
+}
+
+/// [`combiner_for`]'s own lookup, taking an already-resolved [`SqlFunction`]
+/// rather than its spelling — the direct route for a caller that already
+/// holds the typed aggregate (e.g. a [`crate::maintenance::derive::fold::
+/// FoldSpec`]'s `add_columns`), avoiding a name round-trip through
+/// [`SqlFunction::from_name`].
+pub fn combiner_for_function(function: SqlFunction) -> Option<CrossPartitionCombiner> {
     let discriminants = crate::analysis::discriminants::combiner_discriminants(function, false);
     if !discriminants.is_monoid {
         return None;
@@ -873,6 +901,21 @@ pub struct ExecutionPostures {
     pub reprocessing_refused: PostureVerdict,
 }
 
+/// Whether a combiner belongs to the additive fold family (`Sum`/`BitXor`):
+/// re-merging the same window through it double-counts or cancels, so a
+/// cell folding through one needs the reconciliation ledger's exact delta
+/// identities (`docs/specs/state.md` §"The degradation contract"). Single
+/// owner of this predicate — [`execution_postures`]' `rerun_tolerant` posture
+/// and the keyed fold's plan-time grade (`smelt-logical`'s
+/// `maintenance/derive/new_data.rs`) both call it rather than repeating the
+/// `Sum | BitXor` match.
+pub fn is_additive_combiner(combiner: &CrossPartitionCombiner) -> bool {
+    matches!(
+        combiner,
+        CrossPartitionCombiner::Sum | CrossPartitionCombiner::BitXor
+    )
+}
+
 /// Derive [`ExecutionPostures`] from a classification's aggregator columns.
 /// Takes the column slice (not the whole [`CumulativeClassification`]) so
 /// the runtime's `ledger_grade` rule can delegate to the same derivation it
@@ -883,17 +926,12 @@ pub struct ExecutionPostures {
 pub fn execution_postures(columns: &[AggregatorColumn]) -> ExecutionPostures {
     let additive = columns.iter().find(|col| {
         if let Some(state) = &col.state {
-            state.state_columns.iter().any(|s| {
-                matches!(
-                    s.combiner,
-                    CrossPartitionCombiner::Sum | CrossPartitionCombiner::BitXor
-                )
-            })
+            state
+                .state_columns
+                .iter()
+                .any(|s| is_additive_combiner(&s.combiner))
         } else {
-            matches!(
-                col.cross_partition_combiner,
-                CrossPartitionCombiner::Sum | CrossPartitionCombiner::BitXor
-            )
+            is_additive_combiner(&col.cross_partition_combiner)
         }
     });
     let rerun_tolerant = match additive {
