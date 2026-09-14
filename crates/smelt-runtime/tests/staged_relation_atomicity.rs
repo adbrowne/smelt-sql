@@ -9,13 +9,20 @@
 //!
 //! Every staged-relation emitter derives `transactional` from the
 //! [`StagedRelation`] it is handed, never from a hardcoded `true` — this is
-//! a standing gate over all four re-keyed emitters, not a fix for one.
+//! a standing gate over all five emitters (the four keyed/recompute shapes
+//! plus the keyless whole-row shape), not a fix for one. Two further
+//! standing facts close criterion 3 (a claim implies a builder): no source
+//! file in `crates/smelt-logical/src/maintenance/emit/` spells
+//! `CREATE TEMP TABLE` outside `staged_relation.rs`'s own `create_prefix`,
+//! and no production Trino caller can reach the keyless executor without
+//! first asking `smelt_backend::maintenance_dialect` — which refuses Trino
+//! by name.
 
 use smelt_logical::maintenance::diff_patch::DeleteLeg;
 use smelt_logical::maintenance::emit::{
     emit_diff_patch, emit_per_group_recompute, emit_staged_candidate_conditional,
-    emit_staged_candidate_conditional_recompute, MaintenanceDialect, StagedRelation,
-    StagedRelationResidence,
+    emit_staged_candidate_conditional_keyless, emit_staged_candidate_conditional_recompute,
+    MaintenanceDialect, StagedRelation, StagedRelationResidence,
 };
 
 fn non_atomic_relation(name: &str) -> StagedRelation {
@@ -85,4 +92,90 @@ fn no_non_atomic_backend_is_handed_a_transactional_group() {
         MaintenanceDialect::DuckDb,
     );
     assert!(atomic.transactional);
+
+    let keyless = emit_staged_candidate_conditional_keyless(
+        "main.t",
+        &non_atomic_relation("t"),
+        &non_atomic_relation("t_sentinel"),
+        None,
+        "SELECT id, v FROM src",
+        MaintenanceDialect::DuckDb,
+    );
+    assert!(!keyless.transactional);
+
+    let keyless_atomic = emit_staged_candidate_conditional_keyless(
+        "main.t",
+        &StagedRelation::session_temporary("__smelt_staged_t"),
+        &StagedRelation::session_temporary("__smelt_sentinel_t"),
+        None,
+        "SELECT id, v FROM src",
+        MaintenanceDialect::DuckDb,
+    );
+    assert!(keyless_atomic.transactional);
+}
+
+/// Regression gate: the string literal `"CREATE TEMP TABLE` must appear in
+/// exactly one source file under `crates/smelt-logical/src/maintenance/
+/// emit/` — `staged_relation.rs`'s own `create_prefix()` — outside test
+/// modules. Doc comments that *describe* emitted SQL (numbered statement
+/// lists) are not scanned; only an actual string-literal spelling counts. A
+/// staged emitter that hardcodes its own `CREATE TEMP TABLE` spelling
+/// instead of deriving it from a [`StagedRelation`] would defeat the whole
+/// residence-as-data migration for whichever backend it is (a temp-table
+/// spelling on a backend with no temp tables is exactly the
+/// claim-without-builder failure criterion 3 excludes).
+#[test]
+fn no_staged_emitter_hardcodes_a_temp_table_spelling() {
+    let emit_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates dir")
+        .join("smelt-logical/src/maintenance/emit");
+    assert!(emit_dir.is_dir(), "emit dir not found: {emit_dir:?}");
+
+    let mut offending = Vec::new();
+    for entry in std::fs::read_dir(&emit_dir).expect("read emit dir") {
+        let path = entry.expect("dir entry").path();
+        if path.extension().and_then(|e| e.to_str()) != Some("rs") {
+            continue;
+        }
+        let contents = std::fs::read_to_string(&path).expect("read source file");
+        // Only the non-#[cfg(test)] prefix of each file counts — test
+        // modules are allowed to spell out expected literal statement text.
+        let production_prefix = match contents.find("#[cfg(test)]") {
+            Some(idx) => &contents[..idx],
+            None => contents.as_str(),
+        };
+        let file_name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+        if file_name == "staged_relation.rs" {
+            // `create_prefix()` itself is the single owner of this literal.
+            continue;
+        }
+        // Only a string-literal spelling counts — doc comments that
+        // *describe* the emitted SQL (e.g. a numbered statement list) are
+        // not a hardcoded emission and must not trip this gate.
+        if production_prefix.contains("\"CREATE TEMP TABLE") {
+            offending.push(path.display().to_string());
+        }
+    }
+    assert!(
+        offending.is_empty(),
+        "these emit/ source files hardcode `CREATE TEMP TABLE` outside \
+         staged_relation.rs's create_prefix(): {offending:?}"
+    );
+}
+
+/// Trino has no `MaintenanceDialect` variant
+/// (`smelt_backend::maintenance_dialect(SqlDialect::Trino)` is an `Err`
+/// naming the backend), so `execute_staged_keyless_recompute`'s first
+/// fallible step refuses by name before it can build a `StagedRelation` at
+/// all — the asserted form of phase 7's "no production Trino caller reaches
+/// it".
+#[test]
+fn trino_cannot_reach_the_keyless_executor_without_a_maintenance_dialect() {
+    let result = smelt_backend::maintenance_dialect(smelt_dialect::SqlDialect::Trino);
+    let err = result.expect_err("Trino must have no maintenance dialect");
+    assert!(
+        err.to_string().contains("Trino"),
+        "refusal must name the backend: {err}"
+    );
 }

@@ -196,8 +196,8 @@ async fn staged_candidate_keyless_statements_come_from_the_emitter() {
 
     let expected = smelt_logical::maintenance::emit::emit_staged_candidate_conditional_keyless(
         "main.events_by_dim",
-        staged_relation,
-        sentinel_relation,
+        &smelt_logical::maintenance::emit::StagedRelation::session_temporary(staged_relation),
+        &smelt_logical::maintenance::emit::StagedRelation::session_temporary(sentinel_relation),
         None,
         candidate_select,
         MaintenanceDialect::DuckDb,

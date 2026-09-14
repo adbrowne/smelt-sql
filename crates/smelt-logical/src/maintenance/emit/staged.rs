@@ -3,6 +3,8 @@
 //! recompute and keyless shapes.
 
 use super::staged_relation::StagedRelation;
+#[cfg(test)]
+use super::staged_relation::StagedRelationResidence;
 use super::types::*;
 
 /// The staged-candidate conditional `DELETE`+`INSERT` (T2, `docs/specs/
@@ -269,17 +271,19 @@ pub fn emit_staged_candidate_conditional_recompute(
 /// (`docs/specs/model_transforms.md` §"Change-suppressed MERGE and the
 /// staged-candidate conditional DELETE+INSERT").
 ///
-/// The sentinel is a `CREATE TEMP TABLE ... AS SELECT ...`, not an `EXISTS`
+/// The sentinel is a `CREATE ... TABLE ... AS SELECT ...`, not an `EXISTS`
 /// re-evaluated after the `DELETE` — evaluating the diff after the target has
 /// already been mutated is order-dependent reasoning; a materialised sentinel
 /// computed up front is not.
 ///
-/// 1. `CREATE TEMP TABLE <staged_relation> AS <candidate_select> LIMIT 0`
+/// 1. `[<reclaim>]` `<staged_relation.create_prefix()> <staged_relation> AS
+///    <candidate_select> LIMIT 0`
 /// 2. `INSERT INTO <staged_relation> <candidate_select>`
-/// 3. `CREATE TEMP TABLE <sentinel_relation> AS SELECT 1 FROM ((stored EXCEPT
-///    ALL staged) UNION ALL (staged EXCEPT ALL stored)) LIMIT 1` — the stored
-///    side carries `region_predicate` when given, so the diff is scoped to
-///    exactly the same region the candidate covers.
+/// 3. `[<reclaim>]` `<sentinel_relation.create_prefix()> <sentinel_relation>
+///    AS SELECT 1 FROM ((stored EXCEPT ALL staged) UNION ALL (staged EXCEPT
+///    ALL stored)) LIMIT 1` — the stored side carries `region_predicate` when
+///    given, so the diff is scoped to exactly the same region the candidate
+///    covers.
 /// 4. `DELETE FROM <table> WHERE [<region_predicate> AND] EXISTS (SELECT 1
 ///    FROM <sentinel_relation>)` — the whole region, guarded.
 /// 5. `INSERT INTO <table> SELECT * FROM <staged_relation> WHERE EXISTS
@@ -288,8 +292,13 @@ pub fn emit_staged_candidate_conditional_recompute(
 /// 6. `DROP TABLE <staged_relation>`
 /// 7. `DROP TABLE <sentinel_relation>`
 ///
-/// One transaction, same contract as every other staged-candidate emitter in
-/// this module.
+/// The group's residence and atomicity are derived from the two
+/// [`StagedRelation`]s it is handed, exactly as every other staged-candidate
+/// emitter in this module: `transactional` is `staged_relation.atomic &&
+/// sentinel_relation.atomic` — a group is atomic only if every relation it
+/// owns is — and a non-atomic relation's reclaim statement runs before its
+/// own `CREATE`, so an orphan left by a run interrupted mid-group is never
+/// adopted as live data by a later run.
 ///
 /// **No observed delta is recorded on this path.** The observed-delta table
 /// (T5) is keyed by the row identity's key columns; a keyless write has none
@@ -300,8 +309,8 @@ pub fn emit_staged_candidate_conditional_recompute(
 /// diff shape to emit.
 pub fn emit_staged_candidate_conditional_keyless(
     table: &str,
-    staged_relation: &str,
-    sentinel_relation: &str,
+    staged_relation: &StagedRelation,
+    sentinel_relation: &StagedRelation,
     region_predicate: Option<&str>,
     candidate_select: &str,
     _dialect: MaintenanceDialect,
@@ -311,49 +320,59 @@ pub fn emit_staged_candidate_conditional_keyless(
         "emit_staged_candidate_conditional_keyless requires a non-empty candidate select for \
          {table}"
     );
+    let staged_name = &staged_relation.name;
+    let sentinel_name = &sentinel_relation.name;
 
     let create = format!(
-        "CREATE TEMP TABLE {staged_relation} AS SELECT * FROM ({candidate_select}) AS \
-         __smelt_staged_shape LIMIT 0"
+        "{} {staged_name} AS SELECT * FROM ({candidate_select}) AS __smelt_staged_shape LIMIT 0",
+        staged_relation.create_prefix()
     );
-    let insert_candidates = format!("INSERT INTO {staged_relation} {candidate_select}");
+    let insert_candidates = format!("INSERT INTO {staged_name} {candidate_select}");
 
     let stored_side = match region_predicate {
         Some(pred) => format!("SELECT * FROM {table} WHERE {pred}"),
         None => format!("SELECT * FROM {table}"),
     };
     let sentinel = format!(
-        "CREATE TEMP TABLE {sentinel_relation} AS SELECT 1 AS __smelt_diff FROM (({stored_side} \
-         EXCEPT ALL SELECT * FROM {staged_relation}) UNION ALL (SELECT * FROM {staged_relation} \
-         EXCEPT ALL {stored_side})) AS __smelt_diff_rows LIMIT 1"
+        "{} {sentinel_name} AS SELECT 1 AS __smelt_diff FROM (({stored_side} EXCEPT ALL SELECT \
+         * FROM {staged_name}) UNION ALL (SELECT * FROM {staged_name} EXCEPT ALL {stored_side})) \
+         AS __smelt_diff_rows LIMIT 1",
+        sentinel_relation.create_prefix()
     );
 
     let delete = match region_predicate {
-        Some(pred) => format!(
-            "DELETE FROM {table} WHERE {pred} AND EXISTS (SELECT 1 FROM {sentinel_relation})"
-        ),
+        Some(pred) => {
+            format!("DELETE FROM {table} WHERE {pred} AND EXISTS (SELECT 1 FROM {sentinel_name})")
+        }
         None => {
-            format!("DELETE FROM {table} WHERE EXISTS (SELECT 1 FROM {sentinel_relation})")
+            format!("DELETE FROM {table} WHERE EXISTS (SELECT 1 FROM {sentinel_name})")
         }
     };
     let insert = format!(
-        "INSERT INTO {table} SELECT * FROM {staged_relation} WHERE EXISTS (SELECT 1 FROM \
-         {sentinel_relation})"
+        "INSERT INTO {table} SELECT * FROM {staged_name} WHERE EXISTS (SELECT 1 FROM \
+         {sentinel_name})"
     );
-    let drop_staged = format!("DROP TABLE {staged_relation}");
-    let drop_sentinel = format!("DROP TABLE {sentinel_relation}");
+
+    let mut statements = Vec::new();
+    if let Some(reclaim) = staged_relation.reclaim_statement() {
+        statements.push(MaintenanceStatement::new(reclaim));
+    }
+    statements.push(MaintenanceStatement::new(create));
+    statements.push(MaintenanceStatement::new(insert_candidates));
+    if let Some(reclaim) = sentinel_relation.reclaim_statement() {
+        statements.push(MaintenanceStatement::new(reclaim));
+    }
+    statements.push(MaintenanceStatement::new(sentinel));
+    statements.push(MaintenanceStatement::new(delete));
+    statements.push(MaintenanceStatement::new(insert));
+    statements.push(MaintenanceStatement::new(staged_relation.drop_statement()));
+    statements.push(MaintenanceStatement::new(
+        sentinel_relation.drop_statement(),
+    ));
 
     StatementGroup {
-        statements: vec![
-            MaintenanceStatement::new(create),
-            MaintenanceStatement::new(insert_candidates),
-            MaintenanceStatement::new(sentinel),
-            MaintenanceStatement::new(delete),
-            MaintenanceStatement::new(insert),
-            MaintenanceStatement::new(drop_staged),
-            MaintenanceStatement::new(drop_sentinel),
-        ],
-        transactional: true,
+        statements,
+        transactional: staged_relation.atomic && sentinel_relation.atomic,
     }
 }
 
@@ -436,12 +455,37 @@ mod staged_candidate_conditional_tests {
 mod staged_candidate_keyless_tests {
     use super::*;
 
+    fn session_temporary_pair() -> (StagedRelation, StagedRelation) {
+        (
+            StagedRelation::session_temporary("__smelt_staged_events_region"),
+            StagedRelation::session_temporary("__smelt_sentinel_events_region"),
+        )
+    }
+
+    fn target_schema_pair() -> (StagedRelation, StagedRelation) {
+        (
+            StagedRelation::derive(
+                "__smelt_staged_",
+                "events_region",
+                StagedRelationResidence::TargetSchema,
+                false,
+            ),
+            StagedRelation::derive(
+                "__smelt_sentinel_",
+                "events_region",
+                StagedRelationResidence::TargetSchema,
+                false,
+            ),
+        )
+    }
+
     #[test]
     fn keyless_group_stages_diffs_and_guards_both_write_legs() {
+        let (staged, sentinel) = session_temporary_pair();
         let group = emit_staged_candidate_conditional_keyless(
             "main.events_region",
-            "__smelt_staged_events_region",
-            "__smelt_sentinel_events_region",
+            &staged,
+            &sentinel,
             None,
             "SELECT event_id, event_date, payload FROM source_delta",
             MaintenanceDialect::DuckDb,
@@ -487,10 +531,11 @@ mod staged_candidate_keyless_tests {
 
     #[test]
     fn keyless_region_predicate_bounds_both_the_diff_and_the_delete() {
+        let (staged, sentinel) = session_temporary_pair();
         let with_region = emit_staged_candidate_conditional_keyless(
             "main.events_region",
-            "__smelt_staged_events_region",
-            "__smelt_sentinel_events_region",
+            &staged,
+            &sentinel,
             Some("main.events_region.event_date >= '2026-08-01'"),
             "SELECT event_id, event_date FROM source_delta",
             MaintenanceDialect::DuckDb,
@@ -504,8 +549,8 @@ mod staged_candidate_keyless_tests {
 
         let without_region = emit_staged_candidate_conditional_keyless(
             "main.events_region",
-            "__smelt_staged_events_region",
-            "__smelt_sentinel_events_region",
+            &staged,
+            &sentinel,
             None,
             "SELECT event_id, event_date FROM source_delta",
             MaintenanceDialect::DuckDb,
@@ -517,13 +562,126 @@ mod staged_candidate_keyless_tests {
     #[test]
     #[should_panic(expected = "requires a non-empty candidate select")]
     fn keyless_emitter_needs_no_key_but_refuses_an_empty_candidate_select() {
+        let (staged, sentinel) = session_temporary_pair();
         emit_staged_candidate_conditional_keyless(
             "main.events_region",
-            "__smelt_staged_events_region",
-            "__smelt_sentinel_events_region",
+            &staged,
+            &sentinel,
             None,
             "   ",
             MaintenanceDialect::DuckDb,
         );
+    }
+
+    /// Guards the migration to the `StagedRelation`-typed signature: the
+    /// existing DuckDB-shaped call (both relations `session_temporary`,
+    /// atomic) emits exactly the same 7 statements it emitted before the
+    /// migration, byte for byte.
+    #[test]
+    fn keyless_session_temporary_residence_is_byte_unchanged() {
+        let (staged, sentinel) = session_temporary_pair();
+        let group = emit_staged_candidate_conditional_keyless(
+            "main.events_region",
+            &staged,
+            &sentinel,
+            None,
+            "SELECT event_id, event_date, payload FROM source_delta",
+            MaintenanceDialect::DuckDb,
+        );
+        assert!(group.transactional);
+        assert_eq!(group.statements.len(), 7);
+        let sql: Vec<&str> = group.statements.iter().map(|s| s.sql.as_str()).collect();
+        assert_eq!(
+            sql,
+            vec![
+                "CREATE TEMP TABLE __smelt_staged_events_region AS SELECT * FROM (SELECT \
+                 event_id, event_date, payload FROM source_delta) AS __smelt_staged_shape LIMIT \
+                 0",
+                "INSERT INTO __smelt_staged_events_region SELECT event_id, event_date, payload \
+                 FROM source_delta",
+                "CREATE TEMP TABLE __smelt_sentinel_events_region AS SELECT 1 AS __smelt_diff \
+                 FROM ((SELECT * FROM main.events_region EXCEPT ALL SELECT * FROM \
+                 __smelt_staged_events_region) UNION ALL (SELECT * FROM \
+                 __smelt_staged_events_region EXCEPT ALL SELECT * FROM main.events_region)) AS \
+                 __smelt_diff_rows LIMIT 1",
+                "DELETE FROM main.events_region WHERE EXISTS (SELECT 1 FROM \
+                 __smelt_sentinel_events_region)",
+                "INSERT INTO main.events_region SELECT * FROM __smelt_staged_events_region \
+                 WHERE EXISTS (SELECT 1 FROM __smelt_sentinel_events_region)",
+                "DROP TABLE __smelt_staged_events_region",
+                "DROP TABLE __smelt_sentinel_events_region",
+            ]
+        );
+    }
+
+    /// With both relations `TargetSchema`/non-atomic, statement 1 and the
+    /// sentinel `CREATE` use `CREATE TABLE` (no `TEMP`), each `CREATE` is
+    /// preceded by its own `DROP TABLE IF EXISTS` reclaim, and both `DROP`s
+    /// still close the group.
+    #[test]
+    fn keyless_target_schema_residence_emits_real_tables() {
+        let (staged, sentinel) = target_schema_pair();
+        let group = emit_staged_candidate_conditional_keyless(
+            "main.events_region",
+            &staged,
+            &sentinel,
+            None,
+            "SELECT event_id, event_date, payload FROM source_delta",
+            MaintenanceDialect::DuckDb,
+        );
+
+        let sql: Vec<&str> = group.statements.iter().map(|s| s.sql.as_str()).collect();
+        assert_eq!(
+            sql,
+            vec![
+                "DROP TABLE IF EXISTS __smelt_staged_events_region",
+                "CREATE TABLE __smelt_staged_events_region AS SELECT * FROM (SELECT event_id, \
+                 event_date, payload FROM source_delta) AS __smelt_staged_shape LIMIT 0",
+                "INSERT INTO __smelt_staged_events_region SELECT event_id, event_date, payload \
+                 FROM source_delta",
+                "DROP TABLE IF EXISTS __smelt_sentinel_events_region",
+                "CREATE TABLE __smelt_sentinel_events_region AS SELECT 1 AS __smelt_diff FROM \
+                 ((SELECT * FROM main.events_region EXCEPT ALL SELECT * FROM \
+                 __smelt_staged_events_region) UNION ALL (SELECT * FROM \
+                 __smelt_staged_events_region EXCEPT ALL SELECT * FROM main.events_region)) AS \
+                 __smelt_diff_rows LIMIT 1",
+                "DELETE FROM main.events_region WHERE EXISTS (SELECT 1 FROM \
+                 __smelt_sentinel_events_region)",
+                "INSERT INTO main.events_region SELECT * FROM __smelt_staged_events_region \
+                 WHERE EXISTS (SELECT 1 FROM __smelt_sentinel_events_region)",
+                "DROP TABLE __smelt_staged_events_region",
+                "DROP TABLE __smelt_sentinel_events_region",
+            ]
+        );
+        assert!(sql.iter().all(|s| !s.contains("TEMP")));
+    }
+
+    /// A non-atomic staged relation yields `transactional == false`.
+    #[test]
+    fn keyless_group_is_not_transactional_when_not_atomic() {
+        let (staged, sentinel) = target_schema_pair();
+        let group = emit_staged_candidate_conditional_keyless(
+            "main.events_region",
+            &staged,
+            &sentinel,
+            None,
+            "SELECT event_id, event_date FROM source_delta",
+            MaintenanceDialect::DuckDb,
+        );
+        assert!(!group.transactional);
+
+        // Mixed atomicity: any non-atomic relation makes the whole group
+        // non-atomic.
+        let (atomic_staged, _) = session_temporary_pair();
+        let (_, non_atomic_sentinel) = target_schema_pair();
+        let mixed = emit_staged_candidate_conditional_keyless(
+            "main.events_region",
+            &atomic_staged,
+            &non_atomic_sentinel,
+            None,
+            "SELECT event_id, event_date FROM source_delta",
+            MaintenanceDialect::DuckDb,
+        );
+        assert!(!mixed.transactional);
     }
 }

@@ -159,8 +159,12 @@ pub async fn execute_staged_keyless_recompute(
     let start = Instant::now();
     let full_table = format!("{schema}.{table}");
     let dialect = maintenance_dialect(backend.dialect())?;
-    let staged_relation = format!("__smelt_staged_{table}");
-    let sentinel_relation = format!("__smelt_sentinel_{table}");
+    let staged_relation = smelt_logical::maintenance::emit::StagedRelation::session_temporary(
+        format!("__smelt_staged_{table}"),
+    );
+    let sentinel_relation = smelt_logical::maintenance::emit::StagedRelation::session_temporary(
+        format!("__smelt_sentinel_{table}"),
+    );
     let group = smelt_logical::maintenance::emit::emit_staged_candidate_conditional_keyless(
         &full_table,
         &staged_relation,
