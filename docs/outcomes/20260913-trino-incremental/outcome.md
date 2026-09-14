@@ -146,10 +146,10 @@ approximated.
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Characterise Iceberg `MERGE` by execution: each clause form run against the live tier, the three merge capability flags confirmed or corrected in the spec matrix, measured errors quoted | done |
-| 2 | Spec delta: `multi_backend.md` §"Whole-row MERGE" / §"Column-scoped merge and conditional-write capabilities" / §"Incremental & schema evolution per backend" stated for Trino, including which families are reachable and which take T3's downgrade, plus the refusal diagnostics any absent clause needs | pending |
+| 2 | Spec delta: `multi_backend.md` §"Whole-row MERGE" / §"Column-scoped merge and conditional-write capabilities" / §"Incremental & schema evolution per backend" stated for Trino, including which families are reachable and which take T3's downgrade, plus the refusal diagnostics any absent clause needs | planned |
 | 3 | The append and whole-row-`MERGE` upsert families executing end-to-end through `execute_project` — including landing `maintenance_dialect` for `SqlDialect::Trino`, which returns `Err` today and blocks every family — with their `statement_parity` executed-vs-emitted legs | pending |
 | 4 | The emulated delete-and-insert window: `DELETE` range exactly covering the insert's write window, asserted directly and under out-of-order and repeated application | pending |
-| 5 | Column-scoped merge and the merge-less conditional write over T3's staged relation — or by-name refusals where phase 1 measured the clause absent | pending |
+| 5 | The merge-less conditional write over T3's staged relation (the departed-row delete as a separate scoped `DELETE`, since `WHEN NOT MATCHED BY SOURCE` is absent), and the column-scoped merge — executing where its cell needs no merge ledger, taking T3's `MaintenanceStateDowngraded` route where it does, per Spark's precedent | pending |
 | 6 | The degraded routes: per-group recompute, the succession grain's full rebuild in place of the patch route (presented table row- and column-identical to the ledger-bearing rebuild's presented arm), and the sidecar-less key-addressed downgrade — each recorded on the cell and explain-visible | pending |
 | 7 | `statement_parity`'s structural no-authoring leg for `smelt-backend-trino`, plus a check that adding Trino introduced no second plan-derivation site and no consumer-side dialect branch | pending |
 | 8 | The generative gate: `maintenance_conformance` Trino leg modelled on the Spark leg, over the live tier, oracle-equal after **every** run step with cells resolved under Trino's actual availability, recipe pool no narrower than the admitted families, gated in `compat.yml` | pending |
@@ -157,6 +157,20 @@ approximated.
 | 10 | Mid-stream schema evolution under maintenance, still oracle-equal; then close: divergences rewritten, `docs-site/` page stating plainly which incremental features Trino does and does not support and why, `verify-phase.sh` green | pending |
 
 ## Decision log
+
+- **2026-09-14 — reshape at phase 2 planning: criterion 2's "column-scoped merge" split in two.**
+  `smelt_logical::maintenance::availability::required_state_structure` maps `Technique::
+  ColumnScopedMerge` (and `InPlaceUpdate`) to `StateStructure::MergeLedger` unconditionally, and
+  `realisable_state_structures(SqlDialect::Trino)` is already `vec![]` — so a plan cell whose
+  technique is `ColumnScopedMerge` **downgrades** on Trino exactly as it does on Spark (Delta),
+  even though `supports_column_scoped_merge` measured `true`. The capability describes a statement
+  shape Trino can execute; the cell's technique demands a correctness structure the dialect does
+  not realise, and the two questions are asked in that order. Criterion 2's flat listing of "the
+  column-scoped merge" as an executing family therefore reads as the capability-gated statement
+  shape, not as a promise that every `ColumnScopedMerge` cell runs incrementally on Trino. No work
+  leaves the outcome: phase 5's row now names both routes explicitly, and criterion 8 (a downgraded
+  cell is asserted oracle-equal, never exempted) is what keeps the downgraded route honest. No row
+  added, removed or reordered.
 
 - **2026-09-14 — phase 1: Iceberg `MERGE` characterised by execution** (measured against
   `trinodb/trino:483` + `apache/iceberg-rest-fixture:1.10.1`, `crates/smelt-backend-trino/tests/merge_clause_forms.rs`):
