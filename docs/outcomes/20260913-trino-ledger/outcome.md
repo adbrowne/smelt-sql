@@ -151,7 +151,7 @@ land near or above Delta's.
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Confirm the posture: `scripts/trino-probe-state.sh` runs the cross-table `START TRANSACTION` candidates (including a failing second statement) against the live tier and prints Trino's answers verbatim; escalate in the decision log if genuine cross-table atomicity is found, since that would change this outcome | done |
-| 2 | Spec delta: `state.md`'s realisability table gains a Trino column reading `no` five times with Spark's reason stated as permanent, `multi_backend.md` §"Incremental & schema evolution per backend" states it for the target, and the diagnostics the degradation needs are named | pending |
+| 2 | Spec delta: `state.md`'s realisability table gains a Trino column reading `no` five times with Spark's reason stated as permanent, `multi_backend.md` §"Incremental & schema evolution per backend" states it for the target, and the diagnostics the degradation needs are named | planned |
 | 3 | Schema-evolution DDL: `ddl_trino/` as a module directory with the measured `SchemaOperation` → Trino/Iceberg mapping table in its header, type spellings derived from what the server accepted, and T1's five schema-related capability cells confirmed or corrected back into the spec table | pending |
 | 4 | Wire the absence: Trino claims no correctness structure, availability resolution downgrades every dependent cell to its recompute equivalent with `MaintenanceStateDowngraded`, derived once by the pure resolver with the ideal plan still materialised | pending |
 | 5 | The two invariants as standing tests: no execution path on Trino reaches a builder for an unclaimed structure (claim ⇒ builder), and no absence produces a refusal where the contract specifies a downgrade (absence ⇒ downgrade) | pending |
@@ -162,6 +162,17 @@ land near or above Delta's.
 | 10 | Surface and close: `smelt explain` rendering Trino's downgrades (text + `--json`), diagnostics catalogue and `examples/broken/` fixtures, `docs-site/` state page updated with what Trino costs and why, `verify-phase.sh` green with no baseline bumped | pending |
 
 ## Decision log
+
+- **2026-09-14 — phase 2 planning: no reshape; one observation handed to phase 4.** The spec
+  delta is text plus a new drift gate, so nothing moves in or out of the phase table. Recorded for
+  phase 4's planner: the code already claims the right thing —
+  `realisable_state_structures(SqlDialect::Trino)` is `vec![]` and
+  `maintenance_availability/realisation.rs`'s two-sided `has_emitters` gate already covers Trino —
+  but `maintenance_dialect` currently returns `Err` for `SqlDialect::Trino`
+  (`docs/specs/multi_backend.md` line ~171), which is a **refusal where the degradation contract
+  specifies a downgrade**. That is exactly the failure criterion 4 excludes and criterion 5's
+  second invariant test asserts against; phase 4 owns removing it, and phase 2 only corrects the
+  spec wording that describes it as "not yet reachable".
 
 - **2026-09-14 — phase 1 result: measured, not assumed — Iceberg refuses ALL writes inside an
   explicit transaction, not just cross-table ones. Criteria 2–5's Spark-shaped assumption holds;
