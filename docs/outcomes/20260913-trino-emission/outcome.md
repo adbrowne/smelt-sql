@@ -128,7 +128,7 @@ including its null-safe join spelling.
 | 3 | Explicit verdicts for the operator and clause divergences (`^`, `//`, `::`, `[a,b]`, trailing commas, `QUALIFY`) with registry-construction validation, plus the `BackendCapabilities` flags they pair with | done |
 | 4 | The `PIVOT` decision: lower it to SQL Trino executes to the same rows, or refuse it at compile time with a diagnostic and a fixture — recorded either way | done |
 | 5 | The live `dialect_audit` Trino leg, schema direction: registry-derived probes executed against the coordinator, coverage totality enforced (no silent drop), `report.rs` rendering Trino | done |
-| 6 | The value direction — the leg that catches a spelling that survives but changes meaning — plus the two-sided Trino `ledger.rs` rows and the `.claude/dialect-gaps-baseline.txt` Trino metric with its tracking issue; phase 2's coverage census reaches zero here and the file is deleted, not grandfathered | pending |
+| 6 | The value direction — the leg that catches a spelling that survives but changes meaning — plus the two-sided Trino `ledger.rs` rows and the `.claude/dialect-gaps-baseline.txt` Trino metric with its tracking issue; phase 2's coverage census reaches zero here and the file is deleted, not grandfathered | planned |
 | 7 | `Restructure`/`Rewrite` on a fourth dialect: position-opposite lowering planned from the source CST, null-safe synthesised join in Trino's spelling, and the running-frame refusal — each asserted against live output | pending |
 | 8 | Seams: `dialect_seam` Trino refusal coverage (incl. inside function bodies), `emission_ownership` still green with no printer Trino branch, `projection_dialect_invariance` widened to four dialects byte-identically | pending |
 | 9 | The type-oracle question: land the Trino leg with its divergence registry and `Unknown` census, or record an explicit deferral decision with a tracking issue — never silence | pending |
@@ -277,5 +277,22 @@ including its null-safe join spelling.
   concurrent scheduling — pre-existing, reproduced with and without this phase's changes, avoided
   by running targeted live commands first and `verify-phase.sh` with the tier unexported, matching
   phases 3/4's own pattern. See `phases/05-summary.md`.
+
+- **2026-09-14 — phase 6 planned; no phase-table reshape.** Phase 5's summary hands forward one
+  advisory item — the full-workspace-`cargo test`-with-the-Trino-tier-exported concurrency
+  collision on the shared Iceberg REST catalog. It serves no success criterion (every phase
+  already avoids it by running targeted live commands and then `verify-phase.sh` with the tier
+  unexported, and phase 6's plan repeats that discipline), so it stays out of the phase table
+  rather than becoming a row. Two mechanism decisions taken in the plan rather than left to the
+  implement step. First, the value oracle decodes **raw `/v1/statement` JSON** against the
+  coordinator's reported type strings, not `arrow_convert::trino_type_to_arrow`: that converter
+  has no array/varbinary/interval arm, and a decode error inside the oracle would be
+  indistinguishable from the engine rejecting the probe — the exact confusion phase 5 designed
+  out for the schema leg. Second, deleting the census removes the only dialect that could be
+  classified `Unverified`, so `census::classify` gains the both-legs set as an explicit parameter
+  and keeps a synthetic red-proof; the standing criterion-1 gate becomes
+  `no_dialect_has_unverified_pairs` over `DialectId::ALL`, with the audit's own coverage-totality
+  and two-sided ledger gates carrying the "a new built-in cannot silently acquire a Trino claim"
+  claim from here on. The `.gitignore` whitelist line for the census file is deleted with it.
 
 ## Blocked
