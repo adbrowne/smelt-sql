@@ -153,7 +153,7 @@ land near or above Delta's.
 | 1 | Confirm the posture: `scripts/trino-probe-state.sh` runs the cross-table `START TRANSACTION` candidates (including a failing second statement) against the live tier and prints Trino's answers verbatim; escalate in the decision log if genuine cross-table atomicity is found, since that would change this outcome | done |
 | 2 | Spec delta: `state.md`'s realisability table gains a Trino column reading `no` five times with Spark's reason stated as permanent, `multi_backend.md` §"Incremental & schema evolution per backend" states it for the target, and the diagnostics the degradation needs are named | done |
 | 3 | Schema-evolution DDL: `ddl_trino/` as a module directory with the measured `SchemaOperation` → Trino/Iceberg mapping table in its header, type spellings derived from what the server accepted, and T1's five schema-related capability cells confirmed or corrected back into the spec table | done |
-| 4 | Wire the absence: Trino claims no correctness structure, availability resolution downgrades every dependent cell to its recompute equivalent with `MaintenanceStateDowngraded`, derived once by the pure resolver with the ideal plan still materialised | pending |
+| 4 | Wire the absence: Trino claims no correctness structure, availability resolution downgrades every dependent cell to its recompute equivalent with `MaintenanceStateDowngraded`, derived once by the pure resolver with the ideal plan still materialised | planned |
 | 5 | The two invariants as standing tests: no execution path on Trino reaches a builder for an unclaimed structure (claim ⇒ builder), and no absence produces a refusal where the contract specifies a downgrade (absence ⇒ downgrade) | pending |
 | 6 | `contract.deferral` refuses on Trino with `DeclaredContractRequiresState`; `frozen_horizon` and `retain_departed` follow the existing grain and posture rules with no new lattice point | pending |
 | 7 | The staged relation group without temp tables: scratch-schema relation with a derived non-colliding name, owned lifecycle, proved cleanup after an interruption between stage and apply — or a by-name refusal if T1 measured the flag `false` | pending |
@@ -162,6 +162,30 @@ land near or above Delta's.
 | 10 | Surface and close: `smelt explain` rendering Trino's downgrades (text + `--json`), diagnostics catalogue and `examples/broken/` fixtures, `docs-site/` state page updated with what Trino costs and why, `verify-phase.sh` green with no baseline bumped | pending |
 
 ## Decision log
+
+- **2026-09-14 — phase 4 planning: no reshape; phase 4 removes the refusal, phase 10 keeps the
+  rendering.** Two design calls recorded before implementation. (1) **No
+  `MaintenanceDialect::Trino` variant is added here.** The enum has ~40 exhaustive arms across
+  `smelt-logical/src/maintenance/emit/{fingerprint,succession,probes,partition_bucket,hash,
+  merge,bootstrap}.rs`, and every arm is a *statement spelling* — the half
+  `20260913-trino-incremental` (T4) owns by the maintenance-plan invariant's own seam, and the
+  half this outcome's "Out of scope" explicitly hands over. Phase 4 therefore makes the plan,
+  the downgrade and the report independent of the maintenance-statement dialect rather than
+  inventing spellings T4 will measure. (2) The seam between phase 4 and phase 10 is
+  abort-vs-render: `smelt explain` on a Trino target currently `?`-returns at
+  `commands/explain.rs:~556` and produces nothing at all, so phase 4 removes that abort (phase
+  10 cannot render a report the command refuses to build); the text/`--json` layout, the
+  diagnostics catalogue and the docs-site page stay phase 10's. Three refusal sites and one
+  silent fallback found while planning, all inside phase 4: `commands/explain.rs:~556` (aborts
+  the command), `smelt-runtime/src/profile.rs:~201` (drops the model into `out.failures`, so
+  property-diff reports nothing for a Trino model), `execute/project/dry_run.rs:~244` (silent
+  `continue` — a skipped statement indistinguishable from an absent one, a fail-loud
+  violation), and `smelt-db`'s `backend_dialect_for("trino")` returning `None`, which reaches
+  the *right* availability answer (`vec![]`) only through `unwrap_or_default()` — correct by
+  accident, and wrong the moment Trino realises anything. Confirmed already-correct and not
+  touched: the pure resolver (`resolve_availability`, `recompute_equivalent`),
+  `realisable_state_structures(Trino) == vec![]`, and `maintenance_plan_diagnostics`'
+  dialect-generic availability loop.
 
 - **2026-09-14 — phase 3 done: `ddl_trino` measured and wired; struct-field drop and nested
   widening are DDL on Trino, unlike Spark/BigQuery.** All five T1 capability cells confirmed,
