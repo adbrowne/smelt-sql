@@ -472,6 +472,10 @@ target yet** — `maintenance_dialect` refuses `SqlDialect::Trino`, so a full re
 route today — and **a model projecting an `array(...)` column does not decode from Trino to
 Arrow yet**. Both are tracked in `docs/specs/multi_backend.md` §Known Divergences.
 
+None of this touches `.smelt/`: single-writer locking and the `meta.json` layout-version check
+are backend-independent and work normally against a `trino` target, the same as against every
+other backend.
+
 ## Switching targets
 
 Use the `--target` flag on any command:

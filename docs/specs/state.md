@@ -426,6 +426,10 @@ resolution changes a cell's *cost*, never its *result*. This is the same shape a
 degradation — a delta signature degrading to `general` downgrades the consumer's technique —
 and the two must be recorded and printed uniformly.
 
+The `.smelt/` run lock and the `meta.json` layout-version check are not correctness structures
+and are exempt from the absence⇒downgrade rule: they are backend-independent and available on
+every target exactly as on DuckDB (`run_state.md` §"Locking").
+
 Resolving late is mandatory, not an implementation choice: the ideal plan must exist as a
 derived object even when it will not run, because diagnostics, `smelt explain`, and future
 tooling must be able to show what the project *would* get with state — the counterfactual is

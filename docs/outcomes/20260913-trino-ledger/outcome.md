@@ -157,7 +157,7 @@ land near or above Delta's.
 | 5 | The two invariants as standing tests: no execution path on Trino reaches a builder for an unclaimed structure (claim ⇒ builder), and no absence produces a refusal where the contract specifies a downgrade (absence ⇒ downgrade) | done |
 | 6 | `contract.deferral` refuses on Trino with `DeclaredContractRequiresState`; `frozen_horizon` and `retain_departed` follow the existing grain and posture rules with no new lattice point | done |
 | 7 | The staged relation group without temp tables: scratch-schema relation with a derived non-colliding name, owned lifecycle, proved cleanup after an interruption between stage and apply — or a by-name refusal if T1 measured the flag `false` | done |
-| 8 | Locking and versioning: two concurrent runs where exactly one proceeds, or a refusal naming the backend and the missing capability — never a lock that never locks | planned |
+| 8 | Locking and versioning: two concurrent runs where exactly one proceeds, or a refusal naming the backend and the missing capability — never a lock that never locks | done |
 | 9 | `.smelt/` is not correctness-bearing on Trino: delete-between-runs equality, and `state.mode: stateless` writing nothing while changing no maintained table's value | pending |
 | 10 | The keyless staged emitter's sentinel: `emit_staged_candidate_conditional_keyless`'s hardcoded `CREATE TEMP TABLE` either takes phase 7's residence/atomicity treatment, or a standing test proves no Trino execution path reaches it — a temp-table spelling on a backend with no temp tables is exactly the claim-without-builder failure criterion 3 excludes | pending |
 | 11 | Surface and close: `smelt explain` rendering Trino's downgrades (text + `--json`), diagnostics catalogue and `examples/broken/` fixtures, `docs-site/` state page updated with what Trino costs and why, `verify-phase.sh` green with no baseline bumped | pending |
@@ -177,6 +177,15 @@ land near or above Delta's.
   the grounds that no production Trino caller reaches it today. "No caller today" is an
   unasserted claim about an execution path on a backend with no temp tables, which is the shape
   criteria 3 and 8 exist to exclude — so it gets a row rather than leaving the outcome.
+- **2026-09-14 — phase 8 done.** Confirmed the lock's `stateless` no-op is intentional (added
+  `stateless_lock_is_a_specified_no_op`, green against unmodified code), added a structural gate
+  pinning the single unconditional `file_store.lock()` call site in `execute_project` so a future
+  target-conditional carve-out fails a test rather than shipping silently, and proved the live
+  refusal shape on a real coordinator: a held lock refuses a second `smelt run --target trino` by
+  PID with `.smelt/` and the Iceberg table untouched, releasing it lets the next run proceed, and
+  a `meta.json` with `state_version: 99` refuses before any write. No code change was needed —
+  `lock()` was already correct on every axis this phase tests; the phase's contribution is turning
+  that correctness into a demonstrated, spec-pinned claim.
 
 - **2026-09-14 — phase 7 done: `StagedRelation` (residence, atomicity, derived name) lands as
   capability data; four emitters re-keyed; live-proved on Trino.** `BackendCapabilities` gains

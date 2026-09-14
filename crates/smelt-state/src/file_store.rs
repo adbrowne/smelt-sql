@@ -1631,6 +1631,34 @@ mod tests {
         );
     }
 
+    /// `docs/specs/run_state.md` §"Locking": under `state.mode: stateless`
+    /// the lock is an explicit, specified no-op — not an accident of
+    /// `allows_any()` returning false. Two concurrent stateless "runs" both
+    /// acquire successfully (there is nothing to serialize), and neither
+    /// creates `.smelt/lock` or `.smelt/` at all.
+    #[test]
+    fn stateless_lock_is_a_specified_no_op() {
+        let dir = TempDir::new().unwrap();
+        let store = FileStore::with_state_mode(dir.path(), "dev", StateMode::Stateless);
+
+        let guard1 = store.lock().unwrap();
+        assert!(
+            !dir.path().join(".smelt").join("lock").exists(),
+            "stateless lock() must not create .smelt/lock"
+        );
+
+        // A second acquisition succeeds while the first is still held —
+        // there is no file to contend on.
+        let guard2 = store.lock().unwrap();
+
+        drop(guard1);
+        drop(guard2);
+        assert!(
+            !dir.path().join(".smelt").exists(),
+            "stateless lock() must not create .smelt/ at all"
+        );
+    }
+
     #[test]
     fn intervals_store_denies_snapshot_store() {
         let dir = TempDir::new().unwrap();
