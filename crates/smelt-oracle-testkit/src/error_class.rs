@@ -123,15 +123,27 @@ fn is_recognized_query_refusal(msg: &str) -> bool {
     // Trino: `BackendError`'s own `Display` strings, captured verbatim from
     // the live `20260913-trino-emission` phase 5 schema-leg sweep.
     // `map_trino_error` (`smelt-backend-trino/src/error.rs`) turns every
-    // coordinator-rejected query into one of these three prefixes — an
+    // coordinator-rejected query into one of these four prefixes — an
     // unrecognised function ("Feature not supported by trino: ... not
     // registered"), a syntax/argument-arity error ("Execution failed for
-    // 'trino': ..."), or a missing catalog object — and `execute_schema`'s
-    // own "no column metadata" and `trino_type_to_arrow`'s "unrecognised
-    // Trino type signature" client-side errors are wrapped in the same
-    // `execution_failed` constructor, so they share the prefix too. A
-    // transport-level `Connection failed: ...` (the oracle itself unusable)
-    // is deliberately not listed here — it must stay `Fatal`.
+    // 'trino': ..."), or a missing catalog object. A transport-level
+    // `Connection failed: ...` (the oracle itself unusable) is deliberately
+    // not listed here — it must stay `Fatal`.
+    //
+    // `trino_oracle.rs`'s `TypeOracle::query_types` used to let
+    // `trino_type_to_arrow`'s error `Display` pass through unchanged, and
+    // that error is also a `BackendError::execution_failed("trino", ...)` —
+    // so an unmappable declared column type wore the exact
+    // "Execution failed for 'trino': ..." prefix below and was silently
+    // absorbed as a query refusal, even though the coordinator had already
+    // accepted and executed the query. That is "smelt's own mapping gap
+    // wearing the engine's rejection costume," the precise confusion this
+    // outcome exists to deny (see `docs/outcomes/20260913-trino-emission`
+    // phase 9). `query_types` now maps that failure to a distinct
+    // "trino oracle cannot map declared column type: …" message instead, and
+    // that message is deliberately **not** added to `TRINO_REFUSALS` below —
+    // it must fall through to `Fatal`, the default for anything
+    // unrecognised.
     const TRINO_REFUSALS: &[&str] = &[
         "Feature not supported by trino:",
         "Execution failed for 'trino':",
@@ -252,6 +264,16 @@ mod classify_oracle_error_tests {
             (
                 "Execution failed for 'trino': unrecognised Trino type signature: array(bigint)",
                 QueryRefusal,
+            ),
+            // --- Fatal: the load-bearing case this outcome's phase 9 closes.
+            // `trino_oracle.rs`'s `query_types` now emits this distinct
+            // message for an unmappable declared column type instead of
+            // letting it wear the `Execution failed for 'trino':` refusal
+            // prefix above — the coordinator already accepted and executed
+            // the query, so this is smelt's own mapping gap, not a refusal.
+            (
+                "trino oracle cannot map declared column type: uuid",
+                Fatal,
             ),
             ("Connection failed: tcp connect error", Fatal),
             ("401 Unauthorized: invalid credentials", Fatal),

@@ -6,8 +6,9 @@
 //! - Placing tests in `smelt-types` would create a circular dependency
 //!
 //! The strategy: generate random SQL expressions with known types via CTEs, run them
-//! against DuckDB (always) and Spark (if `SPARK_CONTAINER_ID` is set) to get actual types,
-//! and compare against smelt's type inference.
+//! against DuckDB (always), Spark (if `SPARK_CONTAINER_ID` is set), BigQuery (if
+//! `SMELT_BQ_ACCESS_TOKEN` is set), and Trino (if `SMELT_TRINO_URL` is set) to get
+//! actual types, and compare against smelt's type inference.
 //! Mismatches are either bugs (to fix), known divergences (registered in `divergences.rs`),
 //! or compatible type differences (Text vs Varchar, Decimal precision differences).
 
@@ -25,6 +26,7 @@ use prop_helpers::oracle_check::{
 };
 use smelt_oracle_testkit::BigQueryOracle;
 use smelt_oracle_testkit::SparkOracle;
+use smelt_oracle_testkit::TrinoOracle;
 use smelt_oracle_testkit::{compare_types, TypeMatch};
 use smelt_oracle_testkit::{DuckDbOracle, TypeOracle};
 
@@ -51,6 +53,13 @@ static SPARK: LazyLock<Option<SparkOracle>> = LazyLock::new(|| {
 /// `BigQueryOracle::from_env`'s doc comment — which is the local/CI default,
 /// so the BigQuery leg is simply absent and the suite stays green.
 static BIGQUERY: LazyLock<Option<BigQueryOracle>> = LazyLock::new(BigQueryOracle::from_env);
+
+/// Shared TrinoOracle instance — one HTTP client + current-thread runtime
+/// reused across all cases, same reasoning as `SPARK`/`BIGQUERY` above.
+/// `None` when `SMELT_TRINO_URL` isn't set (see `TrinoOracle::from_env`'s doc
+/// comment), the local/CI default, so the Trino leg is simply absent and the
+/// suite stays green.
+static TRINO: LazyLock<Option<TrinoOracle>> = LazyLock::new(TrinoOracle::from_env);
 
 /// Running total of output columns actually compared against a live
 /// BigQuery oracle across the whole `prop_type_inference` sweep. Read after
@@ -107,6 +116,55 @@ mod bigquery_coverage_floor_tests {
     fn at_or_above_floor_is_accepted() {
         assert!(check_bigquery_coverage_floor(BIGQUERY_COLUMN_COVERAGE_FLOOR).is_ok());
         assert!(check_bigquery_coverage_floor(BIGQUERY_COLUMN_COVERAGE_FLOOR * 10).is_ok());
+    }
+}
+
+/// Running total of output columns actually compared against a live Trino
+/// oracle across the whole `prop_type_inference` sweep — the Trino analogue
+/// of `BIGQUERY_COLUMNS_COMPARED`, read after the sweep by
+/// `check_trino_coverage_floor`.
+static TRINO_COLUMNS_COMPARED: AtomicUsize = AtomicUsize::new(0);
+
+/// Floor for `TRINO_COLUMNS_COMPARED` after a full `prop_type_inference`
+/// sweep (256 cases). Below this, the Trino leg has degraded to testing
+/// nothing — see `BIGQUERY_COLUMN_COVERAGE_FLOOR`'s doc comment for the full
+/// reasoning, which applies identically here. Calibrated against measured
+/// runs on 2026-09-14: a 256-case sweep compared 155 columns, and repeated
+/// 1000-case soaks compared 443-543. The floor is set well under the smallest
+/// of those.
+const TRINO_COLUMN_COVERAGE_FLOOR: usize = 50;
+
+/// Fails loudly if too few columns were actually compared against Trino over
+/// a sweep — see `TRINO_COLUMN_COVERAGE_FLOOR`'s doc comment.
+fn check_trino_coverage_floor(columns_compared: usize) -> Result<(), String> {
+    if columns_compared < TRINO_COLUMN_COVERAGE_FLOOR {
+        return Err(format!(
+            "Trino leg degraded to testing nothing: only {columns_compared} column(s) were \
+             actually compared against a live Trino oracle over the sweep (floor is \
+             {TRINO_COLUMN_COVERAGE_FLOOR}). Either every generated case was skipped as a \
+             query refusal (check whether `classify_oracle_error` in error_class.rs is too \
+             broad) or the oracle itself is failing in a way that isn't being reported as \
+             Fatal. Check SMELT_TRINO_URL / coordinator reachability before assuming a \
+             generator problem."
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod trino_coverage_floor_tests {
+    use super::*;
+
+    #[test]
+    fn below_floor_is_rejected() {
+        assert!(check_trino_coverage_floor(0).is_err());
+        assert!(check_trino_coverage_floor(TRINO_COLUMN_COVERAGE_FLOOR - 1).is_err());
+    }
+
+    #[test]
+    fn at_or_above_floor_is_accepted() {
+        assert!(check_trino_coverage_floor(TRINO_COLUMN_COVERAGE_FLOOR).is_ok());
+        assert!(check_trino_coverage_floor(TRINO_COLUMN_COVERAGE_FLOOR * 10).is_ok());
     }
 }
 
@@ -175,22 +233,46 @@ proptest! {
                 Err(msg) => prop_assert!(false, "{}", msg),
             }
         }
+
+        // Check Trino if available (shared HTTP client, one /v1/statement
+        // round trip per case). Coverage is accumulated into
+        // TRINO_COLUMNS_COMPARED and checked against a floor once the whole
+        // sweep finishes — see `prop_type_inference` below.
+        if let Some(trino) = TRINO.as_ref() {
+            match check_types_against_oracle(
+                trino, "trino", &sql, &columns, &exprs, &divergences, &unknowns,
+            ) {
+                Ok(outcome) => {
+                    TRINO_COLUMNS_COMPARED.fetch_add(outcome.columns_compared, Ordering::Relaxed);
+                }
+                Err(msg) => prop_assert!(false, "{}", msg),
+            }
+        }
     }
 }
 
-/// Wraps `prop_type_inference_sweep` to assert the BigQuery coverage floor
-/// once the full sweep has run — see `BIGQUERY_COLUMN_COVERAGE_FLOOR`'s doc
-/// comment. The counter is reset first so repeated runs within one process
+/// Wraps `prop_type_inference_sweep` to assert the BigQuery and Trino
+/// coverage floors once the full sweep has run — see
+/// `BIGQUERY_COLUMN_COVERAGE_FLOOR`'s and `TRINO_COLUMN_COVERAGE_FLOOR`'s doc
+/// comments. The counters are reset first so repeated runs within one process
 /// (unusual for `cargo test`, but not impossible with certain harnesses)
 /// don't accumulate across invocations.
 #[test]
 fn prop_type_inference() {
     BIGQUERY_COLUMNS_COMPARED.store(0, Ordering::Relaxed);
+    TRINO_COLUMNS_COMPARED.store(0, Ordering::Relaxed);
     prop_type_inference_sweep();
     if BIGQUERY.is_some() {
         let compared = BIGQUERY_COLUMNS_COMPARED.load(Ordering::Relaxed);
         eprintln!("COVERAGE[bigquery] columns_compared={compared}");
         if let Err(msg) = check_bigquery_coverage_floor(compared) {
+            panic!("{msg}");
+        }
+    }
+    if TRINO.is_some() {
+        let compared = TRINO_COLUMNS_COMPARED.load(Ordering::Relaxed);
+        eprintln!("COVERAGE[trino] columns_compared={compared}");
+        if let Err(msg) = check_trino_coverage_floor(compared) {
             panic!("{msg}");
         }
     }
@@ -218,6 +300,20 @@ fn smoke_cast_integer() {
         check_types_against_oracle(
             spark,
             "spark",
+            sql,
+            &columns,
+            &[],
+            &divergences,
+            &known_unknowns(),
+        )
+        .unwrap();
+    }
+
+    if let Some(trino) = TRINO.as_ref() {
+        let divergences = known_divergences();
+        check_types_against_oracle(
+            trino,
+            "trino",
             sql,
             &columns,
             &[],
@@ -254,6 +350,20 @@ fn smoke_upper_function() {
         check_types_against_oracle(
             spark,
             "spark",
+            sql,
+            &columns,
+            &[],
+            &divergences,
+            &known_unknowns(),
+        )
+        .unwrap();
+    }
+
+    if let Some(trino) = TRINO.as_ref() {
+        let divergences = known_divergences();
+        check_types_against_oracle(
+            trino,
+            "trino",
             sql,
             &columns,
             &[],
@@ -328,6 +438,20 @@ fn smoke_count_aggregate() {
         check_types_against_oracle(
             spark,
             "spark",
+            sql,
+            &columns,
+            &[],
+            &divergences,
+            &known_unknowns(),
+        )
+        .unwrap();
+    }
+
+    if let Some(trino) = TRINO.as_ref() {
+        let divergences = known_divergences();
+        check_types_against_oracle(
+            trino,
+            "trino",
             sql,
             &columns,
             &[],
@@ -579,6 +703,20 @@ fn smoke_binary_add() {
         )
         .unwrap();
     }
+
+    if let Some(trino) = TRINO.as_ref() {
+        let divergences = known_divergences();
+        check_types_against_oracle(
+            trino,
+            "trino",
+            sql,
+            &columns,
+            &[],
+            &divergences,
+            &known_unknowns(),
+        )
+        .unwrap();
+    }
 }
 
 #[test]
@@ -611,6 +749,20 @@ fn smoke_binary_division() {
         check_types_against_oracle(
             spark,
             "spark",
+            sql,
+            &columns,
+            &[],
+            &divergences,
+            &known_unknowns(),
+        )
+        .unwrap();
+    }
+
+    if let Some(trino) = TRINO.as_ref() {
+        let divergences = known_divergences();
+        check_types_against_oracle(
+            trino,
+            "trino",
             sql,
             &columns,
             &[],
@@ -848,6 +1000,20 @@ fn smoke_case_expression() {
         check_types_against_oracle(
             spark,
             "spark",
+            sql,
+            &columns,
+            &[],
+            &divergences,
+            &known_unknowns(),
+        )
+        .unwrap();
+    }
+
+    if let Some(trino) = TRINO.as_ref() {
+        let divergences = known_divergences();
+        check_types_against_oracle(
+            trino,
+            "trino",
             sql,
             &columns,
             &[],

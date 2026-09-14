@@ -589,7 +589,6 @@ static ROWS: &[LedgerRow] = &[
     // heard of; a handful (the `type_gap` rows) are an accepted call that
     // reports a different output type than smelt infers.
     gap("AGE", DialectId::Trino, "#209", "no `age`; Trino has no interval-difference builtin under this name"),
-    gap("ARRAY_AGG", DialectId::Trino, "#209", "accepted, but returns `array(bigint)`, a type signature the client does not yet decode (measured live)"),
     gap("BIT_AND", DialectId::Trino, "#209", "no `bit_and`; Trino spells it `bitwise_and_agg`"),
     gap("BIT_OR", DialectId::Trino, "#209", "no `bit_or`; Trino spells it `bitwise_or_agg`"),
     gap("BIT_XOR", DialectId::Trino, "#209", "no bitwise-XOR aggregate in Trino"),
@@ -597,7 +596,6 @@ static ROWS: &[LedgerRow] = &[
     gap("CHAR_LENGTH", DialectId::Trino, "#209", "no `char_length`; Trino spells it `length`"),
     gap("COALESCE", DialectId::Trino, "#209", "the probe's single-argument shape is rejected: Trino's `coalesce` requires at least two arguments (DuckDB accepts one)"),
     gap("CONCAT", DialectId::Trino, "#209", "the probe's single-argument shape is rejected: Trino's `concat` requires at least two arguments"),
-    gap("CURRENT_TIMESTAMP", DialectId::Trino, "#209", "accepted, but returns `timestamp(3) with time zone`, a type signature the client does not yet decode (measured live)"),
     gap("DATE_ADD", DialectId::Trino, "#209", "Trino's `date_add(unit, value, timestamp)` takes a unit string first; DuckDB's positional `date_add(timestamp, interval)` shape does not parse"),
     gap("DATE_PART", DialectId::Trino, "#209", "no `date_part`; Trino spells it `extract(part FROM x)`"),
     gap("DATE_SUB", DialectId::Trino, "#209", "Trino's `date_add` (there is no separate `date_sub`) takes a unit string first; DuckDB's positional shape does not parse"),
@@ -611,7 +609,6 @@ static ROWS: &[LedgerRow] = &[
     gap("ILIKE", DialectId::Trino, "#209", "no `ILIKE` operator; Trino case-folds with `LOWER(x) LIKE LOWER(p)`"),
     gap("INITCAP", DialectId::Trino, "#209", "no `initcap` in Trino"),
     gap("JSON_CONTAINS", DialectId::Trino, "#209", "no `json_contains` in Trino"),
-    gap("JSON_EXTRACT", DialectId::Trino, "#209", "accepted, but returns Trino's native `json` type, a type signature the client does not yet decode (measured live)"),
     gap("JSON_EXTRACT_TEXT", DialectId::Trino, "#209", "no `json_extract_text`; Trino spells it `json_extract_scalar`"),
     gap("JSON_OBJECT", DialectId::Trino, "#209", "Trino's `JSON_OBJECT(KEY k VALUE v)` clause syntax does not accept DuckDB's positional `json_object(k, v)` call shape"),
     gap("JSON_OBJECT_KEYS", DialectId::Trino, "#209", "no `json_object_keys` in Trino"),
@@ -625,12 +622,10 @@ static ROWS: &[LedgerRow] = &[
     gap("MD5", DialectId::Trino, "#209", "Trino's `md5` takes a VARBINARY argument; DuckDB's VARCHAR-argument form is rejected rather than implicitly cast"),
     gap("MEDIAN", DialectId::Trino, "#209", "no `median`; Trino spells it `approx_percentile(x, 0.5)`"),
     gap("MODE", DialectId::Trino, "#209", "no `mode`"),
-    gap("NOW", DialectId::Trino, "#209", "accepted, but returns `timestamp(3) with time zone`, a type signature the client does not yet decode (measured live)"),
     gap("PERCENTILE_CONT", DialectId::Trino, "#209", "Trino's `PERCENTILE_CONT` requires a `WITHIN GROUP (ORDER BY ...)` clause; DuckDB's plain-call and `OVER` window forms do not parse"),
     gap("PERCENTILE_DISC", DialectId::Trino, "#209", "Trino's `PERCENTILE_DISC` requires a `WITHIN GROUP (ORDER BY ...)` clause; DuckDB's plain-call and `OVER` window forms do not parse"),
     gap("QUOTE_IDENT", DialectId::Trino, "#209", "PostgreSQL-only builtin"),
     gap("QUOTE_LITERAL", DialectId::Trino, "#209", "PostgreSQL-only builtin"),
-    gap("REPEAT", DialectId::Trino, "#209", "Trino's `repeat(element, count)` builds an array by repeating a scalar; DuckDB's `repeat(string, count)` repeats a string. Different function under the same name — the reported `array(varchar)` cannot be a smelt VARCHAR"),
     gap("RIGHT", DialectId::Trino, "#209", "no `RIGHT(x, n)` function form; Trino's `LEFT`/`RIGHT` are join keywords only"),
     gap("STRING_AGG", DialectId::Trino, "#209", "no `string_agg`; Trino spells it `LISTAGG` (with a mandatory `WITHIN GROUP` clause) or `array_join(array_agg(x), sep)`"),
     gap("TO_CHAR", DialectId::Trino, "#209", "no `to_char`; Trino spells timestamp formatting `format_datetime`/`date_format`, which use a different pattern language than DuckDB's `%`-directive strings"),
@@ -685,6 +680,19 @@ static ROWS: &[LedgerRow] = &[
         DialectId::Trino,
         "#209",
         "Trino's `JSON_ARRAY` omits a NULL argument by default (`ABSENT ON NULL`); DuckDB's `json_array` keeps it as a JSON null. Closable only by a variadic `NULL ON NULL` lowering, not yet built.",
+    ),
+    // `20260913-trino-emission` phase 9's live value leg, once the schema-leg
+    // type-decode gap above was fixed and the probe could execute all the
+    // way to a value comparison. Not closable by a lowering: `REPEAT` is a
+    // genuinely different function on Trino (see the `repeat_trino_returns_array`
+    // type divergence above), so its value naturally diverges too.
+    divergent(
+        "REPEAT",
+        DialectId::Trino,
+        "Trino's `REPEAT(element, count)` builds an array by repeating the scalar argument \
+         (`'alpha' -> [alpha, alpha, ...]`); DuckDB's `repeat(string, count)` repeats the \
+         string itself (`'alphaalpha...'`). A different function under the same name, matching \
+         the `repeat_trino_returns_array` type divergence.",
     ),
 ];
 

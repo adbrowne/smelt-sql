@@ -52,6 +52,10 @@ pub struct TypeDivergence {
     /// means no divergence recorded for BigQuery (smelt matches, or untested —
     /// entries are filled in only from a verified live probe, never guessed).
     pub bigquery_type: Option<DataType>,
+    /// What Trino's `/v1/statement` schema metadata reports for this pattern.
+    /// `None` means no divergence recorded for Trino (smelt matches, or
+    /// untested — filled in only from a verified live probe, never guessed).
+    pub trino_type: Option<DataType>,
     pub status: DivergenceStatus,
 }
 
@@ -74,6 +78,7 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             spark_type: Some(DataType::Varchar { max_length: None }),
             // BigQuery's STRING is the same unbounded-length family member.
             bigquery_type: Some(DataType::Varchar { max_length: None }),
+            trino_type: None,
             status: DivergenceStatus::ByDesign,
         },
         // Names the struct-field-naming blanket leniency in `type_comparison.rs`
@@ -93,6 +98,7 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             duckdb_type: Some(DataType::Struct(vec![(String::new(), DataType::Integer)])),
             spark_type: None,
             bigquery_type: None, // untested against BigQuery
+            trino_type: None,
             status: DivergenceStatus::ByDesign,
         },
         // verified: 2026-07-20 `SELECT SUM(x) FROM (SELECT CAST(1 AS INT) x)` and
@@ -108,6 +114,7 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             }),
             spark_type: None, // Spark also returns BigInt, matches smelt
             bigquery_type: None,
+            trino_type: None,
             status: DivergenceStatus::BackendSpecific,
         },
         // verified: 2026-07-20 `SELECT CAST('a' AS STRING) || CAST('b' AS STRING)`
@@ -119,6 +126,7 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             duckdb_type: Some(DataType::Varchar { max_length: None }),
             spark_type: Some(DataType::Varchar { max_length: None }),
             bigquery_type: None,
+            trino_type: None,
             status: DivergenceStatus::ByDesign,
         },
         // verified: 2026-07-20 `SELECT UPPER('a')` — Spark's DESCRIBE QUERY
@@ -130,6 +138,7 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             duckdb_type: Some(DataType::Varchar { max_length: None }),
             spark_type: Some(DataType::Varchar { max_length: None }),
             bigquery_type: None,
+            trino_type: None,
             status: DivergenceStatus::ByDesign,
         },
         // verified: 2026-07-20 `SELECT CEIL(CAST(1.5 AS DOUBLE))` and the FLOOR
@@ -141,6 +150,7 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             duckdb_type: None,
             spark_type: Some(DataType::BigInt),
             bigquery_type: None,
+            trino_type: None,
             status: DivergenceStatus::BackendSpecific,
         },
         // verified: 2026-07-20 `SELECT AVG(x) FROM (SELECT CAST(1.5 AS
@@ -149,12 +159,18 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
         TypeDivergence {
             id: "avg_decimal",
             description:
-                "AVG(DECIMAL) — smelt infers Double (matches DuckDB), Spark returns Decimal (varying precision)",
+                "AVG(DECIMAL) — smelt infers Double (matches DuckDB), Spark and Trino both \
+                return Decimal (varying precision)",
             smelt_type: DataType::Double,
             duckdb_type: None,
             // Wildcard: matches any Decimal precision/scale.
             spark_type: Some(ANY_DECIMAL),
             bigquery_type: None,
+            // Wildcard: matches any Trino Decimal. verified: 2026-09-14 (live
+            // sweep at PROPTEST_CASES=1000) `AVG(CAST(99.99 AS DECIMAL(10,2)))`
+            // — Trino reports `decimal(10,2)` (preserves precision/scale,
+            // like Spark's own AVG(Decimal) behaviour).
+            trino_type: Some(ANY_DECIMAL),
             status: DivergenceStatus::BackendSpecific,
         },
         // verified: 2026-07-20 `SELECT MEDIAN(x) FROM (SELECT CAST(1.5 AS
@@ -171,6 +187,7 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             duckdb_type: None,
             spark_type: Some(DataType::Double),
             bigquery_type: None,
+            trino_type: None,
             status: DivergenceStatus::BackendSpecific,
         },
         // PERCENTILE_CONT/PERCENTILE_DISC ordered-set aggregates: smelt's
@@ -205,6 +222,7 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             duckdb_type: Some(ANY_DECIMAL),
             spark_type: None,
             bigquery_type: None,
+            trino_type: None,
             status: DivergenceStatus::KnownBug,
         },
         // verified: 2026-07-20 `SELECT PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER
@@ -220,6 +238,7 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             duckdb_type: Some(DataType::Integer),
             spark_type: None,
             bigquery_type: None,
+            trino_type: None,
             status: DivergenceStatus::KnownBug,
         },
         // verified: 2026-07-20 `SELECT PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER
@@ -235,64 +254,88 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             duckdb_type: Some(DataType::BigInt),
             spark_type: None,
             bigquery_type: None,
+            trino_type: None,
             status: DivergenceStatus::KnownBug,
         },
         // verified: 2026-07-20 `SELECT SIGN(CAST(1.5 AS DOUBLE))` — Spark's
         // DESCRIBE QUERY reports `double`. Spark's SIGN is always DOUBLE
         // regardless of argument type (see sign_integer/sign_bigint/
         // sign_decimal below — all four confirmed to report `double`).
+        // Trino also returns `double` for a DOUBLE argument (verified live,
+        // 2026-09-14, `20260913-trino-emission` phase 9), matching Spark here
+        // even though it diverges from Spark on the other three input types
+        // below.
         TypeDivergence {
             id: "sign_double",
             description:
-                "SIGN(DOUBLE) — smelt infers SmallInt (matches DuckDB TINYINT), Spark returns Double",
+                "SIGN(DOUBLE) — smelt infers SmallInt (matches DuckDB TINYINT), Spark and Trino \
+                both return Double",
             smelt_type: DataType::SmallInt,
             duckdb_type: None,
             spark_type: Some(DataType::Double),
             bigquery_type: None,
+            trino_type: Some(DataType::Double),
             status: DivergenceStatus::BackendSpecific,
         },
         // verified: 2026-07-20 `SELECT SIGN(CAST(1 AS INT))` — Spark's DESCRIBE
         // QUERY reports `double`, not `int`. Corrected from a stale `Integer`
         // recording: Spark's SIGN always returns DOUBLE, it doesn't preserve
         // the argument type the way DuckDB's TINYINT-returning `sign` does.
+        // Trino's SIGN instead preserves the input type (verified live,
+        // 2026-09-14): `SIGN(INTEGER)` reports `integer`, still a mismatch
+        // against smelt's SmallInt, just a different actual type than Spark's.
         TypeDivergence {
             id: "sign_integer",
             description:
                 "SIGN(INTEGER) — smelt infers SmallInt (matches DuckDB TINYINT), Spark always \
-                returns Double regardless of argument type",
+                returns Double regardless of argument type; Trino preserves the input type \
+                (Integer) instead.",
             smelt_type: DataType::SmallInt,
             duckdb_type: None,
             spark_type: Some(DataType::Double),
             bigquery_type: None,
+            trino_type: Some(DataType::Integer),
             status: DivergenceStatus::BackendSpecific,
         },
         // verified: 2026-07-20 `SELECT SIGN(CAST(1 AS BIGINT))` — Spark's
         // DESCRIBE QUERY reports `double`, not `bigint`. Corrected from a stale
-        // `BigInt` recording; see sign_integer above.
+        // `BigInt` recording; see sign_integer above. Trino preserves the
+        // input type here too (verified live, 2026-09-14): `SIGN(BIGINT)`
+        // reports `bigint`.
         TypeDivergence {
             id: "sign_bigint",
             description:
                 "SIGN(BIGINT) — smelt infers SmallInt (matches DuckDB TINYINT), Spark always \
-                returns Double regardless of argument type",
+                returns Double regardless of argument type; Trino preserves the input type \
+                (BigInt) instead.",
             smelt_type: DataType::SmallInt,
             duckdb_type: None,
             spark_type: Some(DataType::Double),
             bigquery_type: None,
+            trino_type: Some(DataType::BigInt),
             status: DivergenceStatus::BackendSpecific,
         },
         // verified: 2026-07-20 `SELECT SIGN(CAST(1.5 AS DECIMAL(10,2)))` —
         // Spark's DESCRIBE QUERY reports `double`, not a Decimal type.
         // Corrected from a stale Decimal-wildcard recording; see sign_integer
-        // above.
+        // above. Trino instead preserves the input as a Decimal, but narrowed
+        // to precision/scale (1,0) — verified live, 2026-09-14:
+        // `SIGN(DECIMAL(10,2))` reports `decimal(1,0)`. An exact value, not
+        // the `ANY_DECIMAL` wildcard, since only this one width was measured.
         TypeDivergence {
             id: "sign_decimal",
             description:
                 "SIGN(DECIMAL) — smelt infers SmallInt (matches DuckDB TINYINT), Spark always \
-                returns Double regardless of argument type",
+                returns Double regardless of argument type; Trino instead returns a narrow \
+                Decimal(1,0) (the sign digit).",
             smelt_type: DataType::SmallInt,
             duckdb_type: None,
             spark_type: Some(DataType::Double),
             bigquery_type: None,
+            trino_type: Some(DataType::Decimal {
+                precision: 1,
+                scale: 0,
+            }),
             status: DivergenceStatus::BackendSpecific,
         },
         // verified: 2026-07-20 `SELECT CAST(1.5 AS FLOAT)` — Spark's DESCRIBE
@@ -305,7 +348,40 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             duckdb_type: Some(DataType::Float),
             spark_type: Some(DataType::Float),
             bigquery_type: None,
+            trino_type: None,
             status: DivergenceStatus::ByDesign,
+        },
+        // verified: 2026-09-14 (live `20260913-trino-emission` phase 9 sweep
+        // at PROPTEST_CASES=512) `CAST(42 AS INTEGER) / CAST(42 AS INTEGER)`
+        // — Trino's `/` on two INTEGER operands truncates (legacy SQL integer
+        // division), reporting `integer`; smelt's portable division always
+        // promotes to Double (matching DuckDB, which also promotes here — no
+        // duckdb_type entry needed).
+        TypeDivergence {
+            id: "integer_division_trino_truncates",
+            description: "INTEGER / INTEGER — smelt promotes to Double (matches DuckDB), Trino \
+                truncates and returns Integer.",
+            smelt_type: DataType::Double,
+            duckdb_type: None,
+            spark_type: None,
+            bigquery_type: None,
+            trino_type: Some(DataType::Integer),
+            status: DivergenceStatus::BackendSpecific,
+        },
+        // verified: 2026-09-14 (live sweep at PROPTEST_CASES=1000) `CAST(100
+        // AS BIGINT) / CAST(100 AS BIGINT)` — same truncating-division
+        // behaviour as `integer_division_trino_truncates` above, on the
+        // BIGINT operand width.
+        TypeDivergence {
+            id: "bigint_division_trino_truncates",
+            description: "BIGINT / BIGINT — smelt promotes to Double (matches DuckDB), Trino \
+                truncates and returns BigInt.",
+            smelt_type: DataType::Double,
+            duckdb_type: None,
+            spark_type: None,
+            bigquery_type: None,
+            trino_type: Some(DataType::BigInt),
+            status: DivergenceStatus::BackendSpecific,
         },
         // verified: 2026-07-20 `SELECT CAST('2024-01-02' AS DATE) -
         // CAST('2024-01-01' AS DATE)` — Spark's DESCRIBE QUERY reports
@@ -319,6 +395,7 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             duckdb_type: Some(DataType::BigInt),
             spark_type: None, // Spark returns Interval, matches smelt
             bigquery_type: None,
+            trino_type: None,
             status: DivergenceStatus::BackendSpecific,
         },
         // Decimal arithmetic model: smelt applies the portable, Spark-aligned
@@ -361,12 +438,13 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
         TypeDivergence {
             id: "decimal_arithmetic_model",
             description: "smelt uses Spark-aligned decimal growth (spec §15) for multiplication, \
-                but neither DuckDB nor Spark match smelt's raw-SQL precision/scale for ROUND or \
-                IFNULL/COALESCE decimal widening. On raw SQL the three disagree on Decimal \
-                precision/scale across ROUND, IFNULL, and nested arithmetic. Exact decimal \
-                correctness is verified by the cast-wrap conformance oracle \
-                (type_conformance_tests.rs); this entry tolerates the raw-SQL Decimal-vs-Decimal \
-                difference only, against either backend.",
+                but neither DuckDB, Spark, nor Trino match smelt's raw-SQL precision/scale for \
+                ROUND or IFNULL/COALESCE decimal widening, and Trino's own multiplication growth \
+                differs from smelt's too. On raw SQL the four disagree on Decimal precision/scale \
+                across ROUND, IFNULL, and nested arithmetic. Exact decimal correctness is \
+                verified by the cast-wrap conformance oracle (type_conformance_tests.rs); this \
+                entry tolerates the raw-SQL Decimal-vs-Decimal difference only, against any \
+                backend.",
             // Wildcard: matches any smelt Decimal.
             smelt_type: ANY_DECIMAL,
             // Wildcard: matches any DuckDB Decimal.
@@ -376,6 +454,12 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             // smelt's; ROUND and IFNULL both diverge on raw SQL against Spark too.
             spark_type: Some(ANY_DECIMAL),
             bigquery_type: None,
+            // Wildcard: matches any Trino Decimal. verified: 2026-09-14 (live
+            // `20260913-trino-emission` phase 9 sweep at PROPTEST_CASES=512)
+            // `CAST(99.99 AS DECIMAL(10,2)) * CAST(99.99 AS DECIMAL(10,2))` →
+            // Trino DECIMAL(20,4) (smelt (21,4) — Trino's multiplication
+            // growth formula is p1+p2, not smelt's Spark-aligned p1+p2+1).
+            trino_type: Some(ANY_DECIMAL),
             status: DivergenceStatus::BackendSpecific,
         },
         // verified: 2026-07-20 `SELECT ROUND(CAST(1 AS INT))` — Spark's
@@ -396,6 +480,7 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             duckdb_type: Some(DataType::Integer),
             spark_type: Some(DataType::Integer),
             bigquery_type: None,
+            trino_type: None,
             status: DivergenceStatus::KnownBug,
         },
         // verified: 2026-07-20 `SELECT CAST('2024-01-01' AS DATE) + INTERVAL
@@ -413,6 +498,7 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             duckdb_type: None,
             spark_type: Some(DataType::Date),
             bigquery_type: None,
+            trino_type: None,
             status: DivergenceStatus::BackendSpecific,
         },
         // verified: 2026-07-20 `SELECT COALESCE(CAST(1 AS FLOAT), CAST(2 AS
@@ -428,6 +514,7 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             duckdb_type: None,
             spark_type: Some(DataType::Double),
             bigquery_type: None,
+            trino_type: None,
             status: DivergenceStatus::BackendSpecific,
         },
         // verified: 2026-08-24 (dialect_audit sweep, live Spark 4.0.0)
@@ -448,6 +535,7 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
                 with_timezone: false,
             }),
             bigquery_type: None,
+            trino_type: None,
             status: DivergenceStatus::BackendSpecific,
         },
         // verified: 2026-07-20 `SELECT ROW_NUMBER() OVER (ORDER BY x) FROM
@@ -461,6 +549,48 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             duckdb_type: None,
             spark_type: Some(DataType::Integer),
             bigquery_type: None,
+            trino_type: None,
+            status: DivergenceStatus::BackendSpecific,
+        },
+        // verified: 2026-09-14 (live `20260913-trino-emission` phase 9 sweep
+        // at PROPTEST_CASES=512) `REGR_SLOPE(dec, dec) FILTER (WHERE bool)` —
+        // Trino's query output schema reports `real` (Arrow Float32, mapped
+        // to smelt's Float) for the REGR_* regression aggregate family;
+        // smelt's registry gives them all a fixed Double signature, matching
+        // DuckDB and Spark.
+        TypeDivergence {
+            id: "regr_family_trino_real",
+            description: "REGR_SLOPE/REGR_INTERCEPT/etc — smelt infers Double (registry-fixed, \
+                matches DuckDB and Spark), Trino's query output schema reports REAL for these \
+                regression aggregate functions.",
+            smelt_type: DataType::Double,
+            duckdb_type: None,
+            spark_type: None,
+            bigquery_type: None,
+            trino_type: Some(DataType::Float),
+            status: DivergenceStatus::BackendSpecific,
+        },
+        // verified: 2026-09-14 (live `dialect_audit` Trino schema/value legs,
+        // `20260913-trino-emission` phase 9). Trino's `REPEAT(element, count)`
+        // builds an array by repeating a *scalar* of any type; DuckDB's
+        // `repeat(string, count)` repeats a *string*. Different function
+        // under the same name, not a type-width difference: `REPEAT('a', 3)`
+        // returns `array(varchar)` on Trino (`['a','a','a']`) versus `'aaa'`
+        // everywhere else. Registered here (Type leg) rather than as a value
+        // divergence, since the schema itself already disagrees before any
+        // value is compared.
+        TypeDivergence {
+            id: "repeat_trino_returns_array",
+            description: "REPEAT(x, n) — smelt infers Text (matches DuckDB/Spark, which repeat \
+                the string), Trino's REPEAT instead builds an array by repeating the scalar \
+                argument n times.",
+            smelt_type: DataType::Text,
+            duckdb_type: None,
+            spark_type: None,
+            bigquery_type: None,
+            trino_type: Some(DataType::Array(Box::new(DataType::Varchar {
+                max_length: None,
+            }))),
             status: DivergenceStatus::BackendSpecific,
         },
         // BigQuery's query output schema (the only surface the BigQuery oracle
@@ -493,6 +623,7 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
                 precision: 0,
                 scale: 0,
             }),
+            trino_type: None,
             status: DivergenceStatus::BackendSpecific,
         },
         // verified: 2026-08-17 `SELECT [CAST('2024-01-01 12:00:00' AS TIMESTAMP)]`
@@ -529,6 +660,7 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             bigquery_type: Some(DataType::Timestamp {
                 with_timezone: true,
             }),
+            trino_type: None,
             status: DivergenceStatus::BackendSpecific,
         },
         // verified: 2026-08-17 — the single divergence class a 512-case sweep
@@ -560,6 +692,7 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             duckdb_type: None,
             spark_type: None,
             bigquery_type: Some(DataType::BigInt),
+            trino_type: None,
             status: DivergenceStatus::BackendSpecific,
         },
     ]
@@ -585,6 +718,7 @@ pub fn find_divergence<'a>(
                 "duckdb" => d.duckdb_type.as_ref(),
                 "spark" => d.spark_type.as_ref(),
                 "bigquery" => d.bigquery_type.as_ref(),
+                "trino" => d.trino_type.as_ref(),
                 _ => None,
             };
             expected.is_some_and(|t| types_match(t, actual))
@@ -994,5 +1128,43 @@ mod tests {
         );
         assert!(found.is_some());
         assert_eq!(found.unwrap().id, "bigquery_decimal_width_unreported");
+    }
+
+    #[test]
+    fn finds_trino_divergence() {
+        // Synthetic single-entry registry: no real Trino divergence has been
+        // measured yet (that happens once the live sweep runs), but the
+        // "trino" arm itself must resolve an entry whose trino_type matches,
+        // exactly like the other three backend arms already do.
+        let divs = vec![TypeDivergence {
+            id: "synthetic_trino_entry",
+            description: "test fixture",
+            smelt_type: DataType::Double,
+            duckdb_type: None,
+            spark_type: None,
+            bigquery_type: None,
+            trino_type: Some(DataType::Integer),
+            status: DivergenceStatus::BackendSpecific,
+        }];
+        let found = find_divergence(&DataType::Double, &DataType::Integer, "trino", &divs);
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().id, "synthetic_trino_entry");
+    }
+
+    #[test]
+    fn unknown_backend_key_still_matches_nothing() {
+        // A bogus backend name must resolve to the `_ => None` arm, not
+        // accidentally fall through to some other backend's field.
+        let divs = known_divergences();
+        let found = find_divergence(
+            &DataType::BigInt,
+            &DataType::Decimal {
+                precision: 38,
+                scale: 0,
+            },
+            "not_a_real_backend",
+            &divs,
+        );
+        assert!(found.is_none());
     }
 }

@@ -61,7 +61,7 @@ the exact reverse.
 | `APPROX_COUNT_DISTINCT` | call | native | native | agg:native; win:restructure:WindowToCte; run:unsupported (gap #179) | rename:APPROX_DISTINCT |
 | `ARG_MAX` | call | native | rename:MAX_BY | agg:rename:MAX_BY; win:restructure:WindowToCte; run:unsupported (gap #179) | rename:MAX_BY |
 | `ARG_MIN` | call | native | rename:MIN_BY | agg:rename:MIN_BY; win:restructure:WindowToCte; run:unsupported (gap #179) | rename:MIN_BY |
-| `ARRAY_AGG` | call | native | native (gap divergent) | native (gap divergent) | native (gap #209) |
+| `ARRAY_AGG` | call | native | native (gap divergent) | native (gap divergent) | native |
 | `ASIN` | call | native | native | native | native |
 | `ATAN` | call | native | native | native | native |
 | `ATAN2` | call | native | native | native | native |
@@ -87,7 +87,7 @@ the exact reverse.
 | `COVAR_SAMP` | call | native | native | native | native |
 | `CUME_DIST` | call | native | native | native | native |
 | `CURRENT_DATE` | call | native | native | native | native |
-| `CURRENT_TIMESTAMP` | call | native | native | native | native (gap #209) |
+| `CURRENT_TIMESTAMP` | call | native | native | native | native |
 | `DATE` | call | native | native | native | native |
 | `DATE_ADD` | call | native | template:CAST({0} + {1} AS TIMESTAMP) | native (gap #176, divergent) | native (gap #209) |
 | `DATE_PART` | call | native | native | native (gap #179) | native (gap #209) |
@@ -117,7 +117,7 @@ the exact reverse.
 | `JSON_ARRAY` | call | native | unsupported | native | native (gap #209) |
 | `JSON_ARRAY_LENGTH` | call | native | native (gap divergent) | native (gap #179) | native (gap divergent) |
 | `JSON_CONTAINS` | call | native | unsupported | native (gap #179) | native (gap #209) |
-| `JSON_EXTRACT` | call | native | rename:GET_JSON_OBJECT | native | native (gap #209) |
+| `JSON_EXTRACT` | call | native | rename:GET_JSON_OBJECT | native | native |
 | `JSON_EXTRACT_TEXT` | call | rename:JSON_EXTRACT_STRING | rename:GET_JSON_OBJECT | rename:JSON_VALUE | native (gap #209) |
 | `JSON_OBJECT` | call | native | unsupported | native | native (gap #209) |
 | `JSON_OBJECT_KEYS` | call | rename:JSON_KEYS | native (gap divergent) | native (gap #179) | native (gap #209) |
@@ -148,7 +148,7 @@ the exact reverse.
 | `MOD` | call | native | native | native | native |
 | `MODE` | call | native | native | native (gap #179) | native (gap #209) |
 | `MONTH` | call | native | native | native (gap #179) | native |
-| `NOW` | call | native | native | rename:CURRENT_TIMESTAMP | native (gap #209) |
+| `NOW` | call | native | native | rename:CURRENT_TIMESTAMP | native |
 | `NTH_VALUE` | call | native | native | native | native |
 | `NTILE` | call | native | native | native | native |
 | `NULLIF` | call | native | native | native | native |
@@ -165,7 +165,7 @@ the exact reverse.
 | `RANDOM` | call | native | native | rename:RAND | native |
 | `RANK` | call | native | native | native | native |
 | `REGR_SLOPE` | call | native | native (gap divergent) | native (gap #179) | native (gap divergent) |
-| `REPEAT` | call | native | native | native | native (gap #209) |
+| `REPEAT` | call | native | native | native | native (gap divergent) |
 | `REPLACE` | call | native | native | native | native |
 | `REVERSE` | call | native | native | native | native |
 | `RIGHT` | call | native | native | native | native (gap #209) |

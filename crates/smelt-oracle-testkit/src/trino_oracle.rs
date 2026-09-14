@@ -6,10 +6,11 @@
 //! it goes through `TrinoClient::execute_json`, which hands back Trino's own
 //! JSON cells undecoded, and `cell_from_trino_json` maps each one against its
 //! own declared raw type. This is deliberately not built on
-//! `arrow_convert::trino_type_to_arrow` — that converter has no array/
-//! varbinary/interval arm, and a decode error there would masquerade as the
-//! engine rejecting the probe, the exact confusion the schema leg was
-//! designed to avoid.
+//! `arrow_convert::trino_type_to_arrow` — that converter still has no
+//! varbinary/UUID/IPADDRESS arm (array/row/interval were added by the
+//! `20260913-trino-emission` phase 9 live sweep), and a decode error there
+//! would masquerade as the engine rejecting the probe, the exact confusion
+//! the schema leg was designed to avoid.
 
 use crate::arrow_mapping::arrow_to_smelt;
 use crate::duckdb_oracle::TypeOracle;
@@ -67,8 +68,9 @@ impl TrinoOracle {
     /// fixture executes and yields the right row count, so it decodes
     /// whatever columns `sql` selects via the ordinary `TrinoClient::execute`
     /// path (`arrow_convert`, not `cell_from_trino_json`). Callers must avoid
-    /// selecting a type `trino_type_to_arrow` doesn't yet recognise (arrays,
-    /// VARBINARY, INTERVAL).
+    /// selecting a type `trino_type_to_arrow` doesn't yet recognise (e.g.
+    /// VARBINARY, UUID, IPADDRESS — see that function's `match` for the
+    /// current mapped set).
     pub fn row_count(&self, sql: &str) -> Result<usize, String> {
         let runtime = self.runtime.lock().map_err(|e| format!("lock: {e}"))?;
         let batches = runtime
@@ -76,6 +78,24 @@ impl TrinoOracle {
             .map_err(|e| e.to_string())?;
         Ok(batches.iter().map(|b| b.num_rows()).sum())
     }
+}
+
+/// Map one `(name, raw_type)` column pair from Trino's schema metadata into
+/// smelt's `DataType`, via the Arrow mapping.
+///
+/// Deliberately does not surface `trino_type_to_arrow`'s error via
+/// `e.to_string()`: that error is a `BackendError::execution_failed("trino",
+/// ...)`, whose `Display` reads "Execution failed for 'trino': ...", the
+/// exact prefix `classify_oracle_error`'s `TRINO_REFUSALS` treats as "the
+/// coordinator rejected this SQL". But the coordinator already accepted and
+/// executed the query by the time this runs — an unmappable declared type is
+/// smelt's own Arrow-mapping gap, not a query refusal, so it must reach the
+/// classifier under a message shape that isn't in that allow-list and
+/// therefore falls through to `Fatal` (see `error_class.rs`).
+fn map_column_type(name: String, raw_type: &str) -> Result<(String, DataType), String> {
+    let arrow_ty = trino_type_to_arrow(raw_type)
+        .map_err(|_| format!("trino oracle cannot map declared column type: {raw_type}"))?;
+    Ok((name, arrow_to_smelt(&arrow_ty)))
 }
 
 impl TypeOracle for TrinoOracle {
@@ -87,10 +107,7 @@ impl TypeOracle for TrinoOracle {
 
         columns
             .into_iter()
-            .map(|(name, raw_type)| {
-                let arrow_ty = trino_type_to_arrow(&raw_type).map_err(|e| e.to_string())?;
-                Ok((name, arrow_to_smelt(&arrow_ty)))
-            })
+            .map(|(name, raw_type)| map_column_type(name, &raw_type))
             .collect()
     }
 }
@@ -206,7 +223,12 @@ fn format_trino_array(raw_type: &str, value: &serde_json::Value) -> String {
 /// element inside `format_trino_array` — not a general `Cell` formatter.
 fn cell_display(cell: &Cell) -> String {
     match cell {
-        Cell::Null => "NULL".to_string(),
+        // Empty, not the literal word "NULL": matches the reference engines'
+        // (DuckDB's, Spark's) own array-of-NULL rendering, which leaves a
+        // NULL element blank between commas (e.g. `[, 60, 70, 80]`) — found
+        // by the live `dialect_audit` Trino value leg on `ARRAY_AGG` over a
+        // NULL-bearing group.
+        Cell::Null => String::new(),
         Cell::Int(n) => n.to_string(),
         Cell::Float(f) => f.to_string(),
         Cell::Bool(b) => b.to_string(),
@@ -303,6 +325,20 @@ mod tests {
             cell_from_trino_json("array(integer)", &json!([1, 2, 3])),
             Cell::Text("[1, 2, 3]".to_string())
         );
+    }
+
+    /// Offline. `trino_type_to_arrow` rejects `uuid` (no Arrow arm — Trino's
+    /// UUID type is outside the mapped set), so `query_types`'s
+    /// `map_column_type` must surface it as the distinct "cannot map
+    /// declared column type" message, not as `BackendError::execution_failed`'s
+    /// "Execution failed for 'trino': ..." shape — that shape is exactly what
+    /// `classify_oracle_error`'s `TRINO_REFUSALS` allow-list treats as a
+    /// refusal, which would silently swallow smelt's own mapping gap.
+    #[test]
+    fn unmappable_declared_type_is_not_a_refusal() {
+        let err = map_column_type("a".to_string(), "uuid").expect_err("uuid has no Arrow arm");
+        assert!(!err.contains("Execution failed for 'trino':"));
+        assert!(err.starts_with("trino oracle cannot map declared column type:"));
     }
 
     /// Live leg. Skips green when no Trino tier is exported.

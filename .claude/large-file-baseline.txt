@@ -8,6 +8,13 @@
 # smaller files are left unconstrained (see BASELINE_MIN_LINES in the script).
 # Regenerate with: .claude/scripts/large-file-check.sh --update
 #
+# 2026-09-14 (docs/outcomes/20260913-trino-emission phase 9, sign-off: Andrew
+# Browne): type_property_tests.rs 1744 -> 1910 and divergences.rs newly
+# crossing the 1000-line floor at 1170, adding the Trino leg (oracle,
+# coverage floor, sweep arm, six deterministic smoke-test arms) and its
+# divergence registry entries in the same shape as the existing DuckDB/Spark/
+# BigQuery legs — not a new abstraction, so grown in place rather than split.
+#
 crates/smelt-backend-duckdb/src/lib.rs 1902
 crates/smelt-cli/src/commands/explain.rs 1197
 crates/smelt-cli/src/explain.rs 2599
@@ -53,8 +60,9 @@ crates/smelt-db/src/type_inference/record.rs 1137
 crates/smelt-db/src/type_inference/tests.rs 7305
 crates/smelt-db/tests/integration/tableexpr_body_check.rs 1107
 crates/smelt-db/tests/nullability_property_tests.rs 1684
+crates/smelt-db/tests/prop_helpers/divergences.rs 1170
 crates/smelt-db/tests/prop_helpers/generators.rs 3194
-crates/smelt-db/tests/type_property_tests.rs 1744
+crates/smelt-db/tests/type_property_tests.rs 1910
 crates/smelt-logical/src/analysis/diff_stories.rs 1698
 crates/smelt-logical/src/analysis/diff/tests.rs 1338
 crates/smelt-logical/src/analysis/monotonicity.rs 1877
@@ -97,7 +105,7 @@ crates/smelt-parser/src/parser/select.rs 1455
 crates/smelt-parser/src/parser/smelt_ext.rs 1798
 crates/smelt-parser/src/parser/tests.rs 10461
 crates/smelt-parser/src/parser/types.rs 1086
-crates/smelt-runtime/src/compile.rs 4306
+crates/smelt-runtime/src/compile.rs 4273
 crates/smelt-runtime/src/cumulative.rs 2178
 crates/smelt-runtime/src/execute/project/mod.rs 5064
 crates/smelt-runtime/src/meta_eval.rs 2180

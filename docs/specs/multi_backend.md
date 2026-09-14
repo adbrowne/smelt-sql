@@ -244,6 +244,12 @@ unset outside this job (a developer running the suite locally with no Docker tie
 `trino-integration` job the tier is always up, so a skip there is a bug, not an expected local
 fallback.
 
+The type-property oracle's Trino leg (§"Output-schema type conformance") runs on the same tier as
+Trino's other live legs: per-PR on Trino-relevant path changes, else labeled PR + nightly. Its
+environment gate is `SMELT_TRINO_URL`: unset, the leg is simply **absent** from the suite (as the
+Spark and BigQuery legs are when their own gates are unset) — a distinct state from a reachable
+tier whose probes are skipped, which the same never-skip-green rule above forbids.
+
 ### Inline row-set construction
 Every production path that splices a small literal row set into generated SQL — an ephemeral
 seed's CTE, a repair's affected-key list, an append-only baseline probe's recorded partitions, a
@@ -912,6 +918,18 @@ suite is the executable list):
   `refresh: materialized_view` currently always errors; native IVM would be a Databricks-only
   capability (Enzyme).
 
+The type-property oracle (`cargo test -p smelt-db --test type_property_tests`) is the mechanism
+that keeps this section's claims honest against live engines: it compares smelt's inferred type
+for each generated expression against **four** live oracles — DuckDB (always), Spark, BigQuery,
+and Trino (via `/v1/statement` schema metadata) — whichever of the latter three have their
+environment gate set. A tolerated difference is a registered `divergences.rs` entry keyed per
+backend (`duckdb_type`/`spark_type`/`bigquery_type`/`trino_type`), and an inferred `Unknown` is a
+registered `known_unknowns.rs` entry; the string-family `Text`/`Varchar` leniency is the only
+blanket rule, applied uniformly across all four backends. A Trino column type smelt's Arrow
+mapping (`trino_type_to_arrow`) cannot decode is **fatal** to the leg, never a skipped case: the
+coordinator accepted and executed the query, so an undecodable result is smelt's own mapping gap,
+not the engine's rejection of the SQL.
+
 ### Incremental-view-maintenance capabilities
 Two flags describe a backend's participation in maintaining a keyed refresh mode's state.
 
@@ -1555,7 +1573,8 @@ resolves nested widening to a table rewrite.
 - **Tests**: `crates/smelt-cli/tests/multi_engine_test.rs`,
   `crates/smelt-backend-spark/tests/load_table.rs`, `crates/smelt-backend-spark/src/tests.rs`,
   `crates/smelt-db/tests/prop_helpers/spark_oracle.rs`,
-  `crates/smelt-db/tests/type_property_tests.rs` (Spark oracle).
+  `crates/smelt-oracle-testkit/src/trino_oracle.rs`,
+  `crates/smelt-db/tests/type_property_tests.rs` (four oracles: DuckDB, Spark, BigQuery, Trino).
 - **User docs**: `docs-site/docs/` backend / targets pages.
 - **Plans (history)**: `docs/plans/20260328-multi-engine-example.md`,
   `docs/plans/20260628-spark-parity.md`,

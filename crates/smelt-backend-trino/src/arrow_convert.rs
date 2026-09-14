@@ -10,7 +10,7 @@ use arrow::array::{
     Int64Array, Int64Builder, RecordBatch, StringArray, StringBuilder, TimestampMicrosecondArray,
     TimestampMicrosecondBuilder,
 };
-use arrow::datatypes::{DataType, Field, Schema, TimeUnit};
+use arrow::datatypes::{DataType, Field, IntervalUnit, Schema, TimeUnit};
 use chrono::{DateTime, Datelike, NaiveDate, NaiveDateTime};
 use smelt_backend::BackendError;
 
@@ -32,15 +32,76 @@ pub fn trino_type_to_arrow(type_str: &str) -> Result<DataType, BackendError> {
         _ => (type_str, None),
     };
 
+    // `INTERVAL DAY TO SECOND` / `INTERVAL YEAR TO MONTH` are spelled as a
+    // multi-word, space-separated, uppercase signature with no parens — not
+    // the `name` or `name(args)` shape every other base type here takes — so
+    // they're matched by prefix before the `base` switch below, which would
+    // otherwise see the whole multi-word string as one unrecognised `base`.
+    if base.to_ascii_uppercase().starts_with("INTERVAL") {
+        return Ok(DataType::Interval(IntervalUnit::MonthDayNano));
+    }
+
+    // `timestamp(3) with time zone` / `time(3) with time zone` — a trailing
+    // `with time zone` suffix *after* the precision parens, which the
+    // `find('(')`/`ends_with(')')` split above doesn't recognise (the string
+    // doesn't end in `)`), so `base` above still holds the whole signature
+    // including the suffix. Matched by substring before the `base` switch,
+    // same reasoning as the `INTERVAL` prefix check above — found by the
+    // live `dialect_audit` Trino schema leg probing `CURRENT_TIMESTAMP`/`NOW`.
+    let lower = type_str.to_ascii_lowercase();
+    if lower.contains("with time zone") {
+        if lower.starts_with("timestamp") {
+            return Ok(DataType::Timestamp(
+                TimeUnit::Microsecond,
+                Some("UTC".into()),
+            ));
+        }
+        if lower.starts_with("time") {
+            return Ok(DataType::Time64(TimeUnit::Microsecond));
+        }
+    }
+
     match base {
         "boolean" => Ok(DataType::Boolean),
         "integer" => Ok(DataType::Int32),
         "bigint" => Ok(DataType::Int64),
         "real" => Ok(DataType::Float32),
         "double" => Ok(DataType::Float64),
-        "varchar" | "char" => Ok(DataType::Utf8),
+        // Trino's native JSON type carries no further Arrow representation
+        // of its own; mapped to Utf8, matching how DuckDB's own JSON type
+        // is read back through Arrow (see `duckdb_oracle.rs`'s
+        // `json_type_check`) — both surface the serialized text.
+        "varchar" | "char" | "json" => Ok(DataType::Utf8),
         "date" => Ok(DataType::Date32),
+        "time" => Ok(DataType::Time64(TimeUnit::Microsecond)),
         "timestamp" => Ok(DataType::Timestamp(TimeUnit::Microsecond, None)),
+        "array" => {
+            let args = args.ok_or_else(|| {
+                BackendError::execution_failed(
+                    "trino",
+                    format!("array type signature missing element type: {type_str}"),
+                )
+            })?;
+            let elem_ty = trino_type_to_arrow(args)?;
+            Ok(DataType::List(Arc::new(Field::new("item", elem_ty, true))))
+        }
+        "row" => {
+            let args = args.ok_or_else(|| {
+                BackendError::execution_failed(
+                    "trino",
+                    format!("row type signature missing fields: {type_str}"),
+                )
+            })?;
+            let fields = split_top_level_commas(args)
+                .into_iter()
+                .map(|field_str| {
+                    let (name, ty) = split_field_name_and_type(field_str.trim());
+                    let arrow_ty = trino_type_to_arrow(ty)?;
+                    Ok(Field::new(name.unwrap_or(""), arrow_ty, true))
+                })
+                .collect::<Result<Vec<_>, BackendError>>()?;
+            Ok(DataType::Struct(fields.into()))
+        }
         "decimal" => {
             let args = args.ok_or_else(|| {
                 BackendError::execution_failed(
@@ -74,6 +135,48 @@ pub fn trino_type_to_arrow(type_str: &str) -> Result<DataType, BackendError> {
             format!("unrecognised Trino type signature: {type_str}"),
         )),
     }
+}
+
+/// Split `s` on top-level `,` — one not nested inside a `(...)` — so a
+/// `row(...)`/`array(...)` type signature's own inner commas (from a nested
+/// row or decimal argument list) don't get mistaken for a field separator.
+fn split_top_level_commas(s: &str) -> Vec<&str> {
+    let mut depth = 0i32;
+    let mut start = 0;
+    let mut parts = Vec::new();
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ',' if depth == 0 => {
+                parts.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&s[start..]);
+    parts
+}
+
+/// Split one `row(...)` field entry into an optional field name and its type
+/// signature. Trino spells a named row field as `name type` (space-separated
+/// at top level, e.g. `"a integer"`, `"b row(c boolean)"`); an anonymous row
+/// constructor's inferred signature has no name, just the bare type (e.g.
+/// `"boolean"`). The split point is the first top-level space — one not
+/// nested inside a `(...)`, so `"b row(c boolean)"` splits on the space
+/// before `row`, not the one inside it.
+fn split_field_name_and_type(s: &str) -> (Option<&str>, &str) {
+    let mut depth = 0i32;
+    for (i, c) in s.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => depth -= 1,
+            ' ' if depth == 0 => return (Some(&s[..i]), s[i + 1..].trim()),
+            _ => {}
+        }
+    }
+    (None, s)
 }
 
 /// Map an Arrow `DataType` to the Trino DDL type `load_table` creates the
@@ -454,6 +557,132 @@ mod tests {
         assert_eq!(
             trino_type_to_arrow("timestamp(6)").unwrap(),
             DataType::Timestamp(TimeUnit::Microsecond, None)
+        );
+    }
+
+    /// `TIME` isn't in `load_table`'s write-direction seed type set (no
+    /// `arrow_type_to_trino_type` arm), but the type-property oracle's
+    /// schema leg (`TrinoOracle::query_types`) reads it back from a live
+    /// `CAST(x AS TIME)` column — found by the `20260913-trino-emission`
+    /// phase 9 live sweep, which surfaced it as an unmapped signature before
+    /// this arm existed.
+    /// `JSON` isn't in the write-direction seed type set either; found the
+    /// same way `time`/`row`/`array` were, by the phase 9 live sweep hitting
+    /// `JSON_EXTRACT(...)`.
+    /// `INTERVAL DAY TO SECOND` / `INTERVAL YEAR TO MONTH` are Trino's
+    /// multi-word, no-parens type signatures for `DATE`/`TIMESTAMP`
+    /// arithmetic — found by the phase 9 live sweep on `ts - ts`.
+    #[test]
+    fn maps_interval_type() {
+        assert_eq!(
+            trino_type_to_arrow("INTERVAL DAY TO SECOND").unwrap(),
+            DataType::Interval(IntervalUnit::MonthDayNano)
+        );
+        assert_eq!(
+            trino_type_to_arrow("INTERVAL YEAR TO MONTH").unwrap(),
+            DataType::Interval(IntervalUnit::MonthDayNano)
+        );
+    }
+
+    /// `timestamp(3) with time zone` — Trino's zone-aware timestamp
+    /// signature, returned by `CURRENT_TIMESTAMP`/`NOW`. Found by the live
+    /// `dialect_audit` Trino schema leg.
+    #[test]
+    fn maps_timestamp_with_time_zone_type() {
+        assert_eq!(
+            trino_type_to_arrow("timestamp(3) with time zone").unwrap(),
+            DataType::Timestamp(TimeUnit::Microsecond, Some("UTC".into()))
+        );
+    }
+
+    #[test]
+    fn maps_json_type() {
+        assert_eq!(trino_type_to_arrow("json").unwrap(), DataType::Utf8);
+    }
+
+    #[test]
+    fn maps_time_type() {
+        assert_eq!(
+            trino_type_to_arrow("time(3)").unwrap(),
+            DataType::Time64(TimeUnit::Microsecond)
+        );
+        assert_eq!(
+            trino_type_to_arrow("time").unwrap(),
+            DataType::Time64(TimeUnit::Microsecond)
+        );
+    }
+
+    /// `ARRAY`/`ROW` aren't in `load_table`'s write-direction seed type set
+    /// either, but the type-property oracle's schema leg reads them back
+    /// from a live `ARRAY[...]`/`ROW(...)` column — found by the
+    /// `20260913-trino-emission` phase 9 live sweep the same way `time` was.
+    #[test]
+    fn maps_array_type() {
+        assert_eq!(
+            trino_type_to_arrow("array(integer)").unwrap(),
+            DataType::List(Arc::new(Field::new("item", DataType::Int32, true)))
+        );
+    }
+
+    #[test]
+    fn maps_row_type_unnamed_fields() {
+        // An anonymous ROW(...) constructor's inferred signature has no
+        // field names — captured verbatim from the live sweep.
+        assert_eq!(
+            trino_type_to_arrow("row(boolean, integer)").unwrap(),
+            DataType::Struct(
+                vec![
+                    Field::new("", DataType::Boolean, true),
+                    Field::new("", DataType::Int32, true),
+                ]
+                .into()
+            )
+        );
+    }
+
+    #[test]
+    fn maps_row_type_named_fields() {
+        assert_eq!(
+            trino_type_to_arrow("row(a integer, b varchar)").unwrap(),
+            DataType::Struct(
+                vec![
+                    Field::new("a", DataType::Int32, true),
+                    Field::new("b", DataType::Utf8, true),
+                ]
+                .into()
+            )
+        );
+    }
+
+    #[test]
+    fn maps_nested_row_and_array_types() {
+        assert_eq!(
+            trino_type_to_arrow("row(a integer, b array(boolean))").unwrap(),
+            DataType::Struct(
+                vec![
+                    Field::new("a", DataType::Int32, true),
+                    Field::new(
+                        "b",
+                        DataType::List(Arc::new(Field::new("item", DataType::Boolean, true))),
+                        true
+                    ),
+                ]
+                .into()
+            )
+        );
+        assert_eq!(
+            trino_type_to_arrow("array(row(x bigint, y decimal(10,2)))").unwrap(),
+            DataType::List(Arc::new(Field::new(
+                "item",
+                DataType::Struct(
+                    vec![
+                        Field::new("x", DataType::Int64, true),
+                        Field::new("y", DataType::Decimal128(10, 2), true),
+                    ]
+                    .into()
+                ),
+                true
+            )))
         );
     }
 

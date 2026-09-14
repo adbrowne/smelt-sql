@@ -131,7 +131,7 @@ including its null-safe join spelling.
 | 6 | The value direction — the leg that catches a spelling that survives but changes meaning — plus the two-sided Trino `ledger.rs` rows and the `.claude/dialect-gaps-baseline.txt` Trino metric with its tracking issue; phase 2's coverage census reaches zero here and the file is deleted, not grandfathered | done |
 | 7 | `Restructure`/`Rewrite` on a fourth dialect: position-opposite lowering planned from the source CST, null-safe synthesised join in Trino's spelling, and the running-frame refusal — each asserted against live output | done |
 | 8 | Seams: `dialect_seam` Trino refusal coverage (incl. inside function bodies), `emission_ownership` still green with no printer Trino branch, `projection_dialect_invariance` widened to four dialects byte-identically | done |
-| 9 | The type-oracle question: land the Trino leg with its divergence registry and `Unknown` census, or record an explicit deferral decision with a tracking issue — never silence | planned |
+| 9 | The type-oracle question: land the Trino leg with its divergence registry and `Unknown` census, or record an explicit deferral decision with a tracking issue — never silence | done |
 | 10 | Close: regenerate `dialect-coverage.md` with the Trino column, doc-sync gate green, `verify-phase.sh` green, §Known Divergences rewritten to drop T1's implicit-`Native` divergence now that the gate closes it | pending |
 
 ## Decision log
@@ -381,5 +381,20 @@ including its null-safe join spelling.
   Phase 9 gives it a distinct, non-allow-listed message so it stays `Fatal`. As with phases 5–7
   there is no offline fallback: an unreachable coordinator is `<<PHASE_BLOCKED>>`, never a
   verdict stated without a probe.
+
+- **2026-09-14 — phase 9 implemented.** Every `Fatal` the live sweep raised was a genuine
+  `trino_type_to_arrow` mapping gap (`time`, `array(...)`, `row(...)`, `INTERVAL ... TO ...`,
+  `json`, `timestamp(n)/time(n) with time zone`), so each was fixed in
+  `arrow_convert.rs` rather than registered as an unmapped-but-tolerated case — Fatal exists to
+  force exactly this, not to become a second gap ledger. Fixing the array/json/timestamp-tz
+  mapping had a second-order effect the plan didn't anticipate: it made `dialect_audit`'s own
+  Trino schema leg's `ARRAY_AGG`/`CURRENT_TIMESTAMP`/`JSON_EXTRACT`/`NOW` gap rows stale (they
+  were registered *because* those types didn't decode), so phase 9 also removed those four rows
+  and reclassified `REPEAT` from a schema gap to a real type divergence + value divergence
+  (Trino's `REPEAT` builds an array; DuckDB's repeats a string — a different function, not a
+  decode gap), tightening `.claude/dialect-gaps-baseline.txt` 55 → 50. This was necessary to
+  keep `dialect_audit` green per the plan's own verification step ("proves the oracle change
+  didn't disturb the schema/value legs") — it did disturb them, positively, and the ratchet
+  required following through rather than reverting the mapping fix.
 
 ## Blocked
