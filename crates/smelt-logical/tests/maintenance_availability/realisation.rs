@@ -69,8 +69,8 @@ const ALL_STRUCTURES: [StateStructure; 5] = [
 /// transaction, so a ledger write and its data write cannot be made atomic
 /// (`docs/specs/state.md` §"Which dialects realise which structure"). Trino
 /// (querying Iceberg) shares that same per-table-commit atomicity, so it has
-/// no emitters either (2026-09-13 ruling; `20260913-trino-ledger` revisits,
-/// not a deferral here).
+/// no emitters either — settled by measuring the live coordinator, not
+/// inherited (`docs/outcomes/20260913-trino-ledger/phases/01-summary.md`).
 fn has_emitters(dialect: SqlDialect, structure: StateStructure) -> bool {
     match dialect {
         SqlDialect::DuckDB => true,

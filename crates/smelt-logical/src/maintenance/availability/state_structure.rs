@@ -56,8 +56,8 @@ use crate::maintenance::{KeyDiscovery, PlanCell, Technique};
 /// never-fold-twice refusal has no sound Delta realisation — an honest
 /// permanent absence, not a deferral. Iceberg (queried through Trino in the
 /// `trino` target) shares Delta's per-table-commit atomicity, so the same
-/// permanent absence applies (2026-09-13 ruling; `20260913-trino-ledger`
-/// revisits, not a deferral here).
+/// permanent absence applies — settled by measuring the live coordinator, not
+/// inherited (`docs/outcomes/20260913-trino-ledger/phases/01-summary.md`).
 pub fn realisable_state_structures(dialect: SqlDialect) -> Vec<StateStructure> {
     match dialect {
         SqlDialect::DuckDB => vec![

@@ -108,18 +108,27 @@ A structure is **realisable** on a dialect when that dialect has emitters for it
 backend seam to run them through. Realisability is per-dialect data, not a property of the
 structure:
 
-| Structure | DuckDB | BigQuery | Spark (Delta) |
-|---|---|---|---|
-| Transactional merge ledger | yes | yes | **no** |
-| Reconciliation ledger (frontier record) | yes | yes | **no** |
-| Observed output deltas | yes | yes | **no** |
-| Fingerprint sidecar | yes | not yet | **no** |
-| Tombstone ledger (succession grain) | yes | yes | **no** |
+| Structure | DuckDB | BigQuery | Spark (Delta) | Trino (Iceberg) |
+|---|---|---|---|---|
+| Transactional merge ledger | yes | yes | **no** | **no** |
+| Reconciliation ledger (frontier record) | yes | yes | **no** | **no** |
+| Observed output deltas | yes | yes | **no** | **no** |
+| Fingerprint sidecar | yes | not yet | **no** | **no** |
+| Tombstone ledger (succession grain) | yes | yes | **no** | **no** |
 
-"not yet" is pending work; "**no**" is a permanent, reasoned absence. Spark's is the
-latter: Delta provides per-table atomicity and no cross-table transaction, so a ledger
-write and its data write cannot be made atomic, and the additive fold's never-fold-twice
-refusal has no sound realisation there.
+"not yet" is pending work; "**no**" is a permanent, reasoned absence. Spark's and Trino's
+are both the latter, for the same shape of reason: Delta provides per-table atomicity and
+no cross-table transaction, so a ledger write and its data write cannot be made atomic, and
+the additive fold's never-fold-twice refusal has no sound realisation there. Trino's Iceberg
+connector shares that per-table-commit shape and, measured directly against a live
+coordinator, is narrower still: every write — DML or DDL, same-table or cross-table — is
+refused inside an explicit `START TRANSACTION`, with the connector answering verbatim
+`Catalog only supports writes using autocommit: iceberg`
+(`docs/outcomes/20260913-trino-ledger/phases/01-summary.md`).
+`START TRANSACTION`/`COMMIT`/`ROLLBACK` parse and can wrap read-only statements, but no
+write ever commits inside one, so a ledger write and its data write can never land
+together. This is permanent, not "not yet": no capability probe on this connector can flip
+it.
 
 Four facts of BigQuery's **ledger** realisation are load-bearing rather than incidental:
 
@@ -320,6 +329,11 @@ never changes what any maintained table equals, only what it costs to maintain.
 |---|---|
 | `MaintenanceStateDowngraded` | Advisory, plan derivation: a cell's derived technique requires a state structure with no available realisation on the target backend, and the cell was downgraded to its recompute-family equivalent. Names the cell, the original technique, the missing structure, and the reason (§"The degradation contract"). Printed by `smelt explain`; surfaced as a warning-level diagnostic, never an error. |
 | `DeclaredContractRequiresState` | Validation, fail-loud: a declared contract point whose semantics require a state structure (e.g. `contract.deferral`'s ledger-measured lag) is declared in a project whose posture, backend, or `state.warehouse_tables: none` opt-out cannot supply it. Names the declaration and the missing structure. |
+
+On a backend that realises no correctness structure (Spark, Trino), `MaintenanceStateDowngraded`
+is the *normal* outcome for every dependent cell; `DeclaredContractRequiresState` is reserved for
+the declarations whose semantics are themselves a statement about state (e.g.
+`contract.deferral`'s ledger-measured lag).
 
 `smelt explain <model>` prints every downgraded cell with both the executed technique and the
 technique that *would* run were the missing structure available — the downgrade is a visible

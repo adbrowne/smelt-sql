@@ -151,7 +151,7 @@ land near or above Delta's.
 | # | Phase | Status |
 |---|-------|--------|
 | 1 | Confirm the posture: `scripts/trino-probe-state.sh` runs the cross-table `START TRANSACTION` candidates (including a failing second statement) against the live tier and prints Trino's answers verbatim; escalate in the decision log if genuine cross-table atomicity is found, since that would change this outcome | done |
-| 2 | Spec delta: `state.md`'s realisability table gains a Trino column reading `no` five times with Spark's reason stated as permanent, `multi_backend.md` §"Incremental & schema evolution per backend" states it for the target, and the diagnostics the degradation needs are named | planned |
+| 2 | Spec delta: `state.md`'s realisability table gains a Trino column reading `no` five times with Spark's reason stated as permanent, `multi_backend.md` §"Incremental & schema evolution per backend" states it for the target, and the diagnostics the degradation needs are named | done |
 | 3 | Schema-evolution DDL: `ddl_trino/` as a module directory with the measured `SchemaOperation` → Trino/Iceberg mapping table in its header, type spellings derived from what the server accepted, and T1's five schema-related capability cells confirmed or corrected back into the spec table | pending |
 | 4 | Wire the absence: Trino claims no correctness structure, availability resolution downgrades every dependent cell to its recompute equivalent with `MaintenanceStateDowngraded`, derived once by the pure resolver with the ideal plan still materialised | pending |
 | 5 | The two invariants as standing tests: no execution path on Trino reaches a builder for an unclaimed structure (claim ⇒ builder), and no absence produces a refusal where the contract specifies a downgrade (absence ⇒ downgrade) | pending |
@@ -162,6 +162,32 @@ land near or above Delta's.
 | 10 | Surface and close: `smelt explain` rendering Trino's downgrades (text + `--json`), diagnostics catalogue and `examples/broken/` fixtures, `docs-site/` state page updated with what Trino costs and why, `verify-phase.sh` green with no baseline bumped | pending |
 
 ## Decision log
+
+- **2026-09-14 — phase 2 result: spec text lands; one pre-existing gate needed the same tokens
+  kept.** `state.md`'s realisability table gained the `Trino (Iceberg)` column (five `**no**`
+  cells) plus a paragraph citing the measured autocommit refusal
+  (`phases/01-summary.md`) and stating the absence as permanent. `multi_backend.md` gained a
+  Trino paragraph under §"Incremental & schema evolution per backend" and the §"Parity contract"
+  sentence describing Trino maintenance as "not yet reachable" was corrected to the
+  permanent-absence-plus-downgrade framing. One wrinkle: `crates/smelt-cli/tests/
+  trino_emission_spec_freshness.rs::parity_contract_states_trino_scope` (pre-existing, from
+  `20260913-trino-emission`) asserts §"Parity contract" still contains the literal tokens
+  `maintenance_dialect` and `SqlDialect::Trino` — the first reword dropped both and went red, so
+  the corrected paragraph keeps both tokens while adding the permanence/downgrade language and a
+  forward pointer to phase 4's fix. `docs/specs/state.md` §Diagnostics also gained one sentence
+  naming which of the two existing diagnostic codes applies on a no-structure backend (Spark,
+  Trino) — no new diagnostic code. New gate: `crates/smelt-logical/tests/
+  state_realisability_docs.rs`, parsing both spec tables against `realisable_state_structures`
+  and the corrected prose so the two cannot drift again. Doc comments in `state_structure.rs` and
+  the `realisation.rs` test's `has_emitters` table, which both said `20260913-trino-ledger`
+  "revisits" the absence, were reworded to record it as settled by measurement — no behaviour
+  change. `cargo test -p smelt-logical --test state_realisability_docs`,
+  `--test maintenance_availability`, `cargo test -p smelt-core --test trino_docs_freshness`,
+  `cargo test -p smelt-cli --test trino_emission_spec_freshness`, and
+  `bash .claude/scripts/verify-phase.sh` are all green; no baseline file touched.
+  **For phase 4:** `maintenance_dialect` still returns `Err` for `SqlDialect::Trino` — the spec
+  now describes the downgrade it should perform instead, so phase 4's job is to make the code
+  match, not to decide the shape.
 
 - **2026-09-14 — phase 2 planning: no reshape; one observation handed to phase 4.** The spec
   delta is text plus a new drift gate, so nothing moves in or out of the phase table. Recorded for

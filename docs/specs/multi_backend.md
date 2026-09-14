@@ -168,12 +168,15 @@ beyond what the generic Spark Connect adapter exercises is excluded (see §Known
 Trino is a fourth target for the surface parity legs covers today: full-refresh table and view
 materializations and ephemeral (CTE-inlined) models, plus expression- and clause-level emission
 correctness (§"Operator lowering", §"Clause-level dialect refusals", §"Cross-engine emission
-audit"). It does not yet cover the maintenance legs — `maintenance_dialect` returns `Err` for
-`SqlDialect::Trino`, so no `batched`/`keyed`/`versioned` incremental family runs on a `trino`
-target, and a full refresh is the only route. The reason is the Iceberg connector's per-table-commit
-shape: Iceberg has no cross-table transaction, so the maintenance techniques that depend on one
-are not yet reachable on this target (`docs/outcomes/20260913-trino-target-spine` ruling,
-2026-09-13).
+audit"). Trino realises none of the five correctness structures §"Incremental & schema evolution
+per backend" names, for the connector's per-table-commit reason stated there — permanently, not
+pending work (`docs/outcomes/20260913-trino-ledger`). Every `batched`/`keyed`/`versioned`
+maintenance technique that would otherwise depend on one of those structures downgrades to its
+recompute-family equivalent, a full refresh, carrying `MaintenanceStateDowngraded`.
+`maintenance_dialect` currently returns `Err` for `SqlDialect::Trino` rather than performing
+that downgrade — a refusal the degradation contract does not sanction — and is being corrected
+to route through the same availability resolver every other backend uses
+(`docs/outcomes/20260913-trino-ledger`, phase 4).
 
 **Generative equivalence coverage.** The equivalence invariant
 (`incremental_models.md` §"The equivalence invariant") is verified generatively — not just by
@@ -1144,6 +1147,15 @@ This spec only requires that the resolved strategy and migration plan are expres
 target backend's physical SQL via the lowering rules above — e.g. a backend without native
 `INSERT OVERWRITE` resolves to `DeleteInsert`; a backend without `ALTER COLUMN … USING`
 resolves nested widening to a table rewrite.
+
+The `trino` target realises none of the five correctness structures `state.md`'s table
+(§"Which dialects realise which structure") tracks — the Iceberg connector accepts writes only
+in autocommit, so a ledger write and its data write can never commit together. Every cell that
+would otherwise depend on one of those structures takes the degradation contract's
+recompute-family downgrade instead, carrying `MaintenanceStateDowngraded`; it is never refused.
+Schema evolution is a separate axis: Iceberg supports it directly, and its measured
+`SchemaOperation` mapping lands in `ddl_trino`
+(`docs/outcomes/20260913-trino-ledger/outcome.md`).
 
 ## Design
 
