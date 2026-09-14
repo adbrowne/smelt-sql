@@ -25,6 +25,6 @@ pub use bigquery_oracle::{BigQueryOracle, BqField};
 pub use duckdb_oracle::{DuckDbOracle, TypeOracle};
 pub use error_class::{classify_oracle_error, OracleErrorKind};
 pub use spark_oracle::SparkOracle;
-pub use trino_oracle::TrinoOracle;
+pub use trino_oracle::{cell_from_trino_json, TrinoOracle};
 pub use type_comparison::{compare_types, TypeMatch};
 pub use value::{compare_cells, Cell, ValueMatch, ValueOracle};

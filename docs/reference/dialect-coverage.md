@@ -79,7 +79,7 @@ the exact reverse.
 | `CHAR_LENGTH` | call | native | native | native | native (gap #209) |
 | `COALESCE` | call | native | native | native | native (gap #209) |
 | `CONCAT` | call | native | native (gap divergent) | native (gap divergent) | native (gap #209) |
-| `CORR` | call | native | native (gap divergent) | native (gap divergent) | native |
+| `CORR` | call | native | native (gap divergent) | native (gap divergent) | native (gap divergent) |
 | `COS` | call | native | native | native | native |
 | `COSH` | call | native | native | native | native |
 | `COUNT` | call | native | native | native | native |
@@ -92,7 +92,7 @@ the exact reverse.
 | `DATE_ADD` | call | native | template:CAST({0} + {1} AS TIMESTAMP) | native (gap #176, divergent) | native (gap #209) |
 | `DATE_PART` | call | native | native | native (gap #179) | native (gap #209) |
 | `DATE_SUB` | call | template:{0} - {1} | template:CAST({0} - {1} AS TIMESTAMP) | native (gap #176) | native (gap #209) |
-| `DATE_TRUNC` | call | native | native | native (gap #179) | native |
+| `DATE_TRUNC` | call | native | native | native (gap #179) | native (gap divergent) |
 | `DAY` | call | native | native | native (gap #179) | native |
 | `DAYOFWEEK` | call | native | template:DAYOFWEEK({0}) - 1 | native (gap #179) | native (gap #209) |
 | `DENSE_RANK` | call | native | native | native | native |
@@ -106,7 +106,7 @@ the exact reverse.
 | `FIRST_VALUE` | call | native | native | native | native |
 | `FLOOR` | call | native | native | native | native |
 | `GLOB` | infix | native | unsupported | native (gap #179) | native (gap #209) |
-| `GREATEST` | call | native | native | native (gap divergent) | native |
+| `GREATEST` | call | native | native | native (gap divergent) | native (gap divergent) |
 | `GROUP_CONCAT` | call | native | unsupported | rename:STRING_AGG | native (gap #209) |
 | `IFNULL` | call | native | native | native | native (gap #209) |
 | `ILIKE` | infix | native | native | native (gap #179) | native (gap #209) |
@@ -114,8 +114,8 @@ the exact reverse.
 | `INITCAP` | call | unsupported | native | native | native (gap #209) |
 | `IS_NOT_NULL` | postfix | native | native | native | native |
 | `IS_NULL` | postfix | native | native | native | native |
-| `JSON_ARRAY` | call | native | unsupported | native | native |
-| `JSON_ARRAY_LENGTH` | call | native | native (gap divergent) | native (gap #179) | native |
+| `JSON_ARRAY` | call | native | unsupported | native | native (gap #209) |
+| `JSON_ARRAY_LENGTH` | call | native | native (gap divergent) | native (gap #179) | native (gap divergent) |
 | `JSON_CONTAINS` | call | native | unsupported | native (gap #179) | native (gap #209) |
 | `JSON_EXTRACT` | call | native | rename:GET_JSON_OBJECT | native | native (gap #209) |
 | `JSON_EXTRACT_TEXT` | call | rename:JSON_EXTRACT_STRING | rename:GET_JSON_OBJECT | rename:JSON_VALUE | native (gap #209) |
@@ -125,7 +125,7 @@ the exact reverse.
 | `LAST` | call | native (gap #175) | native (gap #175) | native (gap #179) | native (gap #209) |
 | `LAST_VALUE` | call | native | native | native | native |
 | `LEAD` | call | native | rewrite:ElideWindowFrame | native | native |
-| `LEAST` | call | native | native | native (gap divergent) | native |
+| `LEAST` | call | native | native | native (gap divergent) | native (gap divergent) |
 | `LEFT` | call | native | native | native | native (gap #209) |
 | `LENGTH` | call | native | native | native | native |
 | `LIKE` | infix | native | native | native | native |
@@ -164,7 +164,7 @@ the exact reverse.
 | `QUOTE_LITERAL` | call | unsupported | unsupported | native (gap #179) | native (gap #209) |
 | `RANDOM` | call | native | native | rename:RAND | native |
 | `RANK` | call | native | native | native | native |
-| `REGR_SLOPE` | call | native | native (gap divergent) | native (gap #179) | native |
+| `REGR_SLOPE` | call | native | native (gap divergent) | native (gap #179) | native (gap divergent) |
 | `REPEAT` | call | native | native | native | native (gap #209) |
 | `REPLACE` | call | native | native | native | native |
 | `REVERSE` | call | native | native | native | native |
@@ -176,7 +176,7 @@ the exact reverse.
 | `SIGN` | call | native | native | native (gap #179) | native (gap #209) |
 | `SIN` | call | native | native | native | native |
 | `SINH` | call | native | native | native | native |
-| `SPLIT_PART` | call | native | native | native (gap #179) | native |
+| `SPLIT_PART` | call | native | native | native (gap #179) | native (gap divergent) |
 | `SQRT` | call | native | native | native | native |
 | `STDDEV` | call | native | native | native | native |
 | `STDDEV_POP` | call | native | native | native | native |
@@ -227,7 +227,7 @@ confirmed differs per dialect:
 | DuckDB | schema + value | every PR (in-process, no warehouse) |
 | Spark SQL | schema + value | nightly, or a PR labelled `run-docker-tests` |
 | BigQuery | schema + value | manual sweep only — `scripts/bigquery-dialect-audit.sh`; the value leg executes rather than dry-runs, so it bills |
-| Trino | schema only | every PR, or a PR labelled `run-docker-tests` — the value leg (`20260913-trino-emission` phase 6) is not live yet |
+| Trino | schema + value | every PR, or a PR labelled `run-docker-tests` |
 
 An untested `native` is reported as *unverified*, never as *passing*: the value leg
 exists to test the claim, and a default-passing assumption would recreate exactly the

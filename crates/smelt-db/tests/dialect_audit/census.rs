@@ -1,5 +1,5 @@
-//! The Trino emission coverage census — `docs/outcomes/20260913-trino-emission`
-//! phase 2.
+//! The emission coverage classifier — `docs/outcomes/20260913-trino-emission`
+//! phases 2 and 6.
 //!
 //! Refines the three-way `passing`/`gap`/`unverified` vocabulary
 //! `docs/specs/multi_backend.md` §"Cross-engine emission audit" states:
@@ -8,35 +8,39 @@
 //! live schema leg and a live value leg — see `BOTH_LEGS_LIVE` below).
 //! [`Coverage::Unverified`] is the hole the implicit-`Native` default opens:
 //! no explicit verdict, and no both-legs-live audit to have observed the
-//! default correct. Every `Unverified` pair for [`DialectId::Trino`] must be named,
-//! line for line, in the shrink-only census at
-//! `.claude/trino-emission-census.txt` — a pair absent from that file fails
-//! immediately, and a recorded pair that has since gained a verdict or an
-//! audit leg is a stale-census failure.
-
-use std::collections::HashSet;
-use std::path::PathBuf;
+//! default correct. `no_dialect_has_unverified_pairs` is the standing gate:
+//! every dialect this audit covers now has both legs live, so no pair may
+//! classify `Unverified`. A dialect introduced before both its legs are
+//! built may record its outstanding `Unverified` pairs in a shrink-only
+//! census file while the gap is closed (`docs/specs/multi_backend.md`
+//! §"Cross-engine emission audit") — Trino's own census
+//! (`.claude/trino-emission-census.txt`) served that role through phases 3-5
+//! and was deleted here once phase 6's value leg drove its count to zero.
 
 use smelt_types::signatures::{Position, Signature};
-use smelt_types::DialectId;
+use smelt_types::{BuiltinRegistry, DialectId};
 
 use crate::ledger::{LedgerRow, Verdict};
-use crate::report::{applicable_positions, position_label};
-use crate::AUDITED_DIALECTS;
+use crate::report::applicable_positions;
 
 /// Dialects with **both** the schema and value legs live — the narrower set
 /// `classify` consults for `Coverage::Verified`, distinct from
 /// [`crate::AUDITED_DIALECTS`] (which drives the offline totality gates: the
 /// fixture gate and the print-for-every-dialect gate). A dialect can join
 /// `AUDITED_DIALECTS` with only a schema leg — as Trino did in
-/// `20260913-trino-emission` phase 5 — without every one of its 232 census
-/// rows silently flipping to `Verified` on the strength of that leg alone.
-/// Trino joins this set once phase 6 lands its value leg.
-const BOTH_LEGS_LIVE: &[DialectId] = &[DialectId::DuckDb, DialectId::SparkSql, DialectId::BigQuery];
+/// `20260913-trino-emission` phase 5 — without every one of its unstated
+/// pairs silently flipping to `Verified` on the strength of that leg alone.
+/// Trino joined this set in phase 6, once its value leg landed.
+const BOTH_LEGS_LIVE: &[DialectId] = &[
+    DialectId::DuckDb,
+    DialectId::SparkSql,
+    DialectId::BigQuery,
+    DialectId::Trino,
+];
 
 /// The four-way refinement of `passing`/`gap`/`unverified`
-/// (`docs/specs/multi_backend.md` §"Cross-engine emission audit") the census
-/// classifies each `(dialect, entry, position)` pair into.
+/// (`docs/specs/multi_backend.md` §"Cross-engine emission audit") a pair
+/// classifies into.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Coverage {
     /// An explicit `(dialect, position)` verdict exists in the registry.
@@ -50,9 +54,9 @@ pub enum Coverage {
     /// registry states `Native` for, that a sweep found does not actually
     /// work, is a finding, not a pass.
     Gap,
-    /// No explicit verdict, no ledger row, and the dialect carries no audit
-    /// leg to back the implicit `Native` default. The hole this census
-    /// exists to enumerate.
+    /// No explicit verdict, no ledger row, and the dialect carries no
+    /// both-legs-live audit to back the implicit `Native` default. The hole
+    /// this classification exists to enumerate.
     Unverified,
 }
 
@@ -74,12 +78,17 @@ fn has_ledger_row(
     })
 }
 
-/// Classify one `(dialect, entry, position)` pair.
+/// Classify one `(dialect, entry, position)` pair. `both_legs_live` is the
+/// dialect set consulted for `Coverage::Verified` — an explicit parameter
+/// (rather than always reading the real `BOTH_LEGS_LIVE`) so a test can prove
+/// a dialect absent from it still classifies `Unverified` without needing a
+/// real dialect that has not yet reached both legs.
 pub fn classify(
     dialect: DialectId,
     sig: &Signature,
     position: Position,
     ledger: &[LedgerRow],
+    both_legs_live: &[DialectId],
 ) -> Coverage {
     if has_ledger_row(ledger, &sig.name, dialect, position) {
         return Coverage::Gap;
@@ -87,116 +96,11 @@ pub fn classify(
     if sig.stated_emission_at(dialect, position).is_some() {
         return Coverage::Stated;
     }
-    if BOTH_LEGS_LIVE.contains(&dialect) {
+    if both_legs_live.contains(&dialect) {
         Coverage::Verified
     } else {
         Coverage::Unverified
     }
-}
-
-/// One `Unverified` pair, named.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct CensusRow {
-    pub name: String,
-    pub position: Position,
-}
-
-impl CensusRow {
-    /// The census file's line format: `<NAME> <position>`.
-    pub fn key(&self) -> String {
-        format!("{} {}", self.name, position_label(self.position))
-    }
-}
-
-/// Every `Unverified` pair for `dialect`, over `entries` — positions come
-/// from `report::applicable_positions`, the same axis the coverage table
-/// renders, so this maintains no position axis of its own.
-pub fn census_for<'a>(
-    dialect: DialectId,
-    entries: impl Iterator<Item = &'a Signature>,
-    ledger: &[LedgerRow],
-) -> Vec<CensusRow> {
-    let mut rows = Vec::new();
-    for sig in entries {
-        for &position in applicable_positions(sig.kind) {
-            if classify(dialect, sig, position, ledger) == Coverage::Unverified {
-                rows.push(CensusRow {
-                    name: sig.name.clone(),
-                    position,
-                });
-            }
-        }
-    }
-    rows
-}
-
-const CENSUS_HEADER: &str = "\
-# Trino emission census — shrink-only, docs/outcomes/20260913-trino-emission
-# phase 2 (crates/smelt-db/tests/dialect_audit/census.rs).
-#
-# Every (entry, position) pair below carries no explicit DialectId::Trino
-# emission verdict and no Trino audit-leg observation — Coverage::Unverified,
-# docs/specs/multi_backend.md \u{00a7}\"Cross-engine emission audit\". This file
-# is two-sided, exactly like .claude/dialect-gaps-baseline.txt: a pair absent
-# from this file fails immediately (a newly-added built-in can never
-# silently acquire a Trino claim), and a row that has since gained a verdict
-# or an audit leg is a STALE CENSUS failure telling you to tighten it. Owned
-# by phases 3-6 of the outcome above, which drive the count to zero; the
-# file is DELETED, not grandfathered, once it reaches zero, and Unverified
-# reverts to a plain failure for Trino.
-#
-# Format: <NAME> <position>
-";
-
-fn census_path() -> PathBuf {
-    PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../.claude/trino-emission-census.txt")
-}
-
-fn read_census() -> Vec<String> {
-    let content = std::fs::read_to_string(census_path()).unwrap_or_default();
-    content
-        .lines()
-        .map(str::trim)
-        .filter(|l| !l.is_empty() && !l.starts_with('#'))
-        .map(str::to_string)
-        .collect()
-}
-
-fn write_census(keys: &[String]) {
-    let mut out = CENSUS_HEADER.to_string();
-    for k in keys {
-        out.push_str(k);
-        out.push('\n');
-    }
-    std::fs::write(census_path(), out).expect("write census file");
-}
-
-/// The two-sided diff between what the registry says is `Unverified` today
-/// (`actual`) and what the census file records (`recorded`): pairs in
-/// `actual` but not `recorded` are missing (a newly-unstated pair with no
-/// census row yet), pairs in `recorded` but not `actual` are stale (recorded
-/// as unverified but no longer is).
-fn diff(actual: &[String], recorded: &[String]) -> (Vec<String>, Vec<String>) {
-    let actual_set: HashSet<&str> = actual.iter().map(String::as_str).collect();
-    let recorded_set: HashSet<&str> = recorded.iter().map(String::as_str).collect();
-    let mut missing: Vec<String> = actual_set
-        .difference(&recorded_set)
-        .map(|s| s.to_string())
-        .collect();
-    let mut stale: Vec<String> = recorded_set
-        .difference(&actual_set)
-        .map(|s| s.to_string())
-        .collect();
-    missing.sort();
-    stale.sort();
-    (missing, stale)
-}
-
-fn sorted_keys(rows: &[CensusRow]) -> Vec<String> {
-    let mut keys: Vec<String> = rows.iter().map(CensusRow::key).collect();
-    keys.sort();
-    keys.dedup();
-    keys
 }
 
 // ─────────────────────────────────────────────────────────────────────────
@@ -207,7 +111,7 @@ fn sorted_keys(rows: &[CensusRow]) -> Vec<String> {
 mod tests {
     use super::*;
     use smelt_types::signatures::SigParam;
-    use smelt_types::{BuiltinRegistry, DataType, Emission, TypeConstraint, TypeExpr};
+    use smelt_types::{DataType, Emission, TypeConstraint, TypeExpr};
 
     fn test_signature(name: &str) -> Signature {
         Signature::new(
@@ -228,7 +132,13 @@ mod tests {
             Emission::Rename("SOME_TRINO_NAME"),
         )]);
         assert_eq!(
-            classify(DialectId::Trino, &sig, Position::Scalar, &[]),
+            classify(
+                DialectId::Trino,
+                &sig,
+                Position::Scalar,
+                &[],
+                BOTH_LEGS_LIVE
+            ),
             Coverage::Stated
         );
     }
@@ -237,14 +147,15 @@ mod tests {
     fn census_classifies_an_audited_dialect_as_verified() {
         let sig = test_signature("TEST_UNSTATED");
         assert_eq!(
-            classify(DialectId::DuckDb, &sig, Position::Scalar, &[]),
+            classify(
+                DialectId::DuckDb,
+                &sig,
+                Position::Scalar,
+                &[],
+                BOTH_LEGS_LIVE
+            ),
             Coverage::Verified,
-            "DuckDb is in AUDITED_DIALECTS"
-        );
-        assert_eq!(
-            classify(DialectId::Trino, &sig, Position::Scalar, &[]),
-            Coverage::Unverified,
-            "Trino has no audit leg yet"
+            "DuckDb has both legs live"
         );
     }
 
@@ -263,7 +174,13 @@ mod tests {
             },
         }];
         assert_eq!(
-            classify(DialectId::Trino, &sig, Position::Scalar, &ledger),
+            classify(
+                DialectId::Trino,
+                &sig,
+                Position::Scalar,
+                &ledger,
+                BOTH_LEGS_LIVE
+            ),
             Coverage::Gap
         );
         let divergent = [LedgerRow {
@@ -275,137 +192,81 @@ mod tests {
             verdict: Verdict::Divergent { reason: "test" },
         }];
         assert_eq!(
-            classify(DialectId::Trino, &sig, Position::Scalar, &divergent),
+            classify(
+                DialectId::Trino,
+                &sig,
+                Position::Scalar,
+                &divergent,
+                BOTH_LEGS_LIVE
+            ),
             Coverage::Gap
         );
     }
 
+    /// The red-proof self-test kept alive now every real dialect is
+    /// verified: `classify` takes the both-legs set as an explicit
+    /// parameter, so a synthetic set can still prove an unstated pair
+    /// classifies `Unverified` when its dialect is absent from it.
     #[test]
-    fn unverified_pairs_exist_only_for_dialects_without_both_legs() {
-        let entries: Vec<&Signature> = BuiltinRegistry::names()
-            .filter_map(BuiltinRegistry::resolve)
-            .collect();
-        for dialect in BOTH_LEGS_LIVE {
-            let rows = census_for(
-                *dialect,
-                entries.iter().copied(),
-                crate::ledger::dialect_divergences(),
-            );
-            assert!(
-                rows.is_empty(),
-                "{} has both legs live but has Unverified pairs: {:?}",
-                dialect.slug(),
-                sorted_keys(&rows)
-            );
-        }
-    }
-
-    /// The regression guard for the `Verified`-becomes-leg-aware flip: joining
-    /// `AUDITED_DIALECTS` with only a schema leg must not make a dialect's
-    /// unstated pairs read as `Verified`.
-    #[test]
-    fn a_schema_only_dialect_is_not_yet_verified() {
-        assert!(
-            AUDITED_DIALECTS.contains(&DialectId::Trino),
-            "Trino must be in AUDITED_DIALECTS (schema leg is live)"
-        );
-        assert!(
-            !BOTH_LEGS_LIVE.contains(&DialectId::Trino),
-            "Trino must not be in BOTH_LEGS_LIVE yet (no value leg until phase 6)"
-        );
+    fn classify_reports_unverified_without_both_legs() {
         let sig = test_signature("TEST_SCHEMA_ONLY_UNSTATED");
+        const SYNTHETIC_BOTH_LEGS_LIVE: &[DialectId] = &[DialectId::DuckDb];
         assert_eq!(
-            classify(DialectId::Trino, &sig, Position::Scalar, &[]),
+            classify(
+                DialectId::Trino,
+                &sig,
+                Position::Scalar,
+                &[],
+                SYNTHETIC_BOTH_LEGS_LIVE
+            ),
             Coverage::Unverified,
-            "a schema-only audit leg must not flip an unstated pair to Verified"
+            "a dialect absent from the both-legs-live set must not classify Verified"
+        );
+        assert_eq!(
+            classify(
+                DialectId::DuckDb,
+                &sig,
+                Position::Scalar,
+                &[],
+                SYNTHETIC_BOTH_LEGS_LIVE
+            ),
+            Coverage::Verified
         );
     }
 
+    /// The standing criterion-1 gate: every registry entry, at every
+    /// applicable position, for every audited dialect, classifies as
+    /// something other than `Unverified`. This is what a newly-added
+    /// built-in with no Trino (or any dialect's) verdict would fail —
+    /// the audit's own coverage-totality and two-sided ledger gates carry
+    /// the "cannot silently acquire a claim" property from here on, now
+    /// that every dialect has both legs live and there is no census to
+    /// fall back on.
     #[test]
-    fn the_trino_census_matches_the_registry_exactly() {
+    fn no_dialect_has_unverified_pairs() {
         let entries: Vec<&Signature> = BuiltinRegistry::names()
             .filter_map(BuiltinRegistry::resolve)
             .collect();
-        let actual = census_for(
-            DialectId::Trino,
-            entries.iter().copied(),
-            crate::ledger::dialect_divergences(),
-        );
-        let actual_keys = sorted_keys(&actual);
-
-        if std::env::var("SMELT_REGEN_TRINO_CENSUS").as_deref() == Ok("1") {
-            write_census(&actual_keys);
-            return;
+        let ledger = crate::ledger::dialect_divergences();
+        let mut unverified = Vec::new();
+        for dialect in crate::AUDITED_DIALECTS {
+            for sig in &entries {
+                for &position in applicable_positions(sig.kind) {
+                    if classify(*dialect, sig, position, ledger, BOTH_LEGS_LIVE)
+                        == Coverage::Unverified
+                    {
+                        unverified.push(format!("{} {} {:?}", dialect.slug(), sig.name, position));
+                    }
+                }
+            }
         }
-
-        let recorded = read_census();
-        let (missing, stale) = diff(&actual_keys, &recorded);
         assert!(
-            missing.is_empty(),
-            "{} Unverified Trino pair(s) are not named in \
-             .claude/trino-emission-census.txt. Regenerate with:\n  \
-             SMELT_REGEN_TRINO_CENSUS=1 cargo test -p smelt-db --test dialect_audit \
-             the_trino_census_matches_the_registry_exactly\n{}",
-            missing.len(),
-            missing.join("\n")
-        );
-        assert!(
-            stale.is_empty(),
-            "{} row(s) in .claude/trino-emission-census.txt no longer classify as \
-             Unverified — tighten the census. Regenerate with:\n  \
-             SMELT_REGEN_TRINO_CENSUS=1 cargo test -p smelt-db --test dialect_audit \
-             the_trino_census_matches_the_registry_exactly\n{}",
-            stale.len(),
-            stale.join("\n")
-        );
-    }
-
-    /// The red-proof self-test: a synthetic entry absent from the census must
-    /// be reported by name, mirroring
-    /// `hardening_budget::gate_detects_regression`.
-    #[test]
-    fn census_gate_detects_a_new_unstated_entry() {
-        let sig = test_signature("TEST_NEW_UNSTATED_ENTRY");
-        let rows = census_for(DialectId::Trino, std::iter::once(&sig), &[]);
-        let actual_keys = sorted_keys(&rows);
-        let recorded: Vec<String> = Vec::new();
-        let (missing, stale) = diff(&actual_keys, &recorded);
-        assert_eq!(missing, vec!["TEST_NEW_UNSTATED_ENTRY scalar".to_string()]);
-        assert!(stale.is_empty());
-    }
-
-    #[test]
-    fn every_census_row_names_a_real_registry_entry_and_position() {
-        let recorded = read_census();
-        for line in &recorded {
-            let (name, position) = line
-                .rsplit_once(' ')
-                .unwrap_or_else(|| panic!("malformed census line: {line}"));
-            let sig = BuiltinRegistry::resolve(name)
-                .unwrap_or_else(|| panic!("census names {name}, which the registry does not have"));
-            let valid_positions: Vec<&str> = applicable_positions(sig.kind)
-                .iter()
-                .map(|p| position_label(*p))
-                .collect();
-            assert!(
-                valid_positions.contains(&position),
-                "census names {name} at position {position}, which its ExprKind {:?} cannot \
-                 occupy (valid: {valid_positions:?})",
-                sig.kind
-            );
-        }
-    }
-
-    #[test]
-    fn the_census_header_states_the_shrink_only_rule() {
-        assert!(
-            CENSUS_HEADER.contains("shrink-only")
-                || CENSUS_HEADER.to_lowercase().contains("shrink only")
-        );
-        assert!(CENSUS_HEADER.contains("20260913-trino-emission"));
-        assert!(
-            CENSUS_HEADER.contains("STALE CENSUS")
-                || CENSUS_HEADER.to_lowercase().contains("stale")
+            unverified.is_empty(),
+            "{} Unverified pair(s) — a newly-added built-in with no verdict for one of \
+             AUDITED_DIALECTS. Give it an explicit Signature::emission verdict, or register a \
+             ledger row if a live sweep found a gap:\n{}",
+            unverified.len(),
+            unverified.join("\n")
         );
     }
 }

@@ -19,7 +19,6 @@ target/
 !.claude/hardening-baseline.txt
 !.claude/parser-gaps-baseline.txt
 !.claude/dialect-gaps-baseline.txt
-!.claude/trino-emission-census.txt
 !.claude/registry-migration-baseline.txt
 !.claude/large-file-baseline.txt
 !.claude/unknown-census.toml

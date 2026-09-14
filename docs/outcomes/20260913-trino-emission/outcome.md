@@ -128,7 +128,7 @@ including its null-safe join spelling.
 | 3 | Explicit verdicts for the operator and clause divergences (`^`, `//`, `::`, `[a,b]`, trailing commas, `QUALIFY`) with registry-construction validation, plus the `BackendCapabilities` flags they pair with | done |
 | 4 | The `PIVOT` decision: lower it to SQL Trino executes to the same rows, or refuse it at compile time with a diagnostic and a fixture — recorded either way | done |
 | 5 | The live `dialect_audit` Trino leg, schema direction: registry-derived probes executed against the coordinator, coverage totality enforced (no silent drop), `report.rs` rendering Trino | done |
-| 6 | The value direction — the leg that catches a spelling that survives but changes meaning — plus the two-sided Trino `ledger.rs` rows and the `.claude/dialect-gaps-baseline.txt` Trino metric with its tracking issue; phase 2's coverage census reaches zero here and the file is deleted, not grandfathered | planned |
+| 6 | The value direction — the leg that catches a spelling that survives but changes meaning — plus the two-sided Trino `ledger.rs` rows and the `.claude/dialect-gaps-baseline.txt` Trino metric with its tracking issue; phase 2's coverage census reaches zero here and the file is deleted, not grandfathered | done |
 | 7 | `Restructure`/`Rewrite` on a fourth dialect: position-opposite lowering planned from the source CST, null-safe synthesised join in Trino's spelling, and the running-frame refusal — each asserted against live output | pending |
 | 8 | Seams: `dialect_seam` Trino refusal coverage (incl. inside function bodies), `emission_ownership` still green with no printer Trino branch, `projection_dialect_invariance` widened to four dialects byte-identically | pending |
 | 9 | The type-oracle question: land the Trino leg with its divergence registry and `Unknown` census, or record an explicit deferral decision with a tracking issue — never silence | pending |
@@ -294,5 +294,15 @@ including its null-safe join spelling.
   `no_dialect_has_unverified_pairs` over `DialectId::ALL`, with the audit's own coverage-totality
   and two-sided ledger gates carrying the "a new built-in cannot silently acquire a Trino claim"
   claim from here on. The `.gitignore` whitelist line for the census file is deleted with it.
+
+- **2026-09-14 — phase 6 done.** `TrinoClient::execute_json` + `cell_from_trino_json` decode
+  Trino's raw JSON cells (including NaN/Infinity-as-string and nested `array(...)`) without
+  `arrow_convert`; `value_leg_trino` compares 125 probes against DuckDB. 8 findings: 7 permanent
+  `Divergent` rows (NULL-vs-NaN on degenerate `CORR`/`REGR_SLOPE` variance, `GREATEST`/`LEAST`
+  NULL propagation, `DATE_TRUNC` millisecond rendering, `JSON_ARRAY_LENGTH` strict-array
+  semantics, `SPLIT_PART` NULL-vs-empty-string) and 1 `Gap` (`JSON_ARRAY`'s missing `NULL ON NULL`
+  lowering, #209; `dialect_gaps_trino` 57 → 58). Trino joined `census::BOTH_LEGS_LIVE`; the
+  file-backed census and `.claude/trino-emission-census.txt` are deleted, replaced by the standing
+  `no_dialect_has_unverified_pairs` gate over `DialectId::ALL`. See `phases/06-summary.md`.
 
 ## Blocked

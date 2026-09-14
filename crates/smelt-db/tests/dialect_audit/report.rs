@@ -279,10 +279,7 @@ pub fn render() -> String {
         "| BigQuery | schema + value | manual sweep only — `scripts/bigquery-dialect-audit.sh`; \
          the value leg executes rather than dry-runs, so it bills |\n",
     );
-    out.push_str(
-        "| Trino | schema only | every PR, or a PR labelled `run-docker-tests` — the value \
-         leg (`20260913-trino-emission` phase 6) is not live yet |\n",
-    );
+    out.push_str("| Trino | schema + value | every PR, or a PR labelled `run-docker-tests` |\n");
     out.push_str(
         "\nAn untested `native` is reported as *unverified*, never as *passing*: the value leg\n\
          exists to test the claim, and a default-passing assumption would recreate exactly the\n\

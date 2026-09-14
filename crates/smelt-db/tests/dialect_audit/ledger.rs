@@ -645,6 +645,50 @@ static ROWS: &[LedgerRow] = &[
     type_gap("CEILING", DialectId::Trino, "#209", "`CEILING` of a BIGINT infers Double; Trino returns the argument's own integer type unchanged"),
     type_gap("SIGN", DialectId::Trino, "#209", "`SIGN` of a DOUBLE infers SmallInt; Trino returns DOUBLE, matching the argument's type family"),
     type_gap("TRUNCATE", DialectId::Trino, "#209", "`TRUNCATE` of a BIGINT infers BigInt; Trino returns `decimal(19,0)`"),
+    //
+    // Trino: `20260913-trino-emission` phase 6's live value leg. Bulk tracker
+    // #209, matching the schema leg above.
+    divergent(
+        "CORR",
+        DialectId::Trino,
+        "Trino returns NULL for a degenerate correlation (a running window with too little data to have variance) where DuckDB returns NaN.",
+    ),
+    divergent(
+        "REGR_SLOPE",
+        DialectId::Trino,
+        "Trino returns NULL for a degenerate regression (a running window with too little data to have variance) where DuckDB returns NaN.",
+    ),
+    divergent(
+        "DATE_TRUNC",
+        DialectId::Trino,
+        "Trino's TIMESTAMP renders with millisecond precision (`2026-01-01 00:00:00.000`); DuckDB's renders with none (`2026-01-01T00:00:00`). Same instant, different textual representation.",
+    ),
+    divergent(
+        "GREATEST",
+        DialectId::Trino,
+        "Trino's `greatest`/`least` return NULL if any argument is NULL; DuckDB's ignore NULLs and return the greatest/least of the rest. A NULL-propagation model difference, not a spelling one.",
+    ),
+    divergent(
+        "LEAST",
+        DialectId::Trino,
+        "Trino's `greatest`/`least` return NULL if any argument is NULL; DuckDB's ignore NULLs and return the greatest/least of the rest. A NULL-propagation model difference, not a spelling one.",
+    ),
+    divergent(
+        "JSON_ARRAY_LENGTH",
+        DialectId::Trino,
+        "Trino's `json_array_length` returns NULL when its argument decodes to a JSON value that is not an array; DuckDB's returns 0. Strictness, not a spelling difference.",
+    ),
+    divergent(
+        "SPLIT_PART",
+        DialectId::Trino,
+        "Trino's `split_part` returns NULL for an out-of-range part index; DuckDB's returns the empty string.",
+    ),
+    value_gap(
+        "JSON_ARRAY",
+        DialectId::Trino,
+        "#209",
+        "Trino's `JSON_ARRAY` omits a NULL argument by default (`ABSENT ON NULL`); DuckDB's `json_array` keeps it as a JSON null. Closable only by a variadic `NULL ON NULL` lowering, not yet built.",
+    ),
 ];
 
 #[cfg(test)]

@@ -43,10 +43,11 @@ use smelt_types::DialectId;
 /// `20260913-trino-target-spine`). This audit's fixtures, probes and gap
 /// baseline are a separate, narrower claim, driving the offline totality
 /// gates (the fixture gate and the print-for-every-dialect gate) — it does
-/// **not** mean a member has both legs live. Trino joined this list in
-/// `20260913-trino-emission` phase 5 with only its schema leg live; the
-/// `census` module's `Verified` classification consults a separate,
-/// narrower set for that reason (see `census::BOTH_LEGS_LIVE`).
+/// **not** mean a member has both legs live. A dialect can join this list
+/// with only its schema leg live, as Trino did in `20260913-trino-emission`
+/// phase 5 before phase 6 landed its value leg; `census`'s `Verified`
+/// classification consults a separate, narrower set for that reason (see
+/// `census::BOTH_LEGS_LIVE`).
 const AUDITED_DIALECTS: &[DialectId] = &[
     DialectId::DuckDb,
     DialectId::SparkSql,

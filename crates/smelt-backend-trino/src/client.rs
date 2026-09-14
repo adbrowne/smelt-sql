@@ -24,10 +24,16 @@ impl TrinoClient {
         }
     }
 
-    /// Submit `sql`, follow `nextUri` to completion, and decode every page
-    /// carrying `columns` + `data` into a `RecordBatch`. Returns as soon as
-    /// a page's `error` is set, or the last page (no `nextUri`) is reached.
-    pub async fn execute(&self, sql: &str) -> Result<Vec<RecordBatch>, BackendError> {
+    /// Submit `sql` and drive `on_page` over every page in order, following
+    /// `nextUri` to completion. Returns as soon as a page's `error` is set,
+    /// or the last page (no `nextUri`) is reached. Shared by `execute`,
+    /// `execute_schema` and `execute_json` so the paging loop has exactly
+    /// one implementation.
+    async fn follow_pages(
+        &self,
+        sql: &str,
+        mut on_page: impl FnMut(&QueryResults) -> Result<(), BackendError>,
+    ) -> Result<(), BackendError> {
         let url = format!(
             "{}/v1/statement",
             self.config.base_url.trim_end_matches('/')
@@ -36,13 +42,28 @@ impl TrinoClient {
             .send(self.http.post(&url).body(sql.to_string()))
             .await?;
 
-        let mut columns: Option<Vec<Column>> = None;
-        let mut batches = Vec::new();
-
         loop {
             if let Some(error) = &page.error {
                 return Err(map_trino_error(error));
             }
+            on_page(&page)?;
+            match page.next_uri.clone() {
+                Some(next_uri) => {
+                    page = self.send(self.http.get(&next_uri)).await?;
+                }
+                None => break,
+            }
+        }
+        Ok(())
+    }
+
+    /// Submit `sql`, follow `nextUri` to completion, and decode every page
+    /// carrying `columns` + `data` into a `RecordBatch`.
+    pub async fn execute(&self, sql: &str) -> Result<Vec<RecordBatch>, BackendError> {
+        let mut columns: Option<Vec<Column>> = None;
+        let mut batches = Vec::new();
+
+        self.follow_pages(sql, |page| {
             if let Some(cols) = &page.columns {
                 columns = Some(cols.clone());
             }
@@ -57,14 +78,9 @@ impl TrinoClient {
                     batches.push(rows_to_record_batch(cols, data)?);
                 }
             }
-
-            match page.next_uri.clone() {
-                Some(next_uri) => {
-                    page = self.send(self.http.get(&next_uri)).await?;
-                }
-                None => break,
-            }
-        }
+            Ok(())
+        })
+        .await?;
 
         Ok(batches)
     }
@@ -75,29 +91,14 @@ impl TrinoClient {
     /// and an array cell's decode gap must never masquerade as a rejected
     /// probe.
     pub async fn execute_schema(&self, sql: &str) -> Result<Vec<(String, String)>, BackendError> {
-        let url = format!(
-            "{}/v1/statement",
-            self.config.base_url.trim_end_matches('/')
-        );
-        let mut page = self
-            .send(self.http.post(&url).body(sql.to_string()))
-            .await?;
-
         let mut columns: Option<Vec<Column>> = None;
-        loop {
-            if let Some(error) = &page.error {
-                return Err(map_trino_error(error));
-            }
+        self.follow_pages(sql, |page| {
             if let Some(cols) = &page.columns {
                 columns = Some(cols.clone());
             }
-            match page.next_uri.clone() {
-                Some(next_uri) => {
-                    page = self.send(self.http.get(&next_uri)).await?;
-                }
-                None => break,
-            }
-        }
+            Ok(())
+        })
+        .await?;
 
         let columns = columns.ok_or_else(|| {
             BackendError::execution_failed(
@@ -106,6 +107,42 @@ impl TrinoClient {
             )
         })?;
         Ok(columns.into_iter().map(|c| (c.name, c.raw_type)).collect())
+    }
+
+    /// Submit `sql`, follow `nextUri` to completion, and return the reported
+    /// `(name, raw_type)` columns together with the **undecoded** JSON rows.
+    /// The value leg decodes each cell against its own declared type
+    /// (`cell_from_trino_json` in `smelt-oracle-testkit`), deliberately not
+    /// through `arrow_convert::trino_type_to_arrow`: that converter has no
+    /// array/varbinary/interval arm, and a decode error there would
+    /// masquerade as a rejected probe.
+    pub async fn execute_json(
+        &self,
+        sql: &str,
+    ) -> Result<(Vec<(String, String)>, Vec<Vec<serde_json::Value>>), BackendError> {
+        let mut columns: Option<Vec<Column>> = None;
+        let mut rows = Vec::new();
+        self.follow_pages(sql, |page| {
+            if let Some(cols) = &page.columns {
+                columns = Some(cols.clone());
+            }
+            if let Some(data) = &page.data {
+                rows.extend(data.iter().cloned());
+            }
+            Ok(())
+        })
+        .await?;
+
+        let columns = columns.ok_or_else(|| {
+            BackendError::execution_failed(
+                "trino",
+                format!("Trino returned no column metadata for: {sql}"),
+            )
+        })?;
+        Ok((
+            columns.into_iter().map(|c| (c.name, c.raw_type)).collect(),
+            rows,
+        ))
     }
 
     async fn send(&self, builder: reqwest::RequestBuilder) -> Result<QueryResults, BackendError> {
@@ -140,5 +177,50 @@ impl TrinoClient {
         response.json::<QueryResults>().await.map_err(|e| {
             BackendError::execution_failed("trino", format!("malformed Trino response: {e}"))
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn client_from_env() -> Option<TrinoClient> {
+        let base_url = std::env::var("SMELT_TRINO_URL").ok()?;
+        let user = std::env::var("SMELT_TRINO_USER").unwrap_or_else(|_| "smelt".to_string());
+        let catalog =
+            std::env::var("SMELT_TRINO_CATALOG").unwrap_or_else(|_| "iceberg".to_string());
+        let schema =
+            std::env::var("SMELT_TRINO_SCHEMA").unwrap_or_else(|_| "smelt_dev".to_string());
+        Some(TrinoClient::new(TrinoClientConfig {
+            base_url,
+            user,
+            catalog,
+            schema,
+            password: None,
+        }))
+    }
+
+    /// Live leg. Skips green when no Trino tier is exported. Proves
+    /// `execute_json` pages to completion (like `execute`/`execute_schema`)
+    /// while handing back undecoded JSON cells rather than Arrow-decoded
+    /// ones — the shape the value-leg oracle needs for a type `arrow_convert`
+    /// cannot decode (e.g. `array(...)`).
+    #[tokio::test]
+    async fn execute_json_returns_columns_and_raw_rows() {
+        let Some(client) = client_from_env() else {
+            eprintln!("SMELT_TRINO_URL unset — skipping execute_json_returns_columns_and_raw_rows");
+            return;
+        };
+        let (columns, rows) = client
+            .execute_json("SELECT CAST(1 AS BIGINT) AS a, CAST('x' AS VARCHAR) AS b")
+            .await
+            .expect("execute_json");
+        assert_eq!(columns.len(), 2);
+        assert_eq!(columns[0].0, "a");
+        assert_eq!(columns[1].0, "b");
+        assert_eq!(rows.len(), 1);
+        assert_eq!(rows[0].len(), 2);
+        assert_eq!(rows[0][0], serde_json::json!(1));
+        assert_eq!(rows[0][1], serde_json::json!("x"));
     }
 }
