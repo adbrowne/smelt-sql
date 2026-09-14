@@ -23,6 +23,18 @@
 //! statement-emission single-owner path, just invoked directly instead of
 //! through the CLI's window-string parsing and cell-derivation layers,
 //! which is exactly what the three gaps below live in.
+//!
+//! Gap 2 was landed in phase 3a (`docs/outcomes/20260913-trino-incremental/
+//! phases/03a-plan.md`) — `integer_axis_incremental_model_runs_on_trino`
+//! below is the real CLI-level proof, replacing what was a documentation-only
+//! anchor function. Gaps 1 and 3 are still open.
+
+mod common;
+use common::{drop_trino_schema, fetch_trino_rows, trino_env, trino_schema, trino_target_block};
+
+use std::fs;
+use std::path::Path;
+use std::process::Command;
 
 /// Gap 1 — the calendar-literal type-coercion gap.
 ///
@@ -43,33 +55,134 @@
 #[allow(dead_code)]
 fn gap_1_calendar_literal_type_coercion() {}
 
-/// Gap 2 — bare-integer run-window bounds are only axis-resolved on the
-/// dry-run path.
-///
-/// `smelt run --event-time-start/--event-time-end` with bare-integer
-/// bounds (the integer partition axis) is meant to sidestep gap 1 — no
-/// per-dialect literal typing needed for a bare integer. It does, on the
-/// `--dry-run` path (`execute/window.rs::parse_run_window_in_axis`,
-/// resolving each selected model's own axis correctly: the emitted
-/// `DELETE`/`INSERT` region text carries a bare, unquoted integer literal,
-/// confirmed by direct inspection). The **real** (non-dry-run) execution
-/// path does not: `execute/window.rs::parse_run_window` returns `(None,
-/// None)` for a bare-integer pair (by design — it only serves the
-/// calendar-only consumers of the global `start_date`/`end_date`), and the
-/// `(None, None)` branch of `execute/project/mod.rs`'s dispatch match
-/// builds the model's `TimeRange` with a hardcoded calendar axis rather
-/// than re-resolving the model's own axis the way `parse_run_window_in_
-/// axis` does for `build_model_plans`. The result: a genuine integer-axis
-/// model's real run injects `batch_id >= '1' AND batch_id < '2'` — a
-/// quoted string against an `INTEGER` column — which DuckDB accepts
-/// (implicit cast) and Trino refuses (`Cannot apply operator: integer <=
-/// varchar(1)`, measured live). This is a real execution bug, not a Trino
-/// gap; DuckDB's leniency has been masking it. `crates/smelt-cli/tests/
-/// partition_residue_probes.rs::probe_integer_partition_column_run`
-/// exercises the identical shape today only against DuckDB, so it has
-/// never caught this.
-#[allow(dead_code)]
-fn gap_2_real_run_does_not_reresolve_integer_axis() {}
+fn stage_int_partition_project(tmp: &tempfile::TempDir, schema: &str) -> std::path::PathBuf {
+    let root = tmp.path().join("int_partition_trino");
+    fs::create_dir_all(root.join("models")).unwrap();
+
+    let yml = format!(
+        "name: int_partition_trino\nversion: 1\npaths:\n  - models\ntargets:\n{}default_materialization: table\n",
+        trino_target_block(schema)
+    );
+    fs::write(root.join("smelt.yml"), yml).unwrap();
+
+    fs::write(
+        root.join("models/seed_events.sql"),
+        "---\n\
+         materialization: table\n\
+         ---\n\
+         SELECT * FROM (VALUES\n\
+         \x20  (CAST(1 AS BIGINT), CAST(1 AS BIGINT), TIMESTAMP '2026-01-01 00:00:00'),\n\
+         \x20  (CAST(2 AS BIGINT), CAST(1 AS BIGINT), TIMESTAMP '2026-01-01 06:00:00'),\n\
+         \x20  (CAST(3 AS BIGINT), CAST(2 AS BIGINT), TIMESTAMP '2026-01-02 00:00:00'),\n\
+         \x20  (CAST(4 AS BIGINT), CAST(3 AS BIGINT), TIMESTAMP '2026-01-03 00:00:00')\n\
+         ) AS t(id, batch_id, event_ts)\n",
+    )
+    .unwrap();
+    fs::write(
+        root.join("models/int_partition_mart.sql"),
+        "---\n\
+         materialization: table\n\
+         refresh: incremental\n\
+         grain: partition\n\
+         timeseries:\n\
+         \x20 event_time_column: event_ts\n  partition_column: batch_id\n  granularity: day\n\
+         ---\n\
+         SELECT CAST(batch_id AS BIGINT) AS batch_id, event_ts, id FROM smelt.seed_events\n",
+    )
+    .unwrap();
+
+    root
+}
+
+fn run_smelt(project_dir: &Path, args: &[&str]) -> std::process::Output {
+    Command::new(env!("CARGO_BIN_EXE_smelt"))
+        .args(["run", "--project-dir", project_dir.to_str().unwrap()])
+        .args(args)
+        .env_remove("RUST_LOG")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn `smelt run`: {e}"))
+}
+
+/// Gap 2 (landed) — the live leg: an integer-`partition_column` model runs a
+/// `--batch-size 1` backfill and a steady-state re-run end to end through
+/// `smelt run --target trino`, no longer refused with `Cannot apply
+/// operator: integer <= varchar(1)` now that the real execution path
+/// resolves each batch's `TimeRange` in the model's own partition axis
+/// (`docs/outcomes/20260913-trino-incremental/phases/03a-plan.md`).
+#[test]
+fn integer_axis_incremental_model_runs_on_trino() {
+    let Some(_env) = trino_env() else {
+        eprintln!("SMELT_TRINO_URL unset — skipping integer_axis_incremental_model_runs_on_trino");
+        return;
+    };
+    let schema = trino_schema("int_partition");
+
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = stage_int_partition_project(&tmp, &schema);
+
+    let first = run_smelt(&root, &["--target", "trino"]);
+    assert!(
+        first.status.success(),
+        "first run (seed) failed.\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&first.stdout),
+        String::from_utf8_lossy(&first.stderr),
+    );
+
+    let backfill = run_smelt(
+        &root,
+        &[
+            "--target",
+            "trino",
+            "--event-time-start",
+            "1",
+            "--event-time-end",
+            "4",
+            "--batch-size",
+            "1",
+        ],
+    );
+    assert!(
+        backfill.status.success(),
+        "windowed backfill failed.\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&backfill.stdout),
+        String::from_utf8_lossy(&backfill.stderr),
+    );
+
+    let steady_state = run_smelt(
+        &root,
+        &[
+            "--target",
+            "trino",
+            "--event-time-start",
+            "1",
+            "--event-time-end",
+            "4",
+            "--batch-size",
+            "1",
+        ],
+    );
+    assert!(
+        steady_state.status.success(),
+        "steady-state re-run failed.\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&steady_state.stdout),
+        String::from_utf8_lossy(&steady_state.stderr),
+    );
+
+    let mut rows = fetch_trino_rows(&schema, "int_partition_mart")
+        .into_iter()
+        .map(|r| (r[0].clone(), r[2].clone()))
+        .collect::<Vec<_>>();
+    rows.sort();
+    let expected = vec![
+        ("1".to_string(), "1".to_string()),
+        ("1".to_string(), "2".to_string()),
+        ("2".to_string(), "3".to_string()),
+        ("3".to_string(), "4".to_string()),
+    ];
+    assert_eq!(rows, expected, "unexpected row set after the phased run");
+
+    drop_trino_schema(&schema);
+}
 
 /// Gap 3 — a snapshot-reconcile-shaped keyed model's `ColumnScopedMerge`
 /// downgrade assumes a `ScanClamp` that does not exist for it.

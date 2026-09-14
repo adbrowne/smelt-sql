@@ -125,6 +125,18 @@ fn probe_integer_partition_column_run() {
         String::from_utf8_lossy(&backfill.stderr),
     );
 
+    // Row-level guard (phase 3a, `docs/outcomes/20260913-trino-incremental/
+    // phases/03a-plan.md` test 3): the `--batch-size 1` backfill must have
+    // written exactly batches 1, 2 and 3 — not a wider or narrower set —
+    // confirming the axis-quoting fix changed how the bound is spelled, not
+    // which rows the batch covers.
+    let backfill_rows = query_all_rows(&root.join("target/dev.duckdb"), "int_partition_mart");
+    assert_eq!(
+        backfill_rows,
+        vec![(1, 1), (1, 2), (2, 3), (3, 4)],
+        "backfill must write exactly batch_id 1, 2, 3"
+    );
+
     // Steady-state: re-running the same window must be idempotent.
     let steady_state = Command::new(smelt_bin())
         .args(["run"])
@@ -142,6 +154,10 @@ fn probe_integer_partition_column_run() {
     );
 
     let phased_rows = query_all_rows(&root.join("target/dev.duckdb"), "int_partition_mart");
+    assert_eq!(
+        phased_rows, backfill_rows,
+        "steady-state re-run must leave the backfilled batches unchanged"
+    );
 
     // Full-refresh oracle: the same model, materialized in one shot.
     let oracle_tmp = tempfile::TempDir::new().unwrap();

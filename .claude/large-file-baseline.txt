@@ -1,5 +1,5 @@
 # Large-file ratchet baseline
-# Updated: 2026-09-14
+# Updated: 2026-09-15
 # Format: <path relative to repo root> <line count>
 # One-sided: a tracked file may shrink freely; it may not grow
 # past this number without a reviewer sign-off note. A file with
@@ -7,6 +7,14 @@
 # Only files >= 1000 lines at update time get an entry —
 # smaller files are left unconstrained (see BASELINE_MIN_LINES in the script).
 # Regenerate with: .claude/scripts/large-file-check.sh --update
+#
+# 2026-09-15 (docs/outcomes/20260913-trino-incremental phase 03a, sign-off:
+# Andrew Browne): execute/project/mod.rs 5098 -> 5115, documenting (one-line
+# comments) which of the hardcoded-`PartitionAxis::Calendar` sites the phase's
+# audit found are genuinely calendar-only by construction, alongside the fix
+# to the two real bugs (`run_range`/`scan_range` now resolve `batch.
+# partition_start.axis()`/`batch.scan_start.axis()` instead of a hardcoded
+# `Calendar`) — comments only, not a new abstraction, so grown in place.
 #
 # 2026-09-14 (docs/outcomes/20260913-trino-incremental phase 03, sign-off:
 # Andrew Browne): fingerprint.rs 1196 -> 1202, adding the `MaintenanceDialect::
@@ -154,7 +162,7 @@ crates/smelt-parser/src/parser/tests.rs 10461
 crates/smelt-parser/src/parser/types.rs 1086
 crates/smelt-runtime/src/compile.rs 4273
 crates/smelt-runtime/src/cumulative.rs 2183
-crates/smelt-runtime/src/execute/project/mod.rs 5098
+crates/smelt-runtime/src/execute/project/mod.rs 5115
 crates/smelt-runtime/src/meta_eval.rs 2180
 crates/smelt-runtime/src/transformer.rs 1174
 crates/smelt-runtime/src/windowing.rs 1277

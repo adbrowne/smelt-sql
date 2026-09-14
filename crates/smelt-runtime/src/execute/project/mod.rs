@@ -1721,6 +1721,17 @@ pub async fn execute_project(
                             plan.name
                         );
                     }
+                    // Genuinely calendar-only by construction (phase 3a,
+                    // `docs/outcomes/20260913-trino-incremental/phases/
+                    // 03a-plan.md` task 4): this arm is reached only when the
+                    // global `parse_run_window` parsed a calendar-shaped
+                    // pair into `(Some(s), Some(e))` NaiveDates (an
+                    // integer-axis pair parses to `(None, None)` there, see
+                    // `execute/window.rs`), and it feeds the windowed-keyed
+                    // driver's own `driving_steps`, which itself only
+                    // accepts `%Y-%m-%d` (`maintenance_driver/driver.rs`) —
+                    // the fold/repair family this arm dispatches into has no
+                    // integer-axis form to preserve.
                     let time_range = TimeRange {
                         start: s.format("%Y-%m-%d").to_string(),
                         end: e.format("%Y-%m-%d").to_string(),
@@ -2183,7 +2194,13 @@ pub async fn execute_project(
                         // `execute_column_scoped_write_with_observed_delta`
                         // already reads as "no partition column" (T5's
                         // observed-delta recording still keys on
-                        // `[start, end)` alone).
+                        // `[start, end)` alone). `Calendar` is genuinely
+                        // correct here, not a bug (phase 3a task 4): this
+                        // window is only ever built from the same
+                        // calendar-only `(Some(s), Some(e))` outer match arm
+                        // `time_range` above lives in, and with `column`
+                        // empty no predicate is ever rendered against it —
+                        // `axis` only reaches T5's own bookkeeping.
                         let window = smelt_backend::PartitionRange {
                             column: String::new(),
                             start: window_start,
@@ -3373,7 +3390,7 @@ pub async fn execute_project(
                     let run_range = TimeRange {
                         start: batch.partition_start.to_string(),
                         end: batch.partition_end.to_string(),
-                        axis: smelt_logical::PartitionAxis::Calendar,
+                        axis: batch.partition_start.axis(),
                     };
                     // The scan-side skew inversion of this same batch
                     // (`windowing::IncrementalBatch::scan_start`/`scan_end` —
@@ -3388,7 +3405,7 @@ pub async fn execute_project(
                     let scan_range = TimeRange {
                         start: batch.scan_start.to_string(),
                         end: batch.scan_end.to_string(),
-                        axis: smelt_logical::PartitionAxis::Calendar,
+                        axis: batch.scan_start.axis(),
                     };
 
                     // Two-layer widened-scan + exact output clamp

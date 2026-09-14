@@ -55,6 +55,10 @@ pub fn driving_steps(
         let next = current + ChronoDuration::days(step_days);
         steps.push(MaintenanceStep {
             partition_value: current.format("%Y-%m-%d").to_string(),
+            // Genuinely calendar-only by construction (phase 3a task 4):
+            // `start`/`end` above are parsed with `NaiveDate::parse_from_str`
+            // a few lines up, which already refuses anything that isn't
+            // `%Y-%m-%d` — this driver has no integer-axis form to preserve.
             range: TimeRange {
                 start: current.format("%Y-%m-%d").to_string(),
                 end: next.format("%Y-%m-%d").to_string(),
