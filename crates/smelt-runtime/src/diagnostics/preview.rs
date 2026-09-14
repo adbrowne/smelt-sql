@@ -758,6 +758,38 @@ pub fn build_plan_cell_diagnostics(
     }
 }
 
+/// The technique-preview set for a cell whose target has no
+/// [`MaintenanceDialect`] mapping at all (Trino today —
+/// `smelt_backend::maintenance_dialect` refuses it by name;
+/// `20260913-trino-incremental` owns adding one). Still one entry per
+/// [`ALL_TECHNIQUES`] member — never partial by omission — but every entry
+/// is [`Admissibility::NotApplicable`] carrying `reason` verbatim: the
+/// absence of a dialect is a statement-rendering gap, never a substituted
+/// dialect and never a silently empty preview
+/// (`docs/outcomes/20260913-trino-ledger/phases/04-plan.md`).
+pub fn unavailable_plan_cell_diagnostics(cell: &PlanCell, reason: &str) -> PlanCellDiagnostics {
+    let technique_previews = ALL_TECHNIQUES
+        .into_iter()
+        .map(|technique| TechniquePreview {
+            technique,
+            transactional: false,
+            statements: Vec::new(),
+            admissibility: Admissibility::NotApplicable {
+                reason: reason.to_string(),
+            },
+        })
+        .collect();
+
+    PlanCellDiagnostics {
+        group: cell.group.clone(),
+        trigger: format!("{:?}", cell.trigger),
+        corner: format!("{:?}", cell.corner),
+        admitted_technique: cell.technique,
+        row_identity: cell.row_identity.identity.clone(),
+        technique_previews,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

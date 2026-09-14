@@ -173,10 +173,13 @@ per backend" names, for the connector's per-table-commit reason stated there —
 pending work (`docs/outcomes/20260913-trino-ledger`). Every `batched`/`keyed`/`versioned`
 maintenance technique that would otherwise depend on one of those structures downgrades to its
 recompute-family equivalent, a full refresh, carrying `MaintenanceStateDowngraded`.
-`maintenance_dialect` currently returns `Err` for `SqlDialect::Trino` rather than performing
-that downgrade — a refusal the degradation contract does not sanction — and is being corrected
-to route through the same availability resolver every other backend uses
-(`docs/outcomes/20260913-trino-ledger`, phase 4).
+Availability resolution and the maintenance-plan report are independent of the
+maintenance-statement dialect and reach this downgrade regardless: `maintenance_dialect` returns
+`Err` for `SqlDialect::Trino`, but that `Err` only means Trino's maintenance *statement* text
+cannot be rendered yet — it is refused by name at the two statement-rendering leaves
+(`smelt explain --show-sql`, the per-cell technique-preview SQL), never surfaced as a refusal of
+the plan, the downgrade, or the report themselves. Statement rendering for Trino is
+`docs/outcomes/20260913-trino-incremental`'s subject.
 
 **Generative equivalence coverage.** The equivalence invariant
 (`incremental_models.md` §"The equivalence invariant") is verified generatively — not just by

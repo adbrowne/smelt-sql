@@ -27,8 +27,8 @@ mod preview;
 mod relation_contract;
 
 pub use preview::{
-    build_plan_cell_diagnostics, Admissibility, PlanCellDiagnostics, PreviewStatement,
-    TechniquePreview,
+    build_plan_cell_diagnostics, unavailable_plan_cell_diagnostics, Admissibility,
+    PlanCellDiagnostics, PreviewStatement, TechniquePreview,
 };
 pub use relation_contract::{
     build_relation_contract, InboundEdgeContract, RelationContractClock, RelationContractProvider,
@@ -99,6 +99,13 @@ pub struct ModelDiagnostics {
 /// `registry`/`resolver`/`dialect`/`source_timeseries` are the same
 /// already-resolved compilation facts `smelt-cli::explain`'s `--show-sql`
 /// path assembles before calling the (moving) statement-group builder.
+/// `dialect` is `Err` for a target with no [`MaintenanceDialect`] mapping
+/// (Trino today — `docs/outcomes/20260913-trino-ledger/phases/04-plan.md`):
+/// the plan, the downgrade and the report stay independent of the
+/// maintenance-statement dialect, so this builder still returns a
+/// [`ModelDiagnostics`] whose `cells` name the gap
+/// ([`unavailable_plan_cell_diagnostics`]) rather than aborting the whole
+/// command — only the per-cell statement text is unavailable.
 ///
 /// `write_unique_key` is a second, deliberately distinct unique-key input:
 /// the effective *write*/MERGE-dedup key `Technique::ColumnScopedMerge`'s
@@ -138,7 +145,7 @@ pub fn build_model_diagnostics(
     target: &str,
     registry: &CompilerRegistry,
     resolver: &EphemeralResolver,
-    dialect: MaintenanceDialect,
+    dialect: Result<MaintenanceDialect, smelt_backend::UnsupportedMaintenanceDialect>,
     source_timeseries: &SourceTimeseriesMap,
     write_unique_key: &[String],
     column_groups: &[ColumnGroup],
@@ -161,8 +168,8 @@ pub fn build_model_diagnostics(
 
     let cells = plan_cells
         .iter()
-        .map(|cell| {
-            build_plan_cell_diagnostics(
+        .map(|cell| match dialect {
+            Ok(dialect) => build_plan_cell_diagnostics(
                 cell,
                 model,
                 schema,
@@ -173,7 +180,8 @@ pub fn build_model_diagnostics(
                 write_unique_key,
                 source_timeseries,
                 column_groups,
-            )
+            ),
+            Err(ref e) => unavailable_plan_cell_diagnostics(cell, &e.to_string()),
         })
         .collect();
 

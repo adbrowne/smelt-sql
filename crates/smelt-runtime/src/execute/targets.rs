@@ -10,8 +10,13 @@ use smelt_core::config::Config;
 /// statements"). Falls back to DuckDb for an unrecognised target; propagates
 /// [`smelt_backend::UnsupportedMaintenanceDialect`] for a target whose
 /// resolved [`smelt_backend::SqlDialect`] has no `MaintenanceDialect` mapping
-/// yet — `SqlDialect::Trino` today (`smelt_backend::maintenance_dialect`
-/// refuses it by name; `20260913-trino-incremental` narrows the error away).
+/// yet — `SqlDialect::Trino` today. This names a *statement-rendering* gap
+/// only: the maintenance plan, its availability-resolved downgrades, and
+/// `smelt explain`'s report are all independent of `MaintenanceDialect` and
+/// stay reachable regardless (`docs/outcomes/20260913-trino-ledger/phases/
+/// 04-plan.md`); `20260913-trino-incremental` is what narrows this
+/// particular error away, by giving Trino its own `MaintenanceDialect`
+/// variant.
 pub(crate) fn maintenance_dialect_for_target(
     config: &Config,
     target: &str,

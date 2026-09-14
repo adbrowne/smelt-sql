@@ -198,13 +198,13 @@ pub fn profiles_for_workspace(
         // resolution `smelt explain <model>`'s report makes, never a
         // workspace-wide default.
         let sql_dialect = crate::execute::sql_dialect_for_target(&loaded.config, &target);
-        let dialect = match smelt_backend::maintenance_dialect(sql_dialect) {
-            Ok(d) => d,
-            Err(e) => {
-                out.failures.insert(canonical, e.to_string());
-                continue;
-            }
-        };
+        // `Err` for a target with no `MaintenanceDialect` mapping (Trino
+        // today) no longer drops the model into `out.failures` — the plan,
+        // downgrade and profile stay independent of the maintenance-statement
+        // dialect (`docs/outcomes/20260913-trino-ledger/phases/04-plan.md`);
+        // only the per-cell statement text is unavailable, named rather than
+        // aborting the whole model's profile.
+        let dialect = smelt_backend::maintenance_dialect(sql_dialect);
         let availability =
             crate::maintenance_availability::availability_for_run(sql_dialect, &loaded.config);
         smelt_logical::maintenance::availability::resolve_availability(
@@ -241,7 +241,7 @@ pub fn profiles_for_workspace(
             &target,
             &result.plan.cells,
             result.plan.key_locality.as_ref(),
-            dialect,
+            dialect.clone().ok(),
         );
 
         let diagnostics = match crate::diagnostics::build_model_diagnostics(

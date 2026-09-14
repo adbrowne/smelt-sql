@@ -321,7 +321,7 @@ fn assemble_diagnostics_independently(
         &target,
         &plan_cells,
         key_locality.as_ref(),
-        dialect,
+        Some(dialect),
     );
 
     let diagnostics = smelt_runtime::diagnostics::build_model_diagnostics(
@@ -335,7 +335,7 @@ fn assemble_diagnostics_independently(
         &target,
         &registry,
         &resolver,
-        dialect,
+        Ok(dialect),
         &source_timeseries,
         &unique_key,
         &column_groups,

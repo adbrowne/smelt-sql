@@ -553,7 +553,14 @@ async fn explain_maintenance_plan(
         .and_then(|t| t.backend_type().ok())
         .map(backend_type_to_sql_dialect)
         .unwrap_or(smelt_backend::SqlDialect::DuckDB);
-    let dialect = smelt_backend::maintenance_dialect(sql_dialect)?;
+    // `Err` for a target with no `MaintenanceDialect` mapping (Trino today):
+    // availability resolution, the report and `--json` stay reachable
+    // regardless — only the per-cell statement text and `--show-sql` are
+    // unavailable, naming the gap rather than aborting the command.
+    let dialect: Result<
+        smelt_backend::MaintenanceDialect,
+        smelt_backend::UnsupportedMaintenanceDialect,
+    > = smelt_backend::maintenance_dialect(sql_dialect);
 
     // Availability resolution (`state.md` §"The degradation contract" step
     // 2, `docs/outcomes/20260904-state-residency/outcome.md` phase 6):
@@ -612,7 +619,7 @@ async fn explain_maintenance_plan(
         &target,
         &result.plan.cells,
         result.plan.key_locality.as_ref(),
-        dialect,
+        dialect.clone().ok(),
     );
 
     // The property profile (`docs/specs/property_diff.md` §"The property
@@ -805,7 +812,7 @@ async fn explain_maintenance_plan(
             &target,
             &registry,
             &resolver,
-            dialect,
+            dialect.clone(),
             &source_timeseries,
             &unique_key,
             &result.column_groups,
@@ -832,7 +839,7 @@ async fn explain_maintenance_plan(
         &target,
         &registry,
         &resolver,
-        dialect,
+        dialect.ok(),
         &region,
         derived_window.as_ref(),
     );

@@ -221,3 +221,40 @@ fn derive_resolved_under_full_availability_is_byte_identical_to_the_raw_derivati
         assert!(resolved_cell.state_downgrade.is_none());
     }
 }
+
+/// `docs/outcomes/20260913-trino-ledger/outcome.md` phase 4, criterion 4: a
+/// model targeting a `trino` backend (no `MaintenanceDialect` mapping) must
+/// still be profiled through `smelt_runtime::profile::profiles_for_workspace`
+/// — never dropped into `WorkspaceProfiles::failures` the way it was before
+/// this phase (`profile.rs`'s old `Err(e) => { out.failures.insert(...);
+/// continue; }` on `smelt_backend::maintenance_dialect`). Its cells must
+/// carry the `state_downgrade` Trino's ledger-less realisable set forces,
+/// exactly like the Spark-targeted model in `tests/fixtures/
+/// dual_target_dialect` already proves for a different ledger-less dialect.
+#[test]
+fn a_trino_target_model_is_profiled_not_failed() {
+    let project_dir =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/dual_target_dialect");
+    let loaded = smelt_core::workspace::load_workspace(&project_dir);
+    let result = smelt_runtime::profile::profiles_for_workspace(&loaded)
+        .expect("profiles_for_workspace must not fail on the dual-target fixture");
+
+    assert!(
+        !result.failures.contains_key("lifetime_spend_trino"),
+        "a trino-targeted model must not be dropped into `failures`: {:?}",
+        result.failures.get("lifetime_spend_trino")
+    );
+    let trino_profile = result
+        .profiles
+        .get("lifetime_spend_trino")
+        .expect("lifetime_spend_trino must have a derived profile");
+    assert!(
+        trino_profile
+            .cell_verdicts
+            .iter()
+            .any(|c| c.state_downgrade.is_some()),
+        "the Trino-targeted model must show a state_downgrade (no ledger builder on \
+         Trino): {:?}",
+        trino_profile.cell_verdicts
+    );
+}

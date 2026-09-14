@@ -373,13 +373,20 @@ pub fn build_model_diagnostics_response(
         .get(&target)
         .map(|t| t.schema.clone())
         .unwrap_or_else(|| "main".to_string());
-    let dialect = match config
+    // `Err` for a target with no `MaintenanceDialect` mapping (Trino today)
+    // no longer 500s the whole endpoint — mirrors `smelt explain`'s and
+    // `profile.rs`'s posture (`docs/outcomes/20260913-trino-ledger/phases/
+    // 04-plan.md`): only the per-cell statement text is unavailable.
+    let dialect: Result<
+        smelt_logical::maintenance::emit::MaintenanceDialect,
+        smelt_backend::UnsupportedMaintenanceDialect,
+    > = match config
         .targets
         .get(&target)
         .and_then(|t| t.backend_type().ok())
     {
-        Some(bt) => backend_type_to_maintenance_dialect(bt)?,
-        None => smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
+        Some(bt) => backend_type_to_maintenance_dialect(bt),
+        None => Ok(smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb),
     };
 
     let mut registry = smelt_runtime::CompilerRegistry::new(config, &config.targets)?;
@@ -437,7 +444,7 @@ pub fn build_model_diagnostics_response(
         &target,
         &plan_cells,
         key_locality.as_ref(),
-        dialect,
+        dialect.clone().ok(),
     );
 
     let diagnostics = smelt_runtime::diagnostics::build_model_diagnostics(

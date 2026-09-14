@@ -40,7 +40,17 @@ const PROBE_COST: &str = "+1 query per consuming run";
 /// declared recurrence bound (`KeyLocality::slice`), `referential_integrity`
 /// from any cell whose `skeleton_source_closure` names the declared route.
 /// Pure and offline: builds probe SQL only to confirm a declaration is
-/// probe-backed, never executes it.
+/// probe-backed, never executes it. `dialect` is `None` for a target with
+/// no [`MaintenanceDialect`] mapping (Trino today): the two probe families
+/// that need dialect-specific SQL to build at all
+/// (`crate::model_probes::declared_model_probes`,
+/// `crate::source_probes::append_only_posture_probes`) are skipped rather
+/// than forced through a substituted dialect — the same lazy-resolution
+/// posture `execute/project/mod.rs`'s `any_declared_probe` gate already
+/// takes for a model that declares no probe at all
+/// (`docs/outcomes/20260913-trino-ledger/phases/04-plan.md`). The three
+/// plan-driven registry rows below (`key_recurrence`, `referential_integrity`,
+/// `contract.retain_departed`) need no dialect and are unaffected.
 #[allow(clippy::too_many_arguments)]
 pub fn probe_plan_for_model(
     model_name: &str,
@@ -53,38 +63,18 @@ pub fn probe_plan_for_model(
     target_name: &str,
     plan_cells: &[PlanCell],
     key_locality: Option<&KeyLocality>,
-    dialect: MaintenanceDialect,
+    dialect: Option<MaintenanceDialect>,
 ) -> Vec<ProbePlanEntry> {
     let cell = format!("{schema}.{table} (declared)");
     let symbolic_scope = format!("SELECT * FROM {schema}.{table}");
 
-    let mut entries: Vec<ProbePlanEntry> = crate::model_probes::declared_model_probes(
-        model_name,
-        &cell,
-        metadata,
-        timeseries,
-        &symbolic_scope,
-        dialect,
-    )
-    .into_iter()
-    .map(|p| ProbePlanEntry {
-        fact: p.ctx.fact,
-        probe: p.ctx.probe_code,
-        cell: p.ctx.cell,
-        cost: PROBE_COST.to_string(),
-    })
-    .collect();
-
-    let empty_baselines = SourcePostureStore::default();
-    entries.extend(
-        crate::source_probes::append_only_posture_probes(
+    let mut entries: Vec<ProbePlanEntry> = match dialect {
+        Some(dialect) => crate::model_probes::declared_model_probes(
             model_name,
             &cell,
-            model_file,
-            source_infos,
-            &empty_baselines,
-            target_name,
-            schema,
+            metadata,
+            timeseries,
+            &symbolic_scope,
             dialect,
         )
         .into_iter()
@@ -93,8 +83,33 @@ pub fn probe_plan_for_model(
             probe: p.ctx.probe_code,
             cell: p.ctx.cell,
             cost: PROBE_COST.to_string(),
-        }),
-    );
+        })
+        .collect(),
+        None => Vec::new(),
+    };
+
+    if let Some(dialect) = dialect {
+        let empty_baselines = SourcePostureStore::default();
+        entries.extend(
+            crate::source_probes::append_only_posture_probes(
+                model_name,
+                &cell,
+                model_file,
+                source_infos,
+                &empty_baselines,
+                target_name,
+                schema,
+                dialect,
+            )
+            .into_iter()
+            .map(|p| ProbePlanEntry {
+                fact: p.ctx.fact,
+                probe: p.ctx.probe_code,
+                cell: p.ctx.cell,
+                cost: PROBE_COST.to_string(),
+            }),
+        );
+    }
 
     if let Some(KeyLocality {
         slice: LocalitySlice::RecurrenceBounded { .. },
@@ -187,7 +202,7 @@ mod tests {
             "dev",
             &[],
             None,
-            MaintenanceDialect::DuckDb,
+            Some(MaintenanceDialect::DuckDb),
         );
         let entry = entries
             .iter()
@@ -209,7 +224,7 @@ mod tests {
             "dev",
             &[],
             None,
-            MaintenanceDialect::DuckDb,
+            Some(MaintenanceDialect::DuckDb),
         );
         assert!(
             !entries.iter().any(|e| e.fact == "contract.retain_departed"),

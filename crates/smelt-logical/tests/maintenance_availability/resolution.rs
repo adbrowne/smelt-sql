@@ -231,6 +231,60 @@ fn key_addressed_cell_survives_when_the_sidecar_is_available() {
     assert!(cells[0].state_downgrade.is_none());
 }
 
+/// `docs/outcomes/20260913-trino-ledger/outcome.md` phase 4: Trino realises
+/// **no** engine-resident state structure (Spark's own posture — per-table
+/// atomicity, no cross-table transaction), so every cell that has a
+/// `required_state_structure` must downgrade to its `recompute_equivalent`
+/// when resolved against Trino's realisable set, exactly as it does against
+/// `StateAvailability::none()`. The `original` field must still name the
+/// ideal technique the cell arrived with, never the downgraded one — the
+/// ideal plan stays derived and visible even though it cannot run.
+#[test]
+fn trino_downgrades_every_dependent_cell_to_its_recompute_equivalent() {
+    let realisable = realisable_state_structures(SqlDialect::Trino);
+    assert!(
+        realisable.is_empty(),
+        "Trino must realise no engine-resident state structure"
+    );
+    let availability =
+        StateAvailability::resolve(smelt_core::config::WarehouseTables::Allowed, &realisable);
+
+    let mut cells = vec![
+        base_cell(Corner::FoldDelta, Technique::KeyedFold),
+        base_cell(Corner::ColumnMerge, Technique::ColumnScopedMerge),
+    ];
+    cells.push({
+        let mut cell = base_cell(Corner::ColumnMerge, Technique::PerGroupRecompute);
+        cell.key_scope = Some(KeyScope {
+            keys: strings(&["user_id"]),
+            from: "upstream".to_string(),
+            discovery: KeyDiscovery::UpstreamKeyed,
+        });
+        cell
+    });
+
+    let ideal_techniques: Vec<Technique> = cells.iter().map(|c| c.technique).collect();
+    let expected_equivalents: Vec<Technique> = cells.iter().map(recompute_equivalent).collect();
+
+    for cell in &cells {
+        assert!(
+            required_state_structure(cell).is_some(),
+            "test fixture must exercise cells that actually require state"
+        );
+    }
+
+    resolve_availability(&mut cells, &availability);
+
+    for ((cell, ideal), expected) in cells.iter().zip(ideal_techniques).zip(expected_equivalents) {
+        assert_eq!(cell.technique, expected);
+        let downgrade = cell
+            .state_downgrade
+            .as_ref()
+            .expect("cell must carry a StateDowngrade recording the ideal technique");
+        assert_eq!(downgrade.original, ideal);
+    }
+}
+
 #[test]
 fn duckdb_realises_every_state_structure() {
     let realised: BTreeSet<StateStructure> = realisable_state_structures(SqlDialect::DuckDB)

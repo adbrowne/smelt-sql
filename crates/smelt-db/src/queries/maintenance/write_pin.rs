@@ -42,6 +42,7 @@ pub fn backend_dialect_for(backend_name: &str) -> Option<smelt_dialect::SqlDiale
         "duckdb" => Some(smelt_dialect::SqlDialect::DuckDB),
         "spark" | "databricks" => Some(smelt_dialect::SqlDialect::SparkSQL),
         "bigquery" => Some(smelt_dialect::SqlDialect::BigQuery),
+        "trino" => Some(smelt_dialect::SqlDialect::Trino),
         _ => None,
     }
 }

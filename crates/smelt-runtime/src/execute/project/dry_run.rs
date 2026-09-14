@@ -241,8 +241,22 @@ pub(super) async fn build_dry_run_outcome(
             let Some(inc) = plan.incremental.as_ref() else {
                 continue;
             };
-            let Ok(dialect) = maintenance_dialect_for_target(config, &model_target) else {
-                continue;
+            // A target with no `MaintenanceDialect` mapping (Trino today)
+            // must not look like a model with nothing to report — the
+            // silent `continue` this replaced made a skipped statement
+            // indistinguishable from an absent one (fail-loud discipline,
+            // `CLAUDE.md` §"Fail-loud discipline";
+            // `docs/outcomes/20260913-trino-ledger/phases/04-plan.md`).
+            let dialect = match maintenance_dialect_for_target(config, &model_target) {
+                Ok(dialect) => dialect,
+                Err(e) => {
+                    reporter.maintenance_warning(
+                        run_id,
+                        model_name,
+                        &format!("maintenance statements not shown: {e}"),
+                    );
+                    continue;
+                }
             };
             let partition_col = &inc.timeseries.partition_column;
             let table_name = format!("{schema}.{}", model_file.db_name_owned());

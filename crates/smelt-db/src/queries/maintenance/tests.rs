@@ -26,6 +26,18 @@ fn retired_backend_names_resolve_to_nothing() {
     }
 }
 
+/// `backend_dialect_for` must recognise `trino` by mapping, not by the
+/// `unwrap_or_default()` fallback; an unrecognised name still resolves to
+/// `None`, so this is not a blanket widening.
+#[test]
+fn backend_dialect_for_recognises_trino() {
+    assert_eq!(
+        backend_dialect_for("trino"),
+        Some(smelt_dialect::SqlDialect::Trino)
+    );
+    assert_eq!(backend_dialect_for("not-a-real-backend"), None);
+}
+
 fn group(columns: &[&str], sensitivity: &[&str]) -> ColumnGroup {
     ColumnGroup {
         columns: columns.iter().map(|s| s.to_string()).collect(),

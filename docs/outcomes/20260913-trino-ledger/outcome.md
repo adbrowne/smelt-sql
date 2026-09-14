@@ -153,7 +153,7 @@ land near or above Delta's.
 | 1 | Confirm the posture: `scripts/trino-probe-state.sh` runs the cross-table `START TRANSACTION` candidates (including a failing second statement) against the live tier and prints Trino's answers verbatim; escalate in the decision log if genuine cross-table atomicity is found, since that would change this outcome | done |
 | 2 | Spec delta: `state.md`'s realisability table gains a Trino column reading `no` five times with Spark's reason stated as permanent, `multi_backend.md` §"Incremental & schema evolution per backend" states it for the target, and the diagnostics the degradation needs are named | done |
 | 3 | Schema-evolution DDL: `ddl_trino/` as a module directory with the measured `SchemaOperation` → Trino/Iceberg mapping table in its header, type spellings derived from what the server accepted, and T1's five schema-related capability cells confirmed or corrected back into the spec table | done |
-| 4 | Wire the absence: Trino claims no correctness structure, availability resolution downgrades every dependent cell to its recompute equivalent with `MaintenanceStateDowngraded`, derived once by the pure resolver with the ideal plan still materialised | planned |
+| 4 | Wire the absence: Trino claims no correctness structure, availability resolution downgrades every dependent cell to its recompute equivalent with `MaintenanceStateDowngraded`, derived once by the pure resolver with the ideal plan still materialised | done |
 | 5 | The two invariants as standing tests: no execution path on Trino reaches a builder for an unclaimed structure (claim ⇒ builder), and no absence produces a refusal where the contract specifies a downgrade (absence ⇒ downgrade) | pending |
 | 6 | `contract.deferral` refuses on Trino with `DeclaredContractRequiresState`; `frozen_horizon` and `retain_departed` follow the existing grain and posture rules with no new lattice point | pending |
 | 7 | The staged relation group without temp tables: scratch-schema relation with a derived non-colliding name, owned lifecycle, proved cleanup after an interruption between stage and apply — or a by-name refusal if T1 measured the flag `false` | pending |
@@ -186,6 +186,32 @@ land near or above Delta's.
   touched: the pure resolver (`resolve_availability`, `recompute_equivalent`),
   `realisable_state_structures(Trino) == vec![]`, and `maintenance_plan_diagnostics`'
   dialect-generic availability loop.
+
+- **2026-09-14 — phase 4 done: all four named seams fixed; probe-plan and per-cell statement
+  preview widened to `Option`/`Result` rather than substituted, never re-derived elsewhere.**
+  `backend_dialect_for("trino")` now maps to `SqlDialect::Trino`. `smelt_backend::
+  maintenance_dialect`'s `Err` is threaded as a `Result` (not `?`-unwrapped) through
+  `commands/explain.rs`, `smelt-runtime::profile.rs`, and `smelt-ui::build.rs`'s diagnostics
+  endpoint — none of the three abort or drop the model into `failures` now.
+  `smelt_runtime::diagnostics::build_model_diagnostics` and `probe_plan::probe_plan_for_model`
+  take `Result<MaintenanceDialect, UnsupportedMaintenanceDialect>` / `Option<MaintenanceDialect>`
+  respectively; a new `unavailable_plan_cell_diagnostics` helper (`diagnostics/preview.rs`)
+  renders every technique-preview entry `NotApplicable` naming the missing dialect verbatim
+  rather than skipping cells or substituting DuckDB's spelling — `build_admitted_statement_group`
+  was re-keyed from scanning for `Admissibility::Admitted` to matching `admitted_technique`
+  directly so it still finds the (now-`NotApplicable`) entry and surfaces its named reason
+  instead of a generic "no Admitted entry" message. `execute/project/dry_run.rs`'s silent
+  `continue` now calls `reporter.maintenance_warning` — which `CliReporter` did not previously
+  override at all (a pre-existing gap: retention-downgrade warnings from `execute/project/mod.rs`
+  were already silently swallowed by the terminal reporter), so this phase added the first
+  `eprintln!`-backed override, incidentally making those warnings visible for the first time too.
+  Three ratchets bumped with sign-off notes: `.claude/large-file-baseline.txt` (three files grew
+  7–14 lines from the `Result`/`Option` threading and one new unit test, all in-place, no new
+  abstraction) and `.claude/hardening-baseline.txt` (`smelt-cli println` 189→190, the
+  `eprintln!`-matches-`println!`-substring quirk noted 2026-09-08). `docs/specs/multi_backend.md`
+  §"Parity contract"'s Trino paragraph now states the settled posture instead of the phase-4
+  forward-pointer. `verify-phase.sh`, the plan's five named test targets, and
+  `smelt-lsp --test example_workspaces` are all green.
 
 - **2026-09-14 — phase 3 done: `ddl_trino` measured and wired; struct-field drop and nested
   widening are DDL on Trino, unlike Spark/BigQuery.** All five T1 capability cells confirmed,

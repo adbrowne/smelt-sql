@@ -23,9 +23,20 @@
 # split. The Trino generator itself is new (`crates/smelt-state/src/ddl_trino/`,
 # a module directory) precisely to avoid growing a second large file.
 #
+# 2026-09-14 (docs/outcomes/20260913-trino-ledger phase 04, sign-off: Andrew
+# Browne): commands/explain.rs 1197 -> 1204, explain.rs 2599 -> 2610, and
+# smelt-db/queries/maintenance/tests.rs 1254 -> 1266 — widening
+# `maintenance_dialect`'s `Result` through `smelt explain`'s existing
+# dialect-consuming call sites (a `Result<MaintenanceDialect,
+# UnsupportedMaintenanceDialect>` in place of a `?`-unwrapped value, plus the
+# `build_admitted_statement_group`/`build_all_cell_statements` fallback logic
+# this requires) and one new `backend_dialect_for` unit test, in the same
+# shape as the file's existing dialect-dispatch code — not a new abstraction,
+# so grown in place rather than split.
+#
 crates/smelt-backend-duckdb/src/lib.rs 1902
-crates/smelt-cli/src/commands/explain.rs 1197
-crates/smelt-cli/src/explain.rs 2599
+crates/smelt-cli/src/commands/explain.rs 1204
+crates/smelt-cli/src/explain.rs 2610
 crates/smelt-cli/src/test_compiler.rs 1908
 crates/smelt-cli/tests/dbx_dogfood_loader.rs 1210
 crates/smelt-cli/tests/e2e/cross_midnight_rebase.rs 1443
@@ -54,7 +65,7 @@ crates/smelt-db/src/loader.rs 1869
 crates/smelt-db/src/queries/check_types.rs 1171
 crates/smelt-db/src/queries/function_diagnostics.rs 2595
 crates/smelt-db/src/queries/loader.rs 1082
-crates/smelt-db/src/queries/maintenance/tests.rs 1254
+crates/smelt-db/src/queries/maintenance/tests.rs 1266
 crates/smelt-db/src/queries/project.rs 4137
 crates/smelt-db/src/queries/schema.rs 2124
 crates/smelt-db/src/tests.rs 6071

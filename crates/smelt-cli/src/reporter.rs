@@ -113,6 +113,15 @@ impl RunReporter for CliReporter {
         info!("{} done ({} rows, {:?})", model, row_count, duration);
     }
 
+    /// A recorded degradation that does not block the run (`RunReporter::
+    /// maintenance_warning`'s own doc comment: "surfaced as a warning rather
+    /// than silently absorbed") — printed to stderr so it is visible in both
+    /// a real run and `--dry-run` without being mistaken for the model's own
+    /// stdout output (the compiled SQL / maintenance statements).
+    fn maintenance_warning(&self, _run_id: &str, model: &str, message: &str) {
+        eprintln!("smelt: {model}: {message}");
+    }
+
     fn run_completed(&self, _run_id: &str, _total_rows: usize, duration: Duration) {
         let count = self.model_count.load(Ordering::Relaxed);
         eprintln!(

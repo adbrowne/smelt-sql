@@ -13,6 +13,13 @@ targets:
     connect_url: sc://localhost:15002
     catalog: spark_catalog
     schema: main
+  trino_remote:
+    type: trino
+    host: trino.internal
+    port: 8080
+    user: smelt
+    catalog: iceberg
+    schema: main
 
 default_materialization: view
 target: duckdb_local
@@ -20,3 +27,5 @@ target: duckdb_local
 models:
   lifetime_spend_spark:
     target: spark_remote
+  lifetime_spend_trino:
+    target: trino_remote

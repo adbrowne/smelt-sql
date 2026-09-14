@@ -1291,14 +1291,18 @@ pub fn build_admitted_statement_group(
     diag_cell: &PlanCellDiagnostics,
     region: &RegionLiterals,
 ) -> Result<StatementGroup, String> {
+    // Keyed on `admitted_technique`, not a scan for `Admissibility::Admitted`
+    // — the same entry in the ordinary case, but also the right one when no
+    // `MaintenanceDialect` exists (`unavailable_plan_cell_diagnostics` marks
+    // every entry `NotApplicable`, naming the missing dialect by name).
     let preview = diag_cell
         .technique_previews
         .iter()
-        .find(|p| matches!(p.admissibility, Admissibility::Admitted))
+        .find(|p| p.technique == diag_cell.admitted_technique)
         .ok_or_else(|| {
-            "no Admitted technique preview entry for this cell — the shared diagnostics \
-             builder always populates exactly one (docs/specs/ui_model_diagnostics.md \
-             §Semantics \"Admissibility verdict\")"
+            "no technique preview entry for this cell's admitted technique — the shared \
+             diagnostics builder always populates one entry per Technique variant \
+             (docs/specs/ui_model_diagnostics.md §Semantics \"Technique preview set\")"
                 .to_string()
         })?;
 
@@ -1441,6 +1445,11 @@ fn build_delete_insert_period_statement_group(
 /// straight from `diag_cells[i]`'s own `Admitted` preview
 /// ([`build_admitted_statement_group`]); only that one combination re-derives
 /// with the real window ([`build_delete_insert_period_statement_group`]).
+/// `dialect` is `None` for a target with no [`MaintenanceDialect`] mapping
+/// (Trino today): the re-derivation leg is skipped and every cell falls
+/// through to [`build_admitted_statement_group`], surfacing the same named
+/// "statement rendering unavailable" reason `diag_cells` already carries —
+/// never a substituted dialect.
 #[allow(clippy::too_many_arguments)]
 pub fn build_all_cell_statements(
     plan_cells: &[PlanCell],
@@ -1450,7 +1459,7 @@ pub fn build_all_cell_statements(
     target: &str,
     registry: &CompilerRegistry,
     resolver: &EphemeralResolver,
-    dialect: MaintenanceDialect,
+    dialect: Option<MaintenanceDialect>,
     region: &RegionLiterals,
     derived: Option<&DerivedWindow>,
 ) -> Vec<CellStatements> {
@@ -1459,10 +1468,12 @@ pub fn build_all_cell_statements(
         .zip(diag_cells.iter())
         .enumerate()
         .map(|(cell_index, (cell, diag_cell))| {
-            let outcome = match (cell.technique, derived) {
-                (Technique::DeleteInsert, Some(dw)) => build_delete_insert_period_statement_group(
-                    model, schema, target, registry, resolver, dialect, dw,
-                ),
+            let outcome = match (cell.technique, derived, dialect) {
+                (Technique::DeleteInsert, Some(dw), Some(dialect)) => {
+                    build_delete_insert_period_statement_group(
+                        model, schema, target, registry, resolver, dialect, dw,
+                    )
+                }
                 _ => build_admitted_statement_group(diag_cell, region),
             };
             CellStatements {

@@ -32,6 +32,14 @@
 #   message printing the written `.smelt/targets/<target>/intervals.json`
 #   path, matching the existing single-line confirmation style other
 #   offline CLI tools use (e.g. `smelt init`).
+# 2026-09-14 andrew: smelt-cli println 189 -> 190
+#   (docs/outcomes/20260913-trino-ledger/ phase 4). The count includes
+#   `eprintln!` calls (the script's substring match on `println!` catches
+#   both, as noted 2026-09-08 above) — `CliReporter::maintenance_warning`'s
+#   new `eprintln!` surfaces a recorded degradation (e.g. a Trino target's
+#   maintenance-statement rendering gap) that the reporter trait's own doc
+#   comment says must be "surfaced as a warning rather than silently
+#   absorbed"; nothing in the CLI printed it before this override existed.
 #
 smelt-backend-bigquery expect 0
 smelt-backend-bigquery println 0
@@ -55,7 +63,7 @@ smelt-bench expect 3
 smelt-bench println 27
 smelt-bench unwrap 8
 smelt-cli expect 44
-smelt-cli println 189
+smelt-cli println 190
 smelt-cli unwrap 0
 smelt-core expect 6
 smelt-core println 0
