@@ -156,12 +156,34 @@ land near or above Delta's.
 | 4 | Wire the absence: Trino claims no correctness structure, availability resolution downgrades every dependent cell to its recompute equivalent with `MaintenanceStateDowngraded`, derived once by the pure resolver with the ideal plan still materialised | done |
 | 5 | The two invariants as standing tests: no execution path on Trino reaches a builder for an unclaimed structure (claim ⇒ builder), and no absence produces a refusal where the contract specifies a downgrade (absence ⇒ downgrade) | done |
 | 6 | `contract.deferral` refuses on Trino with `DeclaredContractRequiresState`; `frozen_horizon` and `retain_departed` follow the existing grain and posture rules with no new lattice point | done |
-| 7 | The staged relation group without temp tables: scratch-schema relation with a derived non-colliding name, owned lifecycle, proved cleanup after an interruption between stage and apply — or a by-name refusal if T1 measured the flag `false` | pending |
+| 7 | The staged relation group without temp tables: scratch-schema relation with a derived non-colliding name, owned lifecycle, proved cleanup after an interruption between stage and apply — or a by-name refusal if T1 measured the flag `false` | planned |
 | 8 | Locking and versioning: two concurrent runs where exactly one proceeds, or a refusal naming the backend and the missing capability — never a lock that never locks | pending |
 | 9 | `.smelt/` is not correctness-bearing on Trino: delete-between-runs equality, and `state.mode: stateless` writing nothing while changing no maintained table's value | pending |
 | 10 | Surface and close: `smelt explain` rendering Trino's downgrades (text + `--json`), diagnostics catalogue and `examples/broken/` fixtures, `docs-site/` state page updated with what Trino costs and why, `verify-phase.sh` green with no baseline bumped | pending |
 
 ## Decision log
+
+- **2026-09-14 — phase 7 planning: no reshape; the branch is decided by T1's measurement, and the
+  live proof sidesteps the write-path wall phase 6 hit.** The phase table is unchanged. Four facts
+  recorded. (1) Criterion 8's conditional is settled: `crates/smelt-backend-trino/tests/
+  capability_probes.rs::probe_supports_staged_relation_group` **asserts** the group succeeds
+  against a live coordinator, so `supports_staged_relation_group` is `true` on Trino and phase 7
+  takes the realise branch, not the by-name refusal. (2) Phase 6's hand-forward warned that phase
+  7 presupposes a working Trino write path. It does not, as planned: the staged relation is a
+  *bookkeeping object* (name, residence, who drops it), so its live proof runs the lifecycle
+  statements directly through `TrinoBackend`, which needs no `MaintenanceDialect` — no
+  `execute_project` run, no `MaintenanceDialect::Trino` variant, phase 4's standing decision
+  intact. (3) A real gap found while planning, folded in rather than deferred: the staged emitters
+  set `StatementGroup::transactional = true` unconditionally, and `Backend::execute_statement_
+  group`'s default impl (`crates/smelt-backend/src/lib.rs:550`, the one Trino inherits) executes
+  the statements one at a time with no transaction and no warning — a claim silently not honoured,
+  which is the fail-loud discipline's own failure shape and serves criterion 11. (4) **Scratch
+  schema = the target's own schema, not a new one.** Criterion 8 says "scratch schema"; the plan
+  realises it as a real table in the target's own schema carrying the existing
+  `__smelt_staged_`/`__smelt_diff_patch_` prefix, because a separate schema would need a new
+  config key and a new provisioning obligation for no additional isolation — the prefix plus the
+  derived deterministic name already gives non-collision with user models, and concurrent runs of
+  the same model are excluded by the state lock (phase 8's subject), never by the name.
 
 - **2026-09-14 — phase 6 implementation: a second sibling gap found and fixed (same batch loop,
   different declaration), and tests 6–7 retargeted to a directly-testable seam instead of a full
