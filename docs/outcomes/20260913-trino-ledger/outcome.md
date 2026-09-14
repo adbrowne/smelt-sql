@@ -160,7 +160,7 @@ land near or above Delta's.
 | 8 | Locking and versioning: two concurrent runs where exactly one proceeds, or a refusal naming the backend and the missing capability — never a lock that never locks | done |
 | 9 | `.smelt/` is not correctness-bearing on Trino: delete-between-runs equality, and `state.mode: stateless` writing nothing while changing no maintained table's value | done |
 | 10 | The keyless staged emitter's sentinel: `emit_staged_candidate_conditional_keyless`'s hardcoded `CREATE TEMP TABLE` either takes phase 7's residence/atomicity treatment, or a standing test proves no Trino execution path reaches it — a temp-table spelling on a backend with no temp tables is exactly the claim-without-builder failure criterion 3 excludes | done |
-| 11 | Surface and close: `smelt explain` rendering Trino's downgrades (text + `--json`), diagnostics catalogue and `examples/broken/` fixtures, `docs-site/` state page updated with what Trino costs and why, `verify-phase.sh` green with no baseline bumped | pending |
+| 11 | Surface and close: `smelt explain` rendering Trino's downgrades (text + `--json`), diagnostics catalogue and `examples/broken/` fixtures, `docs-site/` state page updated with what Trino costs and why, `verify-phase.sh` green with no baseline bumped | planned |
 
 ## Decision log
 
