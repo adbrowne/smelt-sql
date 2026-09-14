@@ -1,7 +1,7 @@
 # Outcome: Trino takes Spark's state-residency posture — correctness structures unrealisable, every dependent cell recorded as downgraded
 
 **Created:** 2026-09-13
-**Status:** queued
+**Status:** active
 **Driver:** loop. Docker only, no credential, no human gate. Live-tier phases must emit
 `<<PHASE_BLOCKED>>` when the coordinator is unreachable, never skip green.
 **Depends on:** `20260913-trino-target-spine` (T1) for the backend and the tier.
@@ -150,7 +150,7 @@ land near or above Delta's.
 
 | # | Phase | Status |
 |---|-------|--------|
-| 1 | Confirm the posture: `scripts/trino-probe-state.sh` runs the cross-table `START TRANSACTION` candidates (including a failing second statement) against the live tier and prints Trino's answers verbatim; escalate in the decision log if genuine cross-table atomicity is found, since that would change this outcome | pending |
+| 1 | Confirm the posture: `scripts/trino-probe-state.sh` runs the cross-table `START TRANSACTION` candidates (including a failing second statement) against the live tier and prints Trino's answers verbatim; escalate in the decision log if genuine cross-table atomicity is found, since that would change this outcome | planned |
 | 2 | Spec delta: `state.md`'s realisability table gains a Trino column reading `no` five times with Spark's reason stated as permanent, `multi_backend.md` §"Incremental & schema evolution per backend" states it for the target, and the diagnostics the degradation needs are named | pending |
 | 3 | Schema-evolution DDL: `ddl_trino/` as a module directory with the measured `SchemaOperation` → Trino/Iceberg mapping table in its header, type spellings derived from what the server accepted, and T1's five schema-related capability cells confirmed or corrected back into the spec table | pending |
 | 4 | Wire the absence: Trino claims no correctness structure, availability resolution downgrades every dependent cell to its recompute equivalent with `MaintenanceStateDowngraded`, derived once by the pure resolver with the ideal plan still materialised | pending |
@@ -162,6 +162,15 @@ land near or above Delta's.
 | 10 | Surface and close: `smelt explain` rendering Trino's downgrades (text + `--json`), diagnostics catalogue and `examples/broken/` fixtures, `docs-site/` state page updated with what Trino costs and why, `verify-phase.sh` green with no baseline bumped | pending |
 
 ## Decision log
+
+- **2026-09-14 — phase 1 planning: the probe must carry its own transaction session.** T1's
+  `supports_transactional_ddl = false` measured smelt's stateless `/v1/statement` client, not the
+  Iceberg connector, so a probe built on smelt's backend client would re-measure the client and
+  say nothing about cross-table atomicity. `scripts/trino-probe-state.sh` therefore speaks the
+  statement protocol directly, threading `X-Trino-Started-Transaction-Id` back as
+  `X-Trino-Transaction-Id` (CLI-in-container as fallback), and asserts observed row counts after
+  each case rather than trusting a statement's own success. The phase table is unchanged: nothing
+  in the hand-forward moved work in or out.
 
 - **2026-09-14 — hand-forward from `20260913-trino-target-spine` phase 11.** Measured, for this
   outcome to act on: `supports_transactional_ddl = false` is smelt's stateless `/v1/statement`
