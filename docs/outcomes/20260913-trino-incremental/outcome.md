@@ -153,7 +153,10 @@ approximated.
 | 3c | A `ColumnScopedMerge` cell downgraded to `PerGroupRecompute` for an `UpstreamMutation`-triggered (unclocked) cell resolves `key_scope: None` — the full-scan recompute the reachable row already promises — instead of demanding a `ScanClamp` that cannot exist (gap 3) | done |
 | 3b2 | Gap 1, re-attempted under the 2026-09-15 column-type ruling: the referenced partition column's declared SQL type reaches the single literal renderer, so a calendar predicate renders typed against a DATE/TIMESTAMP column and bare-quoted against a declared-VARCHAR one; plus the `render_time_literal` symbolic-placeholder fix 3b found | done |
 | 3d | Phase 3's deferred live legs, now unblocked: the append and whole-row-`MERGE` upsert families end-to-end through `execute_project` on Trino, plus `statement_parity`'s Trino executed-vs-emitted leg | blocked |
-| 3e | Live-Trino test isolation: every live-tier test gets a guaranteed-unique schema/namespace (or one process-wide guard), and `trino_state_residency.rs`'s `TRINO_ENV_GUARD` lock scope is widened to cover `stage_residency_project`'s own `SMELT_TRINO_URL` read — so the conformance and family gates fail for real reasons only | pending |
+| 3e | Live-Trino test isolation: every live-tier test gets a guaranteed-unique schema/namespace (or one process-wide guard), and `trino_state_residency.rs`'s `TRINO_ENV_GUARD` lock scope is widened to cover `stage_residency_project`'s own `SMELT_TRINO_URL` read — so the conformance and family gates fail for real reasons only | planned |
+| 3f | Gap 4: the windowed-keyed maintenance driver's own driving-source pushdown filter (`smelt-runtime/src/maintenance_driver/{driver.rs,cumulative.rs}`) renders its step bound typed against the driving source's declared partition-column type, through 3b2's single literal-renderer owner — the third emission site of the class 3a/3b2 fixed | pending |
+| 3g | Gap 5: `Technique::KeyedFold` gets a **plan-time** availability resolution mirroring the repair family's `resolve_availability` — the idempotent grade downgrades to a reachable technique on a structure-less backend, the additive grade takes a named, explain-visible downgrade or refuses with a diagnostic naming the backend and the missing structure (criterion 3's never-fold-twice route). An execution-time `BackendError::unsupported` is not sufficient: criterion 3 requires the verdict on the cell and explain-visible | pending |
+| 3h | Phase 3d's deferred legs, re-attempted on 3f+3g: the whole-row `MERGE` upsert (keyed-fold) family end-to-end through `execute_project` on Trino, plus `statement_parity`'s Trino executed-vs-emitted leg (3d's reverted `RecordingBackend`/`emit_keyed_fold` byte-identity design redone) | pending |
 | 4 | The emulated delete-and-insert window: `DELETE` range exactly covering the insert's write window, asserted directly and under out-of-order and repeated application | pending |
 | 5 | The merge-less conditional write over T3's staged relation (the departed-row delete as a separate scoped `DELETE`, since `WHEN NOT MATCHED BY SOURCE` is absent), and the column-scoped merge — executing where its cell needs no merge ledger, taking T3's `MaintenanceStateDowngraded` route where it does, per Spark's precedent | pending |
 | 6 | The degraded routes: per-group recompute, the succession grain's full rebuild in place of the patch route (presented table row- and column-identical to the ledger-bearing rebuild's presented arm), and the sidecar-less key-addressed downgrade — each recorded on the cell and explain-visible | pending |
@@ -163,6 +166,19 @@ approximated.
 | 10 | Mid-stream schema evolution under maintenance, still oracle-equal; then close: divergences rewritten, `docs-site/` page stating plainly which incremental features Trino does and does not support and why, `verify-phase.sh` green | pending |
 
 ## Decision log
+
+- **2026-09-15 — reshape after 3d.** 3d's summary reports the whole-row `MERGE` upsert family
+  blocked on two newly-measured gaps (gap 4, the windowed-keyed driver's driving-source pushdown
+  literal typing; gap 5, `Technique::KeyedFold`'s missing plan-time downgrade). Both serve success
+  criteria 2 and 3, so neither is deferred out: added rows **3f** (gap 4), **3g** (gap 5) and **3h**
+  (re-attempt 3d's two deferred live legs on top of them), sequenced before row 4 because families
+  4-6 and the generative gate 8 all build on the same driver and technique-resolution path. Row 3d
+  stays `blocked` as a record of what it measured; 3h is its successor, not its reopening.
+- **2026-09-15 — 3e's mechanism fixed at planning time.** The row offered "a guaranteed-unique
+  schema/namespace **or** one process-wide guard". The racing tests are separate test *binaries*,
+  i.e. separate processes, so an in-process mutex cannot serialise them: the phase takes the
+  unique-naming route, and the guard work is narrowed to its real defect — `stage_residency_project`
+  reading `SMELT_TRINO_URL` outside `TRINO_ENV_GUARD`.
 
 - **2026-09-15 — phase 3d: landed the append family + the derived CI-wiring census; deferred the
   whole-row `MERGE` upsert family (gaps 4/5, see Blocked log below).** Full writeup in the Blocked
