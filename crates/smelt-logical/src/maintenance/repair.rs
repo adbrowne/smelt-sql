@@ -332,6 +332,39 @@ pub fn discovery_posture(mutation: MutationProfile) -> Option<RepairDiscoveryPos
     }
 }
 
+/// Whether `cell` is a **repair-admitted** `PerGroupRecompute` cell: one that
+/// passed [`admit_per_group_recompute`]'s own admission obligations rather
+/// than being reached by [`super::availability::resolve_availability`]'s
+/// downgrade (`docs/specs/state.md` §"The degradation contract" step 2). The
+/// discriminator mirrors [`has_repair_family_lowering`]'s but is a positive
+/// determination rather than its negation's superset: no `key_scope` (a
+/// key-addressed cell is a different admission route entirely), a non-empty
+/// `scans` (the bounded per-group slice [`admit_per_group_recompute`]
+/// derived — [`derive_repair_cell`] always sets it), and no recorded
+/// [`super::availability::StateDowngrade`] yet. That last condition is never
+/// false in practice today — `required_state_structure` (this predicate's
+/// only caller) runs entirely inside ideal derivation, before
+/// `resolve_availability` ever touches a cell — but is checked anyway so
+/// this predicate stays correct if a future caller runs it post-resolution.
+///
+/// Repair admission is only ever reachable over a
+/// [`MutationProfile::MutableSnapshot`] source: [`discovery_posture`] routes
+/// every such source unconditionally to
+/// [`RepairDiscoveryPosture::SidecarDiff`], `AppendOnly` sources satisfy
+/// [`crate::analysis::faithful_fold::faithful_fold`]'s condition (1) and so
+/// take the ordinary fold route rather than repair, and `ChangeFeed` has no
+/// discovery posture at all and is refused upstream at derivation time
+/// (`derive::derive_new_data`) before a cell like this one could exist. So
+/// every repair-admitted cell needs the fingerprint sidecar unconditionally
+/// — there is no repair-admitted shape that discovers affected keys any
+/// other way.
+pub fn is_repair_admitted(cell: &PlanCell) -> bool {
+    cell.technique == Technique::PerGroupRecompute
+        && cell.key_scope.is_none()
+        && !cell.scans.is_empty()
+        && cell.state_downgrade.is_none()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

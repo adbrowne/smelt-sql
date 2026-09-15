@@ -184,6 +184,42 @@ fn spec_downgrade_table_matches_the_pure_availability_functions() {
     );
 }
 
+/// Phase 6c (`docs/outcomes/20260913-trino-incremental/phases/06c-plan.md`):
+/// the `PerGroupRecompute`, no-`key_scope` row is split into a
+/// repair-admitted row (downgraded) and a downgrade-reached row (reachable),
+/// and `state.md`'s degradation-contract sentence states the repair-admitted
+/// requirement rather than the stale "requires nothing" claim.
+#[test]
+fn per_group_recompute_no_key_scope_row_is_split_by_repair_admission() {
+    let text = read_spec("multi_backend.md");
+    let sect = section(&text, "### Incremental & schema evolution per backend");
+
+    assert!(
+        sect.contains("repair-admitted") && sect.contains("downgrade-reached"),
+        "§\"Incremental & schema evolution per backend\" does not distinguish a \
+         repair-admitted PerGroupRecompute cell from a downgrade-reached one: {sect}"
+    );
+
+    let state_text = read_spec("state.md");
+    let sect = section(&state_text, "### The degradation contract");
+    assert!(
+        sect.contains("repair-admitted") && sect.contains("fingerprint sidecar"),
+        "state.md §\"The degradation contract\" does not state the repair-admitted \
+         PerGroupRecompute cell's fingerprint-sidecar requirement"
+    );
+    assert!(
+        sect.contains("downgrade-reached"),
+        "state.md §\"The degradation contract\" no longer names the downgrade-reached \
+         keyless, clamp-less cell that requires nothing"
+    );
+    assert!(
+        sect.contains("clears the cell's now-meaningless")
+            || sect.contains("clears the now-meaningless"),
+        "state.md §\"The degradation contract\" no longer documents that a repair-admitted \
+         cell's downgrade clears its ScanClamp"
+    );
+}
+
 /// Trino introduces no new diagnostic code: the section names only the three
 /// existing codes, and each exists in the diagnostics catalogue.
 #[test]

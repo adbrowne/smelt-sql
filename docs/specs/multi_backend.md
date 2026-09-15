@@ -1239,7 +1239,8 @@ Which landing state that is, per `Technique`, is derived once by
 | `Technique` | On `trino` | Diagnostic |
 |---|---|---|
 | `DeleteInsert` | reachable; the write window is emulated (`DELETE` + `INSERT`), since `supports_insert_overwrite` is `✗`. The pair executes sequentially rather than in one transaction, since Iceberg writes are autocommit-only (`incremental_shapes.md` §"First-run and backfill"); an `INSERT` failure leaves the chunk's window empty rather than rolling back, which re-running the same window restores because the `DELETE` covers exactly the window the `INSERT` writes | — |
-| `PerGroupRecompute`, no `key_scope` | reachable | — |
+| `PerGroupRecompute`, no `key_scope`, repair-admitted (a non-empty derived `ScanClamp`) | downgraded to `DeleteInsert` — no fingerprint sidecar, so the group-grain affected-key discovery a repair-admitted cell always needs has no realisation; the replacement clears the now-meaningless `ScanClamp` | `MaintenanceStateDowngraded` |
+| `PerGroupRecompute`, no `key_scope`, downgrade-reached (no `ScanClamp`) | reachable — this is already the recompute family's own fallback shape, executed by the run shape's own whole-target route | — |
 | `PerGroupRecompute`, key-addressed (`UpstreamKeyed` / `DownstreamGrainOverUpstream`) | refused — needs the fingerprint sidecar, and a clamped current-source scan is unsound here, not merely wider | `UnsupportedOnBackend` |
 | `KeyedFold` | downgraded to its recompute-family equivalent — no reconciliation ledger, so no never-fold-twice refusal | `MaintenanceStateDowngraded` |
 | `ColumnScopedMerge`, `InPlaceUpdate` | downgraded — no transactional merge ledger, exactly as on Spark (Delta) | `MaintenanceStateDowngraded` |

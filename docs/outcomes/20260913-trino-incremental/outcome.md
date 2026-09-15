@@ -167,7 +167,7 @@ approximated.
 | 5 | The merge-less conditional write over T3's staged relation (the departed-row delete as a separate scoped `DELETE`, since `WHEN NOT MATCHED BY SOURCE` is absent), and the column-scoped merge — executing where its cell needs no merge ledger, taking T3's `MaintenanceStateDowngraded` route where it does, per Spark's precedent | done |
 | 6 | The degraded routes proved live on Trino: per-group recompute, the succession grain's full rebuild in place of the patch route (presented table row- and column-identical to the ledger-bearing rebuild's presented arm), and the sidecar-less key-addressed downgrade — each recorded on the cell and explain-visible | blocked |
 | 6b | The degraded families' emission residue: `statement_parity`'s Trino byte-identity leg for the additive keyed fold's downgrade route (its whole-target rebuild statements, proved in 3h only by result-equality — criterion 5's per-family parity covers the downgraded family too), plus succession's own partition-literal sites (its `driving_steps` call site in `execute/project/mod.rs` still passes `Undeclared`, 3f's untouched residue): measure whether the degraded succession route emits a literal against a typed column on Trino at all, then route it through 3b2's single renderer or land a census test recording it unreachable and why (note: `succession_window_predicate` deliberately emits UNTYPED literals for a measured GoogleSQL reason — `maintenance_sql_dialect_purity.rs` pins it) | done |
-| 6c | The repair family's own sidecar requirement, the gap phase 6 measured: a repair-admitted `PerGroupRecompute` cell is ALWAYS over a `mutable_snapshot` source, whose affected-key discovery `repair::discovery_posture` routes unconditionally to `RepairDiscovery::SidecarDiff` — so the cell needs `StateStructure::FingerprintSidecar` independent of `key_scope`, but `required_state_structure` only asks for it when `key_scope: Some(...)`, and a clamp-bounded cell hard-refuses at execution instead of taking a recorded, explain-visible downgrade. Fix in `smelt-logical`'s single-owner availability module (require the sidecar whenever the cell is repair-admitted; `resolve_availability`'s replacement must also clear `scans`, or `has_repair_family_lowering` still dispatches the same resolver), then re-enable phase 6's parked `per_group_recompute_matches_full_refresh_on_trino` — criterion 2's per-group-recompute family and criterion 3's named downgrade both depend on it. Escalate the BigQuery reachability finding separately; do not absorb it | planned |
+| 6c | The repair family's own sidecar requirement, the gap phase 6 measured: a repair-admitted `PerGroupRecompute` cell is ALWAYS over a `mutable_snapshot` source, whose affected-key discovery `repair::discovery_posture` routes unconditionally to `RepairDiscovery::SidecarDiff` — so the cell needs `StateStructure::FingerprintSidecar` independent of `key_scope`, but `required_state_structure` only asks for it when `key_scope: Some(...)`, and a clamp-bounded cell hard-refuses at execution instead of taking a recorded, explain-visible downgrade. Fix in `smelt-logical`'s single-owner availability module (require the sidecar whenever the cell is repair-admitted; `resolve_availability`'s replacement must also clear `scans`, or `has_repair_family_lowering` still dispatches the same resolver), then re-enable phase 6's parked `per_group_recompute_matches_full_refresh_on_trino` — criterion 2's per-group-recompute family and criterion 3's named downgrade both depend on it. Escalate the BigQuery reachability finding separately; do not absorb it | blocked |
 | 6d | The live-Trino conditional-write parity failure 6b measured: `statement_parity::trino::staged_candidate_conditional_parity_on_trino` fails consistently (2 recorded statement groups instead of 1 — a first-run bootstrap `CREATE TABLE … AS` group appears on the second `execute_project` call, as if run 1's target table were invisible to run 2's factory). Untouched by 6b's diff; suspected Iceberg REST-catalog visibility/consistency between two separate `TrinoBackend` instances. Diagnose against the live tier and fix, or — if the cause is the test's own two-backend staging rather than a product defect — restructure the test and record the measured reason. Criterion 5 covers the merge-less conditional write's per-family parity, so this is not deferrable | pending |
 | 7 | `statement_parity`'s structural no-authoring leg for `smelt-backend-trino`, plus a check that adding Trino introduced no second plan-derivation site and no consumer-side dialect branch | pending |
 | 8 | The generative gate: `maintenance_conformance` Trino leg modelled on the Spark leg, over the live tier, oracle-equal after **every** run step with cells resolved under Trino's actual availability, recipe pool no narrower than the admitted families, gated in `compat.yml` | pending |
@@ -535,6 +535,54 @@ approximated.
   comparison would be testing almost nothing.
 
 ## Blocked
+
+- **2026-09-15 — phase 6c fixed the sidecar-requirement gap phase 6 measured, and re-verified it
+  five independent ways, but test 2 (`per_group_recompute_matches_full_refresh_on_trino`) is STILL
+  not achieved live — for a second, unrelated, newly-discovered reason.** The fix itself: `smelt-
+  logical::maintenance::repair::is_repair_admitted` names the discriminator (`PerGroupRecompute`,
+  `key_scope: None`, non-empty `scans`, no recorded downgrade); `required_state_structure`'s
+  `PerGroupRecompute` arm now requires `FingerprintSidecar` for it; `resolve_availability` clears
+  `scans` on a `PerGroupRecompute`-original downgrade so `has_repair_family_lowering` stays exact.
+  Proved: (1) pure unit tests in `crates/smelt-logical/tests/maintenance_availability/{repair.rs,
+  trino_invariants.rs}`; (2) the runtime seam
+  (`availability_seam::repair_downgrade_routes_to_whole_target_rebuild` — the downgrade is reported
+  AND `resolve_live_per_group_recompute_cell` returns `None` for the same cell, no double
+  dispatch); (3) the equivalence invariant with **no live tier at all**
+  (`repair_lowering.rs::repair_downgrade_matches_full_refresh_offline`, DuckDB +
+  `warehouse_tables: none`); (4) `smelt explain --json` on a real project
+  (`explain_maintenance/repair.rs::explain_shows_the_repair_sidecar_downgrade`); (5) `smelt explain
+  --json` on a live-tier-targeted-but-offline-invoked `trino` project
+  (`degraded_routes::per_group_recompute_cell_is_explain_visible_on_trino`, now asserting the
+  downgrade rather than its absence).
+
+  What remains blocked is narrower than phase 6's original finding: driving the SAME fixture
+  through a live `smelt run --target trino` end to end. Measured against the live tier (Docker
+  Trino 483 + Iceberg REST + MinIO, brought up via `scripts/trino-up.sh`): the fixture's Form B
+  band (`WHERE order_date BETWEEN TIMESTAMP '2025-01-14' - INTERVAL '3 days' AND TIMESTAMP
+  '2025-01-14'`) — needed to discharge the repair family's obligation 4 (bounded per-group read
+  footprint) at all — parses fine in `smelt-parser` and is exactly what `smelt explain` proves
+  offline, but Trino's live engine cannot execute it:
+  `io.trino.spi.type.TypeNotFoundException: Unknown type: interval`. Three spellings were tried
+  live, none works end to end: `INTERVAL '3 days'` (quoted, DuckDB-native) parses but does not
+  execute on Trino; `INTERVAL '3' DAY` (quoted number, bare unit — ANSI/Trino-native) does not even
+  parse in `smelt-parser` (`Expected AND_KW, found IDENT` inside the `BETWEEN` clause); `INTERVAL 3
+  DAY` (bare number, bare unit — `smelt-parser` does support this form per `parser/expr.rs`'s own
+  comment) parses, but `smelt_logical::analysis::source_bounds::parse_quoted_interval` — the Form B
+  bound-derivation text-scan classifier obligation 4 depends on — recognises only the quoted-string
+  spelling, so this spelling fails obligation 4 closed (`RepairSliceUnbounded`) before the sidecar
+  question is ever reached. This is a pre-existing gap in Form B's own interval-literal handling
+  (a DuckDB-native SQL spelling baked into a cross-backend derivation), not something phase 6c's
+  sidecar fix could or should absorb — it only surfaced now because test 2 was dead code (never
+  actually run against a live Trino tier) until this phase re-enabled it.
+
+  `per_group_recompute_matches_full_refresh_on_trino` is kept in `degraded_routes.rs` as an
+  `#[allow(dead_code)]` function again (phase 6's own precedent, itself following phase 3's), with
+  an updated doc comment recording this second, distinct root cause. Candidate fix for a future
+  phase: either widen `parse_quoted_interval`/the Form B classifier to also recognise the
+  `INTERVAL <n> <UNIT>` bare-numeric spelling `smelt-parser` already accepts (letting Trino-portable
+  SQL discharge obligation 4), or extend `smelt-parser`'s `BETWEEN`-clause handling to accept
+  `INTERVAL '<n>' <UNIT>` so a Trino-executable literal at least parses — either unblocks this test
+  without touching the sidecar fix this phase actually shipped.
 
 - **2026-09-15 — phase 6 blocked on test 2 (`per_group_recompute_matches_full_refresh_on_trino`),
   after landing tests 1, 3, 4, 5, 6 live.** `degraded_routes.rs` proves the succession

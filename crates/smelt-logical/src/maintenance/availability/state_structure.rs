@@ -2,6 +2,7 @@ use serde::Serialize;
 
 use smelt_dialect::SqlDialect;
 
+use crate::maintenance::repair::is_repair_admitted;
 use crate::maintenance::{FoldGrade, KeyDiscovery, PlanCell, Technique};
 
 /// The [`StateStructure`]s `dialect` has a builder for, independent of
@@ -139,7 +140,15 @@ impl StateStructure {
 /// (`UpstreamKeyed`, `DownstreamGrainOverUpstream`) both need the sidecar;
 /// `EnrichmentKeyed` never reaches this arm, since it only ever addresses a
 /// `ColumnScopedMerge` cell (already covered by the merge-ledger arm below).
-/// Exhaustive over both [`Technique`] and, for the `PerGroupRecompute` arm,
+/// A `PerGroupRecompute` cell with no `key_scope` needs the sidecar too when
+/// it is [`crate::maintenance::repair::is_repair_admitted`]: repair
+/// admission is only ever reachable over a `MutationProfile::MutableSnapshot`
+/// source, whose affected-key discovery is unconditionally the group-grain
+/// sidecar diff (`is_repair_admitted`'s own doc comment). Only a
+/// **downgrade-reached** keyless, clamp-less `PerGroupRecompute` cell — one
+/// that is itself the recompute family's fallback for some other downgraded
+/// technique, never a plain clamp-bounded repair — needs nothing. Exhaustive
+/// over both [`Technique`] and, for the `PerGroupRecompute` arm,
 /// [`KeyDiscovery`] — a new technique or discovery route is a compile error
 /// here, not a silently-unclassified one.
 ///
@@ -168,7 +177,13 @@ pub fn required_state_structure(cell: &PlanCell) -> Option<StateStructure> {
         Technique::SuccessionPatch => Some(StateStructure::TombstoneLedger),
         Technique::DeleteInsert => None,
         Technique::PerGroupRecompute => match &cell.key_scope {
-            None => None,
+            None => {
+                if is_repair_admitted(cell) {
+                    Some(StateStructure::FingerprintSidecar)
+                } else {
+                    None
+                }
+            }
             Some(key_scope) => match key_scope.discovery {
                 KeyDiscovery::UpstreamKeyed | KeyDiscovery::DownstreamGrainOverUpstream => {
                     Some(StateStructure::FingerprintSidecar)

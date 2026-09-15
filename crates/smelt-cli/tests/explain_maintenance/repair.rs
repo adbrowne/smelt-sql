@@ -1,3 +1,5 @@
+use std::process::Command;
+
 use crate::support::build_report_for;
 use smelt_cli::build_maintenance_plan_report;
 
@@ -207,3 +209,95 @@ fn explain_non_repair_cell_prints_no_repair_stanza() {
 // reason, plus the key-addressed repair cell's upstream-sidecar discovery
 // line.
 // =============================================================================
+
+// =============================================================================
+// Phase 6c (`docs/outcomes/20260913-trino-incremental/phases/06c-plan.md`):
+// a repair-admitted `PerGroupRecompute` cell's own state downgrade —
+// criterion 3's named, explain-visible downgrade when the fingerprint
+// sidecar has no realisation.
+// =============================================================================
+
+const REPAIR_SIDECAR_SMELT_YML: &str = "name: repair_sidecar_downgrade_fixture\n\
+    version: 1\n\
+    paths:\n  - models\n\
+    targets:\n  dev:\n    type: duckdb\n    schema: main\n\
+    default_materialization: view\n\
+    state:\n  warehouse_tables: none\n";
+
+const REPAIR_SIDECAR_ORDERS_SOURCE: &str = "description: orders\n\
+    columns:\n\
+    - name: order_id\n  type: INTEGER\n\
+    - name: customer_id\n  type: INTEGER\n\
+    - name: amount\n  type: DECIMAL(10,2)\n\
+    - name: order_date\n  type: TIMESTAMP\n\
+    timeseries:\n  event_time_column: order_date\n  partition_column: order_date\n  \
+    granularity: day\n\
+    unique_key: [order_id]\n\
+    mutation_profile:\n  kind: mutable_snapshot\n";
+
+const REPAIR_SIDECAR_MODEL_SQL: &str = "---\n\
+     materialization: table\n\
+     refresh: incremental\n\
+     grain: key\n\
+     unique_key: customer_id\n\
+     ---\n\
+     SELECT customer_id, MAX(amount) AS max_amount \
+     FROM smelt.sources.orders \
+     WHERE order_date BETWEEN TIMESTAMP '2025-01-12' - INTERVAL '1 day' AND TIMESTAMP \
+     '2025-01-12' \
+     GROUP BY customer_id\n";
+
+/// A repair-admitted `PerGroupRecompute` cell (`MAX`, a non-invertible
+/// combiner, over a `mutable_snapshot` source with a bounded Form B band)
+/// downgrades to `DeleteInsert` on a project with `state.warehouse_tables:
+/// none` — the fingerprint sidecar its group-grain affected-key discovery
+/// always needs (phase 6c) has no realisation there. `smelt explain --json`
+/// must render the downgrade naming the missing structure and the
+/// replacement technique.
+#[test]
+fn explain_shows_the_repair_sidecar_downgrade() {
+    let tmp = tempfile::TempDir::new().expect("create tempdir");
+    std::fs::write(tmp.path().join("smelt.yml"), REPAIR_SIDECAR_SMELT_YML).unwrap();
+    std::fs::create_dir_all(tmp.path().join("models/sources")).unwrap();
+    std::fs::write(
+        tmp.path().join("models/sources/orders.yml"),
+        REPAIR_SIDECAR_ORDERS_SOURCE,
+    )
+    .unwrap();
+    std::fs::write(
+        tmp.path().join("models/customer_max_amount.sql"),
+        REPAIR_SIDECAR_MODEL_SQL,
+    )
+    .unwrap();
+
+    let output = Command::new(env!("CARGO_BIN_EXE_smelt"))
+        .arg("explain")
+        .arg("customer_max_amount")
+        .arg("--json")
+        .arg("--project-dir")
+        .arg(tmp.path())
+        .output()
+        .expect("spawn smelt explain customer_max_amount --json");
+
+    assert!(
+        output.status.success(),
+        "smelt explain customer_max_amount --json failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let json: serde_json::Value = serde_json::from_str(&stdout)
+        .unwrap_or_else(|e| panic!("explain --json output must parse: {e}\n{stdout}"));
+
+    let cells = json["cells"].as_array().expect("cells array");
+    let downgraded = cells
+        .iter()
+        .find(|c| c.get("state_downgrade").is_some())
+        .unwrap_or_else(|| panic!("expected a cell carrying state_downgrade: {stdout}"));
+    assert_eq!(downgraded["technique"], "DeleteInsert");
+    let downgrade = &downgraded["state_downgrade"];
+    assert_eq!(downgrade["original"], "PerGroupRecompute");
+    assert!(downgrade["missing"]
+        .as_str()
+        .unwrap()
+        .contains("fingerprint sidecar"));
+}

@@ -489,5 +489,5 @@ pub fn resolve_cell_technique_with_write_pin(
 mod live_cells;
 pub use live_cells::{
     resolve_keyed_fold_state_downgrade, resolve_live_column_scoped_cell,
-    resolve_live_in_place_update_cell, widen_horizon_for_batch,
+    resolve_live_in_place_update_cell, resolve_repair_state_downgrade, widen_horizon_for_batch,
 };

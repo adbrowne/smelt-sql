@@ -177,5 +177,15 @@ pub fn resolve_availability(cells: &mut [PlanCell], available: &StateAvailabilit
             ),
         });
         cell.technique = replacement;
+        // A repair-admitted `PerGroupRecompute` cell's own `ScanClamp` is
+        // meaningless once the run has fallen back to the whole-target
+        // rebuild (`state.md` §"The degradation contract" step 2) — clearing
+        // it keeps the "recorded downgrade, no `key_scope`, no derived
+        // `ScanClamp`" discriminator (`has_repair_family_lowering`) exact for
+        // every downgrade shape, not only the ones that started with an
+        // empty `scans` already.
+        if original == Technique::PerGroupRecompute {
+            cell.scans.clear();
+        }
     }
 }

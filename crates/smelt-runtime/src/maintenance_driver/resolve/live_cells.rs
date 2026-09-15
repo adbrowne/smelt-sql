@@ -403,6 +403,53 @@ pub fn resolve_keyed_fold_state_downgrade(
     })
 }
 
+/// Whether this model's own repair-family `Trigger::NewData`/`Technique::
+/// PerGroupRecompute` cell was downgraded by availability resolution
+/// (`docs/specs/state.md` §"The degradation contract" step 2, phase 6c
+/// `docs/outcomes/20260913-trino-incremental/phases/06c-plan.md`): a
+/// repair-admitted cell whose fingerprint sidecar has no realisation on this
+/// target. `None` when the model carries no maintenance plan or its
+/// per-group-recompute cell carries no such downgrade (the sidecar is
+/// available, or the model has no repair cell at all) — the caller's default
+/// is [`resolve_live_per_group_recompute_cell`]'s ordinary lowering,
+/// unchanged. `Some` names the missing structure and the downgraded
+/// technique the plan layer chose (`DeleteInsert`, with the cell's
+/// `ScanClamp` cleared — `resolve_availability`'s own clamp-clearing for a
+/// `PerGroupRecompute` original), mirroring
+/// [`resolve_keyed_fold_state_downgrade`] exactly: the caller does not
+/// itself dispatch this cell either, since a repair-admitted cell reached by
+/// this downgrade has no repair-family lowering
+/// (`smelt_logical::maintenance::repair::has_repair_family_lowering`) — it
+/// instead routes to the run shape's own whole-target rebuild.
+pub fn resolve_repair_state_downgrade(
+    sql: &str,
+    table: &str,
+    metadata: &smelt_core::ModelMetadata,
+    sources: &[SourceFacts],
+    explicitly_mutable: &HashSet<String>,
+    availability: &StateAvailability,
+) -> Option<smelt_logical::maintenance::availability::StateDowngrade> {
+    let result = crate::maintenance_availability::derive_resolved(
+        sql,
+        table,
+        metadata,
+        sources,
+        explicitly_mutable,
+        None,
+        &[],
+        &[],
+        &SourceReferentialIntegrity::new(),
+        None,
+        None,
+        availability,
+        &[],
+    )?;
+    result.plan.cells.into_iter().find_map(|cell| {
+        let downgrade = cell.state_downgrade?;
+        (downgrade.original == Technique::PerGroupRecompute).then_some(downgrade)
+    })
+}
+
 /// Widen a derived [`ScanClamp`]'s forward reach to at least `batch_width`
 /// before handing it to [`execute_column_scoped_merge`] as the horizon `H`.
 ///

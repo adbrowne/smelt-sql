@@ -13,6 +13,7 @@ use smelt_logical::maintenance::{
 use smelt_types::SqlFunction;
 
 mod realisation;
+mod repair;
 mod resolution;
 mod succession;
 mod trino_invariants;

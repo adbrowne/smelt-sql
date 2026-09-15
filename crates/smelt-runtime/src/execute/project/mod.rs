@@ -1645,6 +1645,29 @@ pub async fn execute_project(
                 ),
                 None => None,
             };
+            // A repair-admitted `Technique::PerGroupRecompute` cell
+            // downgraded by availability resolution (`docs/specs/state.md`
+            // §"The degradation contract" step 2, phase 6c
+            // `docs/outcomes/20260913-trino-incremental/phases/06c-plan.md`):
+            // its group-grain affected-key discovery is unconditionally the
+            // fingerprint sidecar diff, which has no realisation here. Like
+            // `keyed_fold_state_downgrade` above, the resulting cell has no
+            // repair-family lowering (its `ScanClamp` is cleared by
+            // `resolve_availability`), so it folds into the same
+            // whole-target-rebuild dispatch below rather than a second arm.
+            let repair_state_downgrade = match plan.model_file.metadata.as_deref() {
+                Some(metadata) => crate::maintenance_driver::resolve_repair_state_downgrade(
+                    &clean_sql_for_merge,
+                    &db_table_name,
+                    metadata,
+                    &maint_source_facts,
+                    &explicitly_mutable,
+                    &availability,
+                ),
+                None => None,
+            };
+            let whole_target_rebuild_downgrade =
+                keyed_fold_state_downgrade.or(repair_state_downgrade);
             // A key-addressed model-edge cell (`docs/specs/incremental_models.md`
             // §"Upstream model edges"): an upstream maintained model whose own
             // derived output-delta shape is `KeyedUpsert` folds via the repair
@@ -1725,19 +1748,23 @@ pub async fn execute_project(
             // own create path is what materializes the table
             // (`table_exists_before_run` was captured before any of this
             // model's writes).
-            let exec_result = if let Some(downgrade) = &keyed_fold_state_downgrade {
-                // The additive fold's own downgrade (`state.md` §"The
-                // degradation contract" step 2): no repair-family lowering
-                // exists for the keyless, clamp-less `PerGroupRecompute` cell
-                // `resolve_keyed_fold_state_downgrade` reported, so the run
-                // shape's own whole-target route runs unconditionally —
-                // ignoring any requested run window, the same drop+recreate
-                // shape the `--full-refresh`-without-a-window arm below
-                // takes for an ordinary window-forward keyed model.
+            let exec_result = if let Some(downgrade) = &whole_target_rebuild_downgrade {
+                // An availability downgrade with no repair-family lowering
+                // (`state.md` §"The degradation contract" step 2): either the
+                // additive fold's own downgrade (`resolve_keyed_fold_state_
+                // downgrade`) or a repair-admitted `PerGroupRecompute` cell's
+                // (`resolve_repair_state_downgrade`) — both land on a
+                // keyless, clamp-less `PerGroupRecompute`-shaped cell with no
+                // `has_repair_family_lowering` route, so the run shape's own
+                // whole-target route runs unconditionally — ignoring any
+                // requested run window, the same drop+recreate shape the
+                // `--full-refresh`-without-a-window arm below takes for an
+                // ordinary window-forward keyed model.
                 tracing::debug!(
                     model = %plan.name,
+                    original = ?downgrade.original,
                     missing = downgrade.missing.as_str(),
-                    "additive keyed fold downgraded to a whole-target rebuild: {}",
+                    "downgraded to a whole-target rebuild: {}",
                     downgrade.reason
                 );
                 let clean_sql = smelt_parser::strip_frontmatter(&plan.sql);

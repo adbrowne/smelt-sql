@@ -1,11 +1,13 @@
-//! Phase 6 (`docs/outcomes/20260913-trino-incremental/phases/06-plan.md`):
-//! the three routes Trino reaches *because* T3 declined every correctness
-//! structure — the repair family's per-group recompute (which needs no
-//! structure at all when its key scope is `None`, so it stays
-//! `PerGroupRecompute` unconditionally rather than downgrading), the
-//! succession grain's ledger-less full rebuild standing in for the
-//! window-forward patch, and the key-addressed model edge's sidecar-less
-//! downgrade — proved live on Trino.
+//! Phase 6 (`docs/outcomes/20260913-trino-incremental/phases/06-plan.md`),
+//! completed by phase 6c (`docs/outcomes/20260913-trino-incremental/
+//! phases/06c-plan.md`): the three routes Trino reaches *because* T3
+//! declined every correctness structure — the repair family's per-group
+//! recompute, downgraded to a whole-target rebuild because every
+//! repair-admitted cell's affected-key discovery is unconditionally the
+//! group-grain fingerprint-sidecar diff (`docs/specs/state.md` §"The
+//! degradation contract"), the succession grain's ledger-less full rebuild
+//! standing in for the window-forward patch, and the key-addressed model
+//! edge's sidecar-less downgrade — proved live on Trino.
 
 use super::common;
 use super::{explain_json, run_smelt};
@@ -27,10 +29,14 @@ use std::process::Command;
 /// `smelt_maintenance_testkit::recipe::RepairRecipe` both pin. A
 /// `mutable_snapshot` source defeats a plain keyed fold's trust in an
 /// unretracted delta, so the model's only `NewData`-eligible cell is the
-/// repair family's `Technique::PerGroupRecompute` — and since that cell's
-/// `key_scope` is `None` (a plain clamp-bounded repair, not a key-addressed
-/// one), `required_state_structure` returns `None` for it: it needs no
-/// state structure and so is never downgraded, on Trino or anywhere else.
+/// repair family's `Technique::PerGroupRecompute` — repair-admitted (a plain
+/// clamp-bounded repair, `key_scope: None`), which needs the fingerprint
+/// sidecar unconditionally (phase 6c, `docs/specs/state.md` §"The
+/// degradation contract") because its affected-key discovery is
+/// unconditionally the group-grain sidecar diff for a `mutable_snapshot`
+/// source. Trino realises no state structure at all, so this cell downgrades
+/// to `DeleteInsert` — a whole-target rebuild — rather than staying
+/// `PerGroupRecompute`.
 fn stage_repair_project(tmp: &tempfile::TempDir, schema: &str) -> std::path::PathBuf {
     let root = tmp.path().join(format!("repair_trino_{schema}"));
     fs::create_dir_all(root.join("models/sources")).unwrap();
@@ -108,12 +114,14 @@ fn seed_trino_repair_orders(schema: &str, rows: &[(i64, i64, &str, &str)]) {
 }
 
 /// Test 1: `per_group_recompute_cell_is_explain_visible_on_trino` — the
-/// repair cell reports `Technique::PerGroupRecompute` in `smelt explain
-/// --json` on a `trino` target (offline — `smelt explain` never opens a
-/// live connection), and its emitted statements carry the affected-key
-/// scan clamp (the `order_date >= … - INTERVAL …` band derived from the
-/// repair family's bounded per-group read footprint), not an unbounded
-/// scan of the source.
+/// repair cell reports `state_downgrade { original: PerGroupRecompute,
+/// missing: "fingerprint sidecar" }` and the replacement `technique:
+/// DeleteInsert` in `smelt explain --json` on a `trino` target (offline —
+/// `smelt explain` never opens a live connection): phase 6c's fix (`docs/
+/// specs/state.md` §"The degradation contract") — every repair-admitted
+/// `PerGroupRecompute` cell needs the fingerprint sidecar unconditionally,
+/// which Trino does not realise, so the cell downgrades to a whole-target
+/// rebuild rather than staying `PerGroupRecompute`.
 #[test]
 fn per_group_recompute_cell_is_explain_visible_on_trino() {
     let Some(_env) = trino_env() else {
@@ -130,53 +138,42 @@ fn per_group_recompute_cell_is_explain_visible_on_trino() {
     let cells = json["cells"].as_array().expect("cells array");
     let cell = cells
         .iter()
-        .find(|c| c["technique"] == "PerGroupRecompute")
-        .unwrap_or_else(|| panic!("expected a PerGroupRecompute cell: {json}"));
-    assert!(
-        cell.get("state_downgrade").is_none(),
-        "a clamp-bounded repair cell (key_scope: None) needs no state structure and must not \
-         be downgraded: {json}"
-    );
-    let statements = cell["statements"]
-        .as_array()
-        .unwrap_or_else(|| panic!("expected statements for the repair cell: {json}"));
-    assert!(
-        !statements.is_empty(),
-        "the repair cell must emit real statements: {json}"
-    );
-    let all_sql = statements
-        .iter()
-        .map(|s| s["sql"].as_str().unwrap_or_default())
-        .collect::<Vec<_>>()
-        .join("\n");
-    assert!(
-        all_sql.contains("order_date >=") && all_sql.contains("order_date <"),
-        "the repair cell's affected-key discovery must carry its scan clamp, not an unbounded \
-         scan: {all_sql}"
-    );
+        .find(|c| c.get("state_downgrade").is_some())
+        .unwrap_or_else(|| panic!("expected a cell carrying state_downgrade: {json}"));
+    assert_eq!(cell["technique"], "DeleteInsert");
+    let downgrade = &cell["state_downgrade"];
+    assert_eq!(downgrade["original"], "PerGroupRecompute");
+    assert_eq!(downgrade["missing"], "fingerprint sidecar");
 }
 
-/// Test 2 (NOT achieved — see `docs/outcomes/20260913-trino-incremental/
-/// outcome.md`'s Blocked log, 2026-09-15 "phase 6"): `per_group_recompute_
+/// Test 2 (STILL NOT achieved — see `docs/outcomes/20260913-trino-incremental/
+/// outcome.md`'s Blocked log, 2026-09-15 "phase 6c"): `per_group_recompute_
 /// matches_full_refresh_on_trino` was meant to run the repair model
 /// end-to-end through `smelt run --target trino`, then assert row-identity
 /// to a `--full-refresh` oracle after a genuine in-place source mutation.
-/// Measured live instead: every repair-admitted `PerGroupRecompute` cell
-/// (`smelt_logical::maintenance::repair::derive_repair_cell`, always over a
-/// `MutationProfile::MutableSnapshot` source per `derive/new_data.rs`'s own
-/// admission gate) has its affected-key discovery routed to
-/// `RepairDiscovery::SidecarDiff` UNCONDITIONALLY — never the plain clamped
-/// scan — so it needs `StateStructure::FingerprintSidecar` regardless of
-/// `key_scope` (`None` here). `required_state_structure` does not know
-/// this: its `PerGroupRecompute` arm returns `None` whenever `key_scope` is
-/// `None`, so `resolve_availability` never downgrades this cell, and
-/// execution hard-refuses instead (`Feature not supported by Trino:
-/// group-grain fingerprint-sidecar affected-key discovery for a
-/// mutable_snapshot repair source (P9)`) — following phase 3's own
+/// Phase 6c's own fix (the sidecar requirement + downgrade) IS proven —
+/// `per_group_recompute_cell_is_explain_visible_on_trino` above shows the
+/// cell downgrading to `DeleteInsert` exactly as `resolve_availability` now
+/// derives, and `crates/smelt-runtime/tests/repair_lowering.rs::
+/// repair_downgrade_matches_full_refresh_offline` proves the SAME downgrade
+/// is oracle-equal with no live tier at all. What blocks this SPECIFIC live
+/// test is a second, unrelated, newly-discovered gap in the repair
+/// fixture's own obligation-4 admission: the Form B bound-derivation
+/// classifier (`smelt_logical::analysis::source_bounds::parse_quoted_interval`)
+/// recognises only the quoted-string spelling `INTERVAL '3 days'` — which
+/// `smelt-parser` accepts but Trino's live engine cannot execute
+/// (`io.trino.spi.type.TypeNotFoundException: Unknown type: interval`).  The
+/// two ANSI alternates were also tried live: `INTERVAL '3' DAY` (quoted
+/// number, bare unit) fails to even PARSE in `smelt-parser` (`Expected
+/// AND_KW, found IDENT` inside the `BETWEEN` clause); `INTERVAL 3 DAY` (bare
+/// number, bare unit) parses fine but is not a spelling
+/// `parse_quoted_interval`'s text scan recognises at all, so obligation 4
+/// fails closed (`RepairSliceUnbounded`) before the sidecar question is ever
+/// reached. None of the three spellings lets this model's own Form B band
+/// admit AND execute on Trino today. Following phase 3's own
 /// `#[allow(dead_code)]` convention for a discovered gap outside this
-/// phase's task list, rather than leaving a permanently-red `#[test]` in
-/// the tree. `stage_repair_project`/`seed_trino_repair_orders` above are
-/// kept ready for whichever future phase fixes the gap.
+/// phase's task list, rather than leaving a permanently-red `#[test]` in the
+/// tree.
 #[allow(dead_code)]
 fn per_group_recompute_matches_full_refresh_on_trino() {
     let Some(_env) = trino_env() else {

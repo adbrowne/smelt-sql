@@ -388,16 +388,27 @@ Statefulness is an **admission input resolved late**. Plan derivation proceeds i
    The required structure is a function of the **cell**, not of its technique alone: a
    `PerGroupRecompute` cell addressed by a key-addressed model edge (`incremental_models.md`
    §"Upstream model edges") requires the **fingerprint sidecar**, because its affected-key
-   discovery is a group-grain sidecar diff — a plain, clamp-bounded `PerGroupRecompute` cell
-   requires nothing. A cell whose technique
-   requires an unavailable structure is **downgraded to the cheapest member of the recompute
-   family that preserves the equivalence invariant** (typically per-region or per-key-group
-   recompute), and the downgrade is recorded on the cell (`MaintenanceStateDowngraded`). For the
-   key-addressed cell this means the whole per-group route is what the missing sidecar denies,
-   so the cell downgrades to `DeleteInsert` (full-region recompute), never a no-op "downgrade"
-   back to the same `PerGroupRecompute` technique it already carries. No consumer re-derives
-   this requirement at run time — it is resolved once, here, and any run-time check for the
-   same fact is a defensive guard against inconsistent inputs, not a second source of truth.
+   discovery is a group-grain sidecar diff. A **repair-admitted**, clamp-bounded
+   `PerGroupRecompute` cell (`incremental_models.md` §"The repair family") requires the
+   fingerprint sidecar too: repair narrowing only ever fires for a non-append-only source —
+   `ChangeFeed` is refused upstream at derivation time, leaving `MutationProfile::
+   MutableSnapshot`, whose affected-key discovery is unconditionally the group-grain sidecar
+   diff (`discovery_posture`). Only a **downgrade-reached** `PerGroupRecompute` cell — one that
+   carries neither a `key_scope` nor a derived `ScanClamp` because it is itself the recompute
+   family's fallback for some other downgraded technique — requires nothing. A cell whose
+   technique requires an unavailable structure is **downgraded to the cheapest member of the
+   recompute family that preserves the equivalence invariant** (typically per-region or
+   per-key-group recompute), and the downgrade is recorded on the cell
+   (`MaintenanceStateDowngraded`). For the key-addressed cell this means the whole per-group
+   route is what the missing sidecar denies, so the cell downgrades to `DeleteInsert`
+   (full-region recompute), never a no-op "downgrade" back to the same `PerGroupRecompute`
+   technique it already carries. A repair-admitted cell takes the same `DeleteInsert` downgrade,
+   and the replacement **clears the cell's now-meaningless `ScanClamp`** — the repair-admitted
+   cell's own bounded per-group slice has no meaning once the run has fallen back to the
+   run shape's own whole-target rebuild, so the "recorded downgrade, no `key_scope`, no derived
+   `ScanClamp`" discriminator below stays exact. No consumer re-derives this requirement at run
+   time — it is resolved once, here, and any run-time check for the same fact is a defensive
+   guard against inconsistent inputs, not a second source of truth.
    The recompute-family fallback a `key_scope`-carrying cell downgrades to also depends on the
    key scope's own discovery route: `UpstreamKeyed` and `DownstreamGrainOverUpstream` both
    address a real `PerGroupRecompute` cell the key-addressed driver dispatches, but

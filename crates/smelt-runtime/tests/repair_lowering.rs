@@ -1226,6 +1226,112 @@ async fn per_group_recompute_matches_full_refresh_after_retraction() {
     );
 }
 
+// ── 6b (phase 6c) ────────────────────────────────────────────────────────
+/// The equivalence invariant under phase 6c's new downgrade, proved with no
+/// live tier: `state.warehouse_tables: none` makes the fingerprint sidecar
+/// unavailable, so the repair-admitted cell downgrades to `DeleteInsert` (a
+/// whole-target rebuild) instead of the repair family's own targeted
+/// delete+insert. The retracted state must still equal a full refresh over
+/// the same inputs — the downgrade changes cost, never result
+/// (`docs/specs/state.md` §"The degradation contract").
+#[tokio::test]
+async fn repair_downgrade_matches_full_refresh_offline() {
+    use std::sync::Arc;
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project_dir = tmp.path().join("project");
+    let db_path = tmp.path().join("run.duckdb");
+
+    stage_repair_project(&project_dir);
+
+    // `state.warehouse_tables: none` (`docs/specs/state.md` §"Opting out of
+    // warehouse bookkeeping") is what makes `StateAvailability::none()`
+    // reach the real run — the same lever `smelt.yml` exposes, not a
+    // test-only backdoor (mirrors `downgraded_keyed_model_recomputes_full_
+    // scan_and_matches_a_full_refresh` below).
+    let smelt_yml_path = project_dir.join("smelt.yml");
+    let mut yml = std::fs::read_to_string(&smelt_yml_path).expect("read smelt.yml");
+    yml.push_str("\nstate:\n  warehouse_tables: none\n");
+    std::fs::write(&smelt_yml_path, yml).expect("append warehouse_tables: none");
+
+    let config = Arc::new(smelt_core::config::Config::load(&project_dir).expect("load smelt.yml"));
+
+    {
+        let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("open duckdb");
+        seed_orders(&backend).await;
+    }
+
+    // Run 1: creation.
+    {
+        let (db, graph) = build_db_and_graph(&project_dir, &config);
+        smelt_runtime::execute_project(
+            "repair-downgrade-run-1".to_string(),
+            select_request("dev", "customer_max_amount", "2025-01-11", "2025-01-14"),
+            Arc::clone(&config),
+            graph,
+            db,
+            &project_dir,
+            &DuckDbBackendFactory {
+                db_path: db_path.clone(),
+            },
+            &smelt_runtime::NoOpReporter,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await
+        .expect("first run (create) must succeed");
+    }
+
+    // The same in-place retraction `run_repair_fixture` exercises: customer
+    // 1's top-of-group contribution is corrected downward, which `MAX`
+    // cannot undo.
+    {
+        let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("reopen duckdb");
+        use smelt_backend::Backend;
+        backend
+            .execute_sql("UPDATE main.sources_raw_orders SET amount = 10.00 WHERE order_id = 1")
+            .await
+            .expect("retract");
+    }
+
+    // Run 2: no fingerprint sidecar is available, so the repair-admitted
+    // cell downgrades to a whole-target `DeleteInsert` rebuild rather than
+    // the repair family's own targeted delete+insert.
+    let (db, graph) = build_db_and_graph(&project_dir, &config);
+    smelt_runtime::execute_project(
+        "repair-downgrade-run-2".to_string(),
+        select_request("dev", "customer_max_amount", "2025-01-16", "2025-01-17"),
+        Arc::clone(&config),
+        graph,
+        db,
+        &project_dir,
+        &DuckDbBackendFactory {
+            db_path: db_path.clone(),
+        },
+        &smelt_runtime::NoOpReporter,
+        tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .expect("second run (whole-target rebuild) must succeed");
+
+    let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("reopen duckdb");
+    assert!(
+        multiset_equal(
+            &backend,
+            "SELECT customer_id, max_amount FROM main.customer_max_amount",
+            REPAIR_FIXTURE_ORACLE,
+        )
+        .await,
+        "the whole-target rebuild after the downgrade must equal a full refresh over the same \
+         inputs — the downgrade must change cost, never result"
+    );
+}
+
 // ── 7 ────────────────────────────────────────────────────────────────────
 /// A `write: diff_patch` pin over the same repair fixture: run 2 dispatches
 /// `execute_diff_patch` instead of the repair family's own targeted

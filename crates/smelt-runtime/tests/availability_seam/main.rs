@@ -223,6 +223,72 @@ fn derive_resolved_under_full_availability_is_byte_identical_to_the_raw_derivati
     }
 }
 
+/// Phase 6c (`docs/outcomes/20260913-trino-incremental/phases/06c-plan.md`)
+/// test 6: for a structure-less project, `resolve_repair_state_downgrade`
+/// reports the repair-admitted cell's downgrade, and
+/// `resolve_live_per_group_recompute_cell` returns `None` for the same cell
+/// — no double dispatch of one cell through two different execution routes.
+/// The fixture mirrors `repair_lowering.rs`'s own `REPAIR_MODEL_SQL`: `MAX`
+/// (non-invertible) folded per `customer_id` over a clocked
+/// `mutable_snapshot` source, with an explicit Form B band on `order_date`
+/// that discharges obligation 4 (bounded per-group read footprint).
+#[test]
+fn repair_downgrade_routes_to_whole_target_rebuild() {
+    const REPAIR_MODEL_SQL: &str = "SELECT customer_id, MAX(amount) AS max_amount \
+         FROM smelt.sources.raw.orders \
+         WHERE order_date BETWEEN TIMESTAMP '2025-01-12' - INTERVAL '1 day' AND TIMESTAMP \
+         '2025-01-12' \
+         GROUP BY customer_id";
+    let smelt_core::FileMetadata::Single { metadata, .. } = smelt_core::extract_file_metadata(
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: key\nunique_key: \
+         customer_id\n---\n",
+    )
+    .expect("parse frontmatter") else {
+        panic!("single-model file");
+    };
+    let sources = vec![SourceFacts {
+        name: "raw.orders".to_string(),
+        mutation: MutationProfile::MutableSnapshot,
+        partition_col: Some("order_date".to_string()),
+        unique_key: vec!["order_id".to_string()],
+        allow_full_scan: false,
+    }];
+    let mut explicitly_mutable = HashSet::new();
+    explicitly_mutable.insert("raw.orders".to_string());
+
+    let structure_less = StateAvailability::none();
+
+    let downgrade = smelt_runtime::maintenance_driver::resolve_repair_state_downgrade(
+        REPAIR_MODEL_SQL,
+        "customer_max_amount",
+        &metadata,
+        &sources,
+        &explicitly_mutable,
+        &structure_less,
+    )
+    .expect("a repair-admitted cell must report its downgrade on a structure-less backend");
+    assert_eq!(downgrade.original, Technique::PerGroupRecompute);
+    assert_eq!(downgrade.missing, StateStructure::FingerprintSidecar);
+
+    let live_cell = smelt_runtime::maintenance_driver::resolve_live_per_group_recompute_cell(
+        REPAIR_MODEL_SQL,
+        "customer_max_amount",
+        &metadata,
+        &sources,
+        &explicitly_mutable,
+        &[],
+        SqlDialect::DuckDB,
+        false,
+        &structure_less,
+    )
+    .expect("resolver must not error");
+    assert!(
+        live_cell.is_none(),
+        "a repair-admitted cell reached by the downgrade must not ALSO resolve live through \
+         the repair-family driver — that would dispatch the same cell twice"
+    );
+}
+
 /// `docs/outcomes/20260913-trino-ledger/outcome.md` phase 4, criterion 4: a
 /// model targeting a `trino` backend (no `MaintenanceDialect` mapping) must
 /// still be profiled through `smelt_runtime::profile::profiles_for_workspace`

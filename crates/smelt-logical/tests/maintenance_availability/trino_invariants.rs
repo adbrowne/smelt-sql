@@ -15,13 +15,16 @@
 
 use smelt_core::config::WarehouseTables;
 use smelt_dialect::SqlDialect;
+use smelt_logical::maintenance::availability::StateStructure;
 use smelt_logical::maintenance::availability::{
     realisable_state_structures, recompute_equivalent, required_state_structure,
     resolve_availability, StateAvailability,
 };
+use smelt_logical::maintenance::repair::has_repair_family_lowering;
 use smelt_logical::maintenance::{Corner, KeyDiscovery, KeyScope, PlanCell, Technique};
 
 use super::base_cell;
+use super::repair::admitted_repair_cell_for_trino;
 
 /// Every [`Technique`] variant. The `match` in
 /// [`every_technique_downgrades_or_needs_nothing_on_trino`] over this array
@@ -159,6 +162,26 @@ fn every_technique_downgrades_or_needs_nothing_on_trino() {
             }
         }
     }
+}
+
+/// Phase 6c test 3: a repair-admitted `PerGroupRecompute` cell downgrades to
+/// `DeleteInsert` on Trino (which realises no state structure at all), with
+/// its `ScanClamp` cleared and no repair-family lowering — the whole-target
+/// route dispatches it instead.
+#[test]
+fn repair_cell_downgrades_to_delete_insert_on_trino() {
+    let trino_available = StateAvailability::resolve(
+        WarehouseTables::Allowed,
+        &realisable_state_structures(SqlDialect::Trino),
+    );
+    let mut cells = vec![admitted_repair_cell_for_trino()];
+    resolve_availability(&mut cells, &trino_available);
+    assert_eq!(cells[0].technique, Technique::DeleteInsert);
+    let downgrade = cells[0].state_downgrade.as_ref().unwrap();
+    assert_eq!(downgrade.original, Technique::PerGroupRecompute);
+    assert_eq!(downgrade.missing, StateStructure::FingerprintSidecar);
+    assert!(cells[0].scans.is_empty());
+    assert!(!has_repair_family_lowering(&cells[0]));
 }
 
 /// Non-vacuity for the test above, and the resolve-late half of the
