@@ -100,7 +100,7 @@ crates/smelt-parser/src/parser/tests.rs 10461
 crates/smelt-parser/src/parser/types.rs 1086
 crates/smelt-runtime/src/compile.rs 4327
 crates/smelt-runtime/src/cumulative.rs 2225
-crates/smelt-runtime/src/execute/project/mod.rs 5246
+crates/smelt-runtime/src/execute/project/mod.rs 5251
 crates/smelt-runtime/src/meta_eval.rs 2180
 crates/smelt-runtime/src/transformer.rs 1344
 crates/smelt-runtime/src/windowing.rs 1277
@@ -110,6 +110,7 @@ crates/smelt-runtime/tests/key_addressed_model_edge_lowering.rs 1201
 crates/smelt-runtime/tests/observed_delta/main.rs 1078
 crates/smelt-runtime/tests/repair_lowering.rs 1886
 crates/smelt-runtime/tests/since_upstream_propagation.rs 2326
+crates/smelt-runtime/tests/statement_parity/region_and_keyed_fold.rs 1006
 crates/smelt-runtime/tests/technique_lowering/basic.rs 1123
 crates/smelt-runtime/tests/windowing_parity.rs 1151
 crates/smelt-state/src/ddl_duckdb.rs 1883

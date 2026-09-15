@@ -92,6 +92,30 @@ fn bigquery_keeps_the_succession_patch_technique() {
     assert!(cells[0].state_downgrade.is_none());
 }
 
+/// Gap 4's fourth measurement (`docs/outcomes/20260913-trino-incremental/
+/// phases/06b-plan.md`): a `Technique::SuccessionPatch` cell resolved for
+/// `SqlDialect::Trino` always carries a `state_downgrade` — the tombstone
+/// ledger is unrealisable there, the same permanent shape Spark has — so the
+/// window-forward patch arm, and with it the `driving_steps` call site in
+/// `execute/project/mod.rs`, is unreachable on Trino. This is the offline,
+/// permanent measurement the row asks for, rather than only observing it
+/// once live.
+#[test]
+fn succession_patch_always_downgrades_on_trino() {
+    let available = StateAvailability::resolve(
+        smelt_core::config::WarehouseTables::Allowed,
+        &realisable_state_structures(SqlDialect::Trino),
+    );
+    let mut cells = vec![base_cell(Corner::FoldDelta, Technique::SuccessionPatch)];
+    resolve_availability(&mut cells, &available);
+    assert_eq!(cells[0].technique, Technique::DeleteInsert);
+    let downgrade = cells[0].state_downgrade.as_ref().unwrap_or_else(|| {
+        panic!("a SuccessionPatch cell on Trino must always carry a state_downgrade")
+    });
+    assert_eq!(downgrade.original, Technique::SuccessionPatch);
+    assert_eq!(downgrade.missing, StateStructure::TombstoneLedger);
+}
+
 #[test]
 fn a_ledger_less_dialect_realises_no_ledger() {
     // Spark is the ledger-less dialect. BigQuery holds **both** ledgers: the

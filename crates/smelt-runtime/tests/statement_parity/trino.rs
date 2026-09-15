@@ -1,10 +1,15 @@
 //! `statement_parity`'s Trino leg (`docs/outcomes/20260913-trino-incremental/
-//! phases/03h-plan.md`): the whole-row `MERGE` upsert (keyed-fold) family's
-//! executed statements, captured off a real `TrinoBackend` during a real
-//! `execute_project` run, must be byte-identical to a direct
-//! `emit_keyed_fold_suppressed` call with the batch's own inputs — the same
-//! shape `structural_and_ledger.rs::snapshot_reconcile_delete_leg_parity`
-//! proves for DuckDB.
+//! phases/03h-plan.md`, downgrade leg added phase 6b): the whole-row `MERGE`
+//! upsert (keyed-fold) family's executed statements, captured off a real
+//! `TrinoBackend` during a real `execute_project` run, must be
+//! byte-identical to a direct `emit_keyed_fold_suppressed` call with the
+//! batch's own inputs — the same shape
+//! `structural_and_ledger.rs::snapshot_reconcile_delete_leg_parity` proves
+//! for DuckDB. Also covers that family's additive-combiner downgrade route
+//! (`additive_keyed_fold_downgrade_parity_on_trino`) — a whole-target
+//! rebuild, since Trino's availability realises no reconciliation ledger —
+//! whose executed `CREATE TABLE … AS` must be byte-identical to a direct
+//! `emit_create_table_as` call.
 //!
 //! Local env gate (`common::trino_env`, mirroring `crates/smelt-cli/tests/
 //! common/mod.rs::trino_env`) — skips with an explicit `Skipping …` line
@@ -51,7 +56,15 @@ impl BackendFactory for TrinoRecordingBackendFactory {
     }
 }
 
-fn stage_keyed_fold_project(project_dir: &Path, env: &TrinoEnv, schema: &str) {
+/// `combiner` parameterises the fold: `MIN`/`MAX` grades `Grade::Idempotent`
+/// (stays on the `MERGE` route); `SUM` grades `Grade::Additive` (downgrades
+/// on Trino's permanently structure-less availability — see this outcome's
+/// backlog entry on T3/T4). `allow_full_scan` is declared unconditionally —
+/// the additive downgrade's whole-target rebuild reads the source unwindowed
+/// regardless of which combiner this particular project uses. Mirrors
+/// `smelt-cli`'s twin fixture (`tests/trino_incremental_families/
+/// keyed_fold.rs::stage_keyed_fold_project`).
+fn stage_keyed_fold_project(project_dir: &Path, env: &TrinoEnv, schema: &str, combiner: &str) {
     std::fs::create_dir_all(project_dir.join("models/sources")).unwrap();
 
     std::fs::write(
@@ -76,17 +89,19 @@ fn stage_keyed_fold_project(project_dir: &Path, env: &TrinoEnv, schema: &str) {
     write_model(
         project_dir,
         "device_agg",
-        "---\n\
-         materialization: table\n\
-         refresh: incremental\n\
-         grain: key\n\
-         maintenance:\n\
-         \x20\x20scan_bounds:\n\
-         \x20\x20\x20\x20per_source:\n\
-         \x20\x20\x20\x20\x20\x20events:\n\
-         \x20\x20\x20\x20\x20\x20\x20\x20allow_full_scan: true\n\
-         ---\n\
-         SELECT device_id, MIN(amount) AS agg_amount FROM smelt.sources.events GROUP BY 1",
+        &format!(
+            "---\n\
+             materialization: table\n\
+             refresh: incremental\n\
+             grain: key\n\
+             maintenance:\n\
+             \x20\x20scan_bounds:\n\
+             \x20\x20\x20\x20per_source:\n\
+             \x20\x20\x20\x20\x20\x20events:\n\
+             \x20\x20\x20\x20\x20\x20\x20\x20allow_full_scan: true\n\
+             ---\n\
+             SELECT device_id, {combiner}(amount) AS agg_amount FROM smelt.sources.events GROUP BY 1"
+        ),
     );
 
     let smelt_yml = format!(
@@ -143,7 +158,7 @@ async fn keyed_fold_parity_on_trino() {
 
     let tmp = tempfile::tempdir().expect("tempdir");
     let project_dir = tmp.path();
-    stage_keyed_fold_project(project_dir, &env, &schema);
+    stage_keyed_fold_project(project_dir, &env, &schema, "MIN");
 
     let config = Arc::new(Config::load(project_dir).expect("load config"));
     let (db, graph) = build_db_and_graph(project_dir, &config);
@@ -234,6 +249,127 @@ async fn keyed_fold_parity_on_trino() {
     assert_eq!(
         expected_merge, groups[1],
         "executed MERGE group must be byte-identical to a direct emit_keyed_fold_suppressed call"
+    );
+
+    common::drop_trino_schema(&schema).await;
+}
+
+/// Test 2 (`docs/outcomes/20260913-trino-incremental/phases/06b-plan.md`):
+/// the additive (`SUM`-combiner) keyed fold's downgrade route — a whole-
+/// target rebuild, since Trino has no realisable reconciliation ledger for
+/// `Grade::Additive` — captured off a real `TrinoBackend`. Closes criterion
+/// 5's remaining per-family parity gap: 3h proved this rebuild only by
+/// result-equality (`smelt-cli`'s
+/// `additive_keyed_fold_downgrades_and_still_matches_full_refresh_on_trino`);
+/// this test additionally proves the executed statement is byte-identical to
+/// a direct `emit_create_table_as` call, and that no `MERGE INTO` appears
+/// anywhere in the recording.
+#[tokio::test]
+async fn additive_keyed_fold_downgrade_parity_on_trino() {
+    let Some(env) = common::trino_env() else {
+        eprintln!("SMELT_TRINO_URL unset — skipping additive_keyed_fold_downgrade_parity_on_trino");
+        return;
+    };
+    let schema = common::trino_schema("keyed_fold_downgrade");
+
+    let backend = common::trino_backend(&schema);
+    backend
+        .execute_sql(&format!("CREATE SCHEMA IF NOT EXISTS {schema}"))
+        .await
+        .expect("create schema");
+    backend
+        .execute_sql(&format!(
+            "CREATE TABLE {schema}.sources_events (device_id INTEGER, event_date DATE, \
+             amount DOUBLE)"
+        ))
+        .await
+        .expect("create source table");
+    backend
+        .execute_sql(&format!(
+            "INSERT INTO {schema}.sources_events VALUES \
+             (1, DATE '2026-01-01', 50.0), (2, DATE '2026-01-01', 20.0)"
+        ))
+        .await
+        .expect("seed source table");
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path();
+    stage_keyed_fold_project(project_dir, &env, &schema, "SUM");
+
+    let config = Arc::new(Config::load(project_dir).expect("load config"));
+    let (db, graph) = build_db_and_graph(project_dir, &config);
+    let backend_slot: Arc<Mutex<Option<Arc<RecordingBackend>>>> = Arc::new(Mutex::new(None));
+    let scheme = if env.tls { "https" } else { "http" };
+    let factory = TrinoRecordingBackendFactory {
+        base_url: format!("{scheme}://{}:{}", env.host, env.port),
+        user: env.user.clone(),
+        catalog: env.catalog.clone(),
+        backend: Arc::clone(&backend_slot),
+    };
+
+    let request = make_request("dev", "2026-01-01", "2026-01-02");
+    let outcome = execute_project(
+        "trino-keyed-fold-downgrade-statement-parity".to_string(),
+        request,
+        Arc::clone(&config),
+        graph,
+        db,
+        project_dir,
+        &factory,
+        &smelt_runtime::NoOpReporter,
+        CancellationToken::new(),
+    )
+    .await;
+
+    if let Err(e) = &outcome {
+        common::drop_trino_schema(&schema).await;
+        panic!("execute_project (Trino additive keyed fold downgrade) failed: {e}");
+    }
+    let outcome = outcome.unwrap();
+    assert!(
+        outcome.models.contains_key("device_agg"),
+        "device_agg must have run: {:?}",
+        outcome.models.keys().collect::<Vec<_>>()
+    );
+
+    let recorded = backend_slot
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("backend recorded");
+    let groups = recorded.recorded_groups();
+    assert_eq!(
+        groups.len(),
+        1,
+        "the downgraded rebuild must execute exactly one statement group: {groups:?}"
+    );
+    assert_eq!(groups[0].statements.len(), 1);
+
+    let create_sql = &groups[0].statements[0].sql;
+    let prefix = format!("CREATE TABLE {schema}.device_agg AS ");
+    if !create_sql.starts_with(&prefix) {
+        common::drop_trino_schema(&schema).await;
+        panic!("unexpected create statement: {create_sql}");
+    }
+    assert!(
+        !create_sql.contains("MERGE INTO"),
+        "the downgraded rebuild must never contain a MERGE: {create_sql}"
+    );
+    let create_select = &create_sql[prefix.len()..];
+    let expected_create = emit_create_table_as(
+        &format!("{schema}.device_agg"),
+        create_select,
+        MaintenanceDialect::Trino,
+    );
+
+    let matches = expected_create == groups[0];
+    if !matches {
+        common::drop_trino_schema(&schema).await;
+    }
+    assert_eq!(
+        expected_create, groups[0],
+        "executed downgraded-rebuild group must be byte-identical to a direct \
+         emit_create_table_as call"
     );
 
     common::drop_trino_schema(&schema).await;

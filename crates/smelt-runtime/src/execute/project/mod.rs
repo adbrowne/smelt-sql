@@ -1751,8 +1751,13 @@ pub async fn execute_project(
                     .drop_table_if_exists(schema, &db_table_name)
                     .await
                     .map_err(|err| anyhow::anyhow!("Failed to drop {}: {}", db_table_name, err))?;
+                let create_group = smelt_logical::maintenance::emit::emit_create_table_as(
+                    &format!("{schema}.{db_table_name}"),
+                    &compiled.sql,
+                    smelt_backend::maintenance_dialect(backend.dialect())?,
+                );
                 backend
-                    .create_table_as(schema, &db_table_name, &compiled.sql)
+                    .execute_statement_group(&create_group)
                     .await
                     .map_err(|err| {
                         anyhow::anyhow!("Failed to create keyed model {}: {}", plan.name, err)

@@ -7,14 +7,17 @@
 //! call of the emitter with the batch's own inputs.
 //!
 //! Covers the region `DELETE`+`INSERT` family (`IncrementalStrategy::
-//! DeleteInsert`), the keyed-fold family (`refresh: keyed`), the
-//! column-scoped `MERGE` family (`Technique::ColumnScopedMerge`) —
-//! `docs/plans/20260710-emit-unification.md` Phases 1–3 — the repair
-//! family's per-group recompute (`Technique::PerGroupRecompute`,
-//! `docs/specs/incremental_models.md` §"The repair family"), and the
-//! succession-patch family (`Technique::SuccessionPatch`) — both the
-//! window-forward patch loop and its `--full-refresh` rebuild counterpart
-//! (`docs/outcomes/20260906-scd2-keyed-succession/phases/05c-plan.md`).
+//! DeleteInsert`), the keyed-fold family (`refresh: keyed`) — including its
+//! additive-combiner downgrade route, a whole-target rebuild on a
+//! structure-less backend (`docs/outcomes/20260913-trino-incremental/
+//! phases/06b-plan.md`) — the column-scoped `MERGE` family
+//! (`Technique::ColumnScopedMerge`) — `docs/plans/
+//! 20260710-emit-unification.md` Phases 1–3 — the repair family's per-group
+//! recompute (`Technique::PerGroupRecompute`, `docs/specs/
+//! incremental_models.md` §"The repair family"), and the succession-patch
+//! family (`Technique::SuccessionPatch`) — both the window-forward patch
+//! loop and its `--full-refresh` rebuild counterpart (`docs/outcomes/
+//! 20260906-scd2-keyed-succession/phases/05c-plan.md`).
 //!
 //! Each family's leg additionally proves **result**-equivalence to a full
 //! refresh (`multiset_equal`, the Link-C oracle also used by

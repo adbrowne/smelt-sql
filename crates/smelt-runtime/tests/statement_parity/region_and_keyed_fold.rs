@@ -682,6 +682,138 @@ async fn keyed_fold_statements_come_from_the_emitter() {
     );
 }
 
+/// The additive keyed fold's downgrade route (`docs/outcomes/
+/// 20260913-trino-incremental/phases/06b-plan.md`): under `state.
+/// warehouse_tables: none` (no realisable reconciliation ledger) an additive
+/// (`SUM`) keyed fold downgrades to a whole-target rebuild every run
+/// (`keyed_fold_state_downgrade_execution.rs` proves this end to end
+/// already), but until this phase that rebuild's `CREATE TABLE ... AS`
+/// statement was authored by `Backend::create_table_as` directly rather than
+/// routed through the single-owner `emit_create_table_as` emitter — so
+/// nothing was recordable and criterion 5's per-family parity had no leg for
+/// this family. This test proves the executed rebuild is now byte-identical
+/// to a direct `emit_create_table_as` call over the same table/SQL/dialect.
+#[tokio::test]
+async fn additive_keyed_fold_downgrade_statements_come_from_the_emitter() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path();
+    std::fs::create_dir_all(project_dir.join("models/sources")).unwrap();
+
+    std::fs::write(
+        project_dir.join("models/sources/events.yml"),
+        "description: Raw per-device events.\n\
+         columns:\n\
+         \x20\x20- name: device_id\n\
+         \x20\x20\x20\x20type: INTEGER\n\
+         \x20\x20- name: event_date\n\
+         \x20\x20\x20\x20type: DATE\n\
+         \x20\x20- name: amount\n\
+         \x20\x20\x20\x20type: DOUBLE\n\
+         timeseries:\n\
+         \x20\x20event_time_column: event_date\n\
+         \x20\x20partition_column: event_date\n\
+         \x20\x20granularity: day\n\
+         mutation_profile:\n\
+         \x20\x20kind: append_only\n",
+    )
+    .unwrap();
+    write_model(
+        project_dir,
+        "device_agg",
+        "---\n\
+         materialization: table\n\
+         refresh: incremental\n\
+         grain: key\n\
+         maintenance:\n\
+         \x20\x20scan_bounds:\n\
+         \x20\x20\x20\x20per_source:\n\
+         \x20\x20\x20\x20\x20\x20events:\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20allow_full_scan: true\n\
+         ---\n\
+         SELECT device_id, SUM(amount) AS agg_amount \
+         FROM smelt.sources.events GROUP BY 1",
+    );
+
+    let db_path = project_dir.join("run.duckdb");
+    let smelt_yml = format!(
+        "name: keyed_fold_downgrade_parity_test\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: {db}\n    schema: main\ndefault_materialization: table\ntarget: dev\nstate:\n  warehouse_tables: none\n",
+        db = db_path.display()
+    );
+    std::fs::write(project_dir.join("smelt.yml"), &smelt_yml).unwrap();
+
+    {
+        let conn = duckdb::Connection::open(&db_path).expect("open duckdb");
+        conn.execute_batch(
+            "CREATE SCHEMA IF NOT EXISTS main;\n\
+             CREATE TABLE main.sources_events (device_id INTEGER, event_date DATE, amount DOUBLE);\n\
+             INSERT INTO main.sources_events VALUES \
+             (1, DATE '2024-01-01', 10.0), (2, DATE '2024-01-01', 5.0);",
+        )
+        .expect("seed source table");
+    }
+
+    let config = Arc::new(Config::load(project_dir).expect("load config"));
+    let (db, graph) = build_db_and_graph(project_dir, &config);
+    let backend_slot: Arc<Mutex<Option<Arc<RecordingBackend>>>> = Arc::new(Mutex::new(None));
+    let factory = RecordingBackendFactory {
+        db_path: db_path.clone(),
+        backend: Arc::clone(&backend_slot),
+    };
+
+    execute_project(
+        "keyed-fold-downgrade-parity-run".to_string(),
+        make_request("dev", "2024-01-01", "2024-01-02"),
+        Arc::clone(&config),
+        graph,
+        db,
+        project_dir,
+        &factory,
+        &smelt_runtime::NoOpReporter,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("execute_project (additive keyed fold, warehouse_tables: none)");
+
+    let backend = backend_slot
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("backend recorded");
+    let groups = backend.recorded_groups();
+    assert_eq!(
+        groups.len(),
+        1,
+        "the downgraded rebuild must execute exactly one statement group: {:?}",
+        groups
+    );
+
+    let create_sql = &groups[0].statements[0].sql;
+    assert_eq!(groups[0].statements.len(), 1);
+    assert!(
+        create_sql.starts_with("CREATE TABLE main.device_agg AS "),
+        "unexpected create statement: {create_sql}"
+    );
+    let create_select = create_sql
+        .strip_prefix("CREATE TABLE main.device_agg AS ")
+        .expect("create shape");
+    let expected_create =
+        emit_create_table_as("main.device_agg", create_select, MaintenanceDialect::DuckDb);
+    assert_eq!(
+        &expected_create, &groups[0],
+        "executed downgraded-rebuild group must be byte-identical to a direct emitter call"
+    );
+
+    assert!(
+        multiset_equal(
+            backend.as_ref(),
+            "SELECT * FROM main.device_agg",
+            "SELECT device_id, SUM(amount) AS agg_amount FROM main.sources_events GROUP BY 1"
+        )
+        .await,
+        "the downgraded rebuild's statements must reproduce a full refresh"
+    );
+}
+
 /// A `write: staged_candidate` pin (`docs/outcomes/
 /// 20260815-definition-delta-migrate/phases/27g-plan.md`) on a `refresh:
 /// keyed` model's driving-source cell must dispatch the merge-less
