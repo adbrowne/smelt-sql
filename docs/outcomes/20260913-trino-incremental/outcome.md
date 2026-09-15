@@ -159,7 +159,7 @@ approximated.
 | 3h | Phase 3d's deferred legs, re-attempted on 3f+3g: the whole-row `MERGE` upsert (keyed-fold) family end-to-end through `execute_project` on Trino, plus `statement_parity`'s Trino executed-vs-emitted leg (3d's reverted `RecordingBackend`/`emit_keyed_fold` byte-identity design redone) | done |
 | 4 | The emulated delete-and-insert window: `DELETE` range exactly covering the insert's write window, asserted directly and under out-of-order and repeated application | done |
 | 5 | The merge-less conditional write over T3's staged relation (the departed-row delete as a separate scoped `DELETE`, since `WHEN NOT MATCHED BY SOURCE` is absent), and the column-scoped merge — executing where its cell needs no merge ledger, taking T3's `MaintenanceStateDowngraded` route where it does, per Spark's precedent | done |
-| 6 | The degraded routes proved live on Trino: per-group recompute, the succession grain's full rebuild in place of the patch route (presented table row- and column-identical to the ledger-bearing rebuild's presented arm), and the sidecar-less key-addressed downgrade — each recorded on the cell and explain-visible | planned |
+| 6 | The degraded routes proved live on Trino: per-group recompute, the succession grain's full rebuild in place of the patch route (presented table row- and column-identical to the ledger-bearing rebuild's presented arm), and the sidecar-less key-addressed downgrade — each recorded on the cell and explain-visible | blocked |
 | 6b | The degraded families' emission residue: `statement_parity`'s Trino byte-identity leg for the additive keyed fold's downgrade route (its whole-target rebuild statements, proved in 3h only by result-equality — criterion 5's per-family parity covers the downgraded family too), plus succession's own partition-literal sites (its `driving_steps` call site in `execute/project/mod.rs` still passes `Undeclared`, 3f's untouched residue): measure whether the degraded succession route emits a literal against a typed column on Trino at all, then route it through 3b2's single renderer or land a census test recording it unreachable and why (note: `succession_window_predicate` deliberately emits UNTYPED literals for a measured GoogleSQL reason — `maintenance_sql_dialect_purity.rs` pins it) | pending |
 | 7 | `statement_parity`'s structural no-authoring leg for `smelt-backend-trino`, plus a check that adding Trino introduced no second plan-derivation site and no consumer-side dialect branch | pending |
 | 8 | The generative gate: `maintenance_conformance` Trino leg modelled on the Spark leg, over the live tier, oracle-equal after **every** run step with cells resolved under Trino's actual availability, recipe pool no narrower than the admitted families, gated in `compat.yml` | pending |
@@ -519,6 +519,54 @@ approximated.
   comparison would be testing almost nothing.
 
 ## Blocked
+
+- **2026-09-15 — phase 6 blocked on test 2 (`per_group_recompute_matches_full_refresh_on_trino`),
+  after landing tests 1, 3, 4, 5, 6 live.** `degraded_routes.rs` proves the succession
+  full-rebuild-in-place-of-patch route and the sidecar-less key-addressed downgrade live end to end,
+  and proves the repair-family cell's *shape* (`PerGroupRecompute`, no downgrade, a bounded scan
+  clamp) via `smelt explain --json` — but its live *execution* refuses.
+
+  Measured against the live tier: `smelt: run failed at model 'repair_customer_max': Feature not
+  supported by Trino: group-grain fingerprint-sidecar affected-key discovery for a mutable_snapshot
+  repair source (P9)`. Root cause, read from `derive/new_data.rs` and `repair.rs`: a repair-admitted
+  `PerGroupRecompute` cell is **always** over a `MutationProfile::MutableSnapshot` source (repair
+  narrowing only ever fires for that posture — an append-only source's fold always succeeds, so no
+  repair cell is ever admitted for it), and `repair::discovery_posture` routes that posture's
+  affected-key discovery to `RepairDiscovery::SidecarDiff` **unconditionally**, never the plain
+  clamped scan (`repair_lowering.rs::snapshot_source_discovery_uses_the_sidecar_diff` proves this at
+  the unit level, offline, where it looks correct because DuckDB realises the sidecar). So a
+  repair-family cell needs `StateStructure::FingerprintSidecar` **independent of `key_scope`** — but
+  `required_state_structure`'s `PerGroupRecompute` arm only asks for the sidecar when `key_scope` is
+  `Some(...)` (the key-addressed route); a clamp-bounded repair cell (`key_scope: None`) is treated
+  as needing nothing, so `resolve_availability` never downgrades it and execution hard-refuses
+  instead of taking a recorded, explain-visible downgrade.
+
+  This single source of truth is very likely wrong for BigQuery too, in production, right now —
+  `realisable_state_structures(SqlDialect::BigQuery)` does not list `FingerprintSidecar` either
+  (`state_structure.rs`'s own doc comment names the sidecar as BigQuery's pending work), so any
+  `mutable_snapshot`-sourced repair-family model on a live BigQuery target should hit the identical
+  refusal today. Not verified against a live BigQuery tier here — that is itself worth a fast,
+  independent check outside this outcome's scope, since it would be a standing production gap on an
+  already-shipped backend, not a new-backend-onboarding finding.
+
+  Candidate fix (not attempted — it edits the `smelt-logical` single-owner availability module several
+  gates depend on, warranting its own reviewed phase): (1) `required_state_structure`'s
+  `PerGroupRecompute` arm must require the sidecar whenever the cell is repair-admitted (`scans`
+  non-empty, `key_scope: None`), not only when `key_scope: Some(...)`. (2) `resolve_availability`'s
+  replacement for `PerGroupRecompute` must also clear `scans` when downgrading — `recompute_equivalent`
+  maps `Corner::ColumnMerge` back to `PerGroupRecompute` itself, so a bare downgrade record with
+  `scans` still populated leaves `has_repair_family_lowering` returning `true`, still dispatching the
+  same sidecar-needing resolver. The target shape is exactly the "declined" cell
+  `has_repair_family_lowering`'s own doc comment describes: `state_downgrade: Some`, `key_scope:
+  None`, `scans: []`, routed to the whole-target rebuild the `key_scope: None ⇒ full-scan recompute`
+  promise already covers (the same route `20260913-trino-incremental` phase 3c's gap-3 fix already
+  proved live for the *declined-cell* shape — `snapshot_reconcile_keyed_model_runs_on_trino`).
+
+  `per_group_recompute_matches_full_refresh_on_trino` is kept in
+  `crates/smelt-cli/tests/trino_incremental_families/degraded_routes.rs` as an `#[allow(dead_code)]`
+  function (phase 3's own precedent for a discovered, unowned gap) rather than a permanently-red
+  `#[test]`; its fixture (`stage_repair_project`/`seed_trino_repair_orders`) is ready for whichever
+  phase lands the fix above. Tests 1, 3, 4, 5, 6 are committed and green.
 
 - **2026-09-14 — phase 3 blocked at its live `execute_project` proof (Tests 7-8), after landing
   `MaintenanceDialect::Trino` and every emitter it forced.** `MaintenanceDialect::Trino` exists,

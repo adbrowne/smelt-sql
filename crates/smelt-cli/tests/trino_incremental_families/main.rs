@@ -135,6 +135,7 @@
 //! proves the fourth: the executed statements are byte-identical to a
 //! direct `emit_delete_insert` call.
 
+mod degraded_routes;
 mod delete_insert;
 mod keyed_fold;
 mod membership_and_merge;
