@@ -176,3 +176,101 @@ fn trino_now_resolves_a_maintenance_dialect() {
     let result = smelt_backend::maintenance_dialect(smelt_dialect::SqlDialect::Trino);
     assert_eq!(result, Ok(MaintenanceDialect::Trino));
 }
+
+/// `docs/outcomes/20260913-trino-incremental` phase 5, test 4: no
+/// production line under `crates/smelt-runtime/src/` spells
+/// `StagedRelationResidence::SessionTemporary` or
+/// `StagedRelation::session_temporary(` literally — every derivation site
+/// must read residence and atomicity off the target's own
+/// `BackendCapabilities` (`StagedRelation::derive_for_capabilities`) instead
+/// of hardcoding a shape (`docs/specs/multi_backend.md` §"Column-scoped
+/// merge and conditional-write capabilities"). Test-only code (below a
+/// file's own `#[cfg(test)]`) is exempt — a unit test asserting against a
+/// known-shape expected value legitimately spells the literal.
+#[test]
+fn every_production_derivation_site_reads_the_capability() {
+    let src_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+    assert!(src_dir.is_dir(), "src dir not found: {src_dir:?}");
+
+    let mut offending = Vec::new();
+    for entry in walk_rs_files(&src_dir) {
+        let contents = std::fs::read_to_string(&entry).expect("read source file");
+        let production_prefix = match contents.find("#[cfg(test)]") {
+            Some(idx) => &contents[..idx],
+            None => contents.as_str(),
+        };
+        if production_prefix.contains("StagedRelationResidence::SessionTemporary")
+            || production_prefix.contains("StagedRelation::session_temporary(")
+        {
+            offending.push(entry.display().to_string());
+        }
+    }
+    assert!(
+        offending.is_empty(),
+        "these smelt-runtime source files hardcode a session-temporary staged relation shape \
+         instead of deriving it from BackendCapabilities: {offending:?}"
+    );
+}
+
+/// `docs/outcomes/20260913-trino-incremental` phase 5, test 5: every
+/// derivation helper this outcome touched yields `TargetSchema`/non-atomic
+/// under a Trino-shaped capability set and `SessionTemporary`/atomic under
+/// DuckDB's — proving the threading actually reaches every site, not just
+/// that no hardcoded literal remains.
+#[test]
+fn derivation_sites_yield_target_schema_for_trino_caps() {
+    let duckdb = smelt_backend::BackendCapabilities::duckdb();
+    let trino = smelt_backend::BackendCapabilities::trino_iceberg();
+
+    for purpose in ["__smelt_staged_", "__smelt_repair_", "__smelt_diff_patch_"] {
+        let relation_duckdb = StagedRelation::derive_for_capabilities(purpose, "t", &duckdb);
+        assert_eq!(
+            relation_duckdb.residence,
+            StagedRelationResidence::SessionTemporary
+        );
+        assert!(relation_duckdb.atomic);
+
+        let relation_trino = StagedRelation::derive_for_capabilities(purpose, "t", &trino);
+        assert_eq!(
+            relation_trino.residence,
+            StagedRelationResidence::TargetSchema
+        );
+        assert!(!relation_trino.atomic);
+    }
+
+    // The production-facing wrappers over `derive_for_capabilities` yield
+    // the same verdict for the two purposes they own.
+    let repair_trino = smelt_runtime::maintenance_driver::repair_staged_relation("t", &trino);
+    assert_eq!(
+        repair_trino.residence,
+        StagedRelationResidence::TargetSchema
+    );
+    assert!(!repair_trino.atomic);
+    let repair_duckdb = smelt_runtime::maintenance_driver::repair_staged_relation("t", &duckdb);
+    assert_eq!(
+        repair_duckdb.residence,
+        StagedRelationResidence::SessionTemporary
+    );
+    assert!(repair_duckdb.atomic);
+
+    let diff_patch_trino =
+        smelt_runtime::maintenance_driver::diff_patch_staged_relation("t", &trino);
+    assert_eq!(
+        diff_patch_trino.residence,
+        StagedRelationResidence::TargetSchema
+    );
+    assert!(!diff_patch_trino.atomic);
+}
+
+fn walk_rs_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let mut out = Vec::new();
+    for entry in std::fs::read_dir(dir).expect("read dir") {
+        let path = entry.expect("dir entry").path();
+        if path.is_dir() {
+            out.extend(walk_rs_files(&path));
+        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+            out.push(path);
+        }
+    }
+    out
+}

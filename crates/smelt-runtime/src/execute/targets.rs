@@ -46,6 +46,29 @@ pub(crate) fn maintenance_dialect_for_target(
 /// [`maintenance_dialect_for_target`] uses, stopping one step earlier so
 /// availability resolution (which needs `SqlDialect`, not
 /// `MaintenanceDialect`) can share it.
+/// `target`'s [`smelt_backend::BackendCapabilities`], purely from `Config` —
+/// the no-live-backend equivalent of `Backend::capabilities()`, needed by
+/// `--dry-run` (which never opens a connection) to derive a
+/// [`smelt_logical::maintenance::emit::StagedRelation`] the same way a live
+/// run would (`docs/specs/multi_backend.md` §"Column-scoped merge and
+/// conditional-write capabilities" — every derivation site reads
+/// capabilities, never hardcodes a shape). Shares
+/// `crate::compile::dialect_and_capabilities`'s `BackendType` match rather
+/// than restating it.
+pub(crate) fn capabilities_for_target(
+    config: &Config,
+    target: &str,
+) -> smelt_backend::BackendCapabilities {
+    let Some(backend_type) = config
+        .targets
+        .get(target)
+        .and_then(|t| t.backend_type().ok())
+    else {
+        return smelt_backend::BackendCapabilities::duckdb();
+    };
+    crate::compile::dialect_and_capabilities(backend_type).1
+}
+
 pub(crate) fn sql_dialect_for_target(config: &Config, target: &str) -> smelt_backend::SqlDialect {
     config
         .targets

@@ -1,8 +1,8 @@
 use super::*;
 use anyhow::Result;
-use smelt_backend::{maintenance_dialect, Backend, ExecutionResult};
+use smelt_backend::{maintenance_dialect, Backend, BackendCapabilities, ExecutionResult};
 use smelt_logical::maintenance::emit::{
-    emit_per_group_recompute, MaintenanceDialect, StagedRelation, StagedRelationResidence,
+    emit_per_group_recompute, MaintenanceDialect, StagedRelation,
 };
 use std::time::Instant;
 
@@ -154,7 +154,7 @@ pub async fn execute_per_group_recompute(
     let start = Instant::now();
     let full_table = format!("{schema}.{table}");
     let dialect = maintenance_dialect(backend.dialect())?;
-    let staged_relation = repair_staged_relation(table);
+    let staged_relation = repair_staged_relation(table, &backend.capabilities());
     let group = emit_per_group_recompute(
         &full_table,
         &staged_relation,
@@ -206,25 +206,18 @@ pub async fn execute_per_group_recompute(
 /// The staged relation a repair uses for `table` — one derivation, so a
 /// parity test (and the technique preview) can name the same relation the
 /// live run does without guessing.
-pub fn repair_staged_relation(table: &str) -> StagedRelation {
-    StagedRelation::derive(
-        "__smelt_repair_",
-        table,
-        StagedRelationResidence::SessionTemporary,
-        true,
-    )
+pub fn repair_staged_relation(table: &str, capabilities: &BackendCapabilities) -> StagedRelation {
+    StagedRelation::derive_for_capabilities("__smelt_repair_", table, capabilities)
 }
 
 /// The staged relation a `diff_patch` write over a repair cell uses for
 /// `table` — a distinct prefix from [`repair_staged_relation`] so a parity
 /// test can name each group's own relation without ambiguity.
-pub fn diff_patch_staged_relation(table: &str) -> StagedRelation {
-    StagedRelation::derive(
-        "__smelt_diff_patch_",
-        table,
-        StagedRelationResidence::SessionTemporary,
-        true,
-    )
+pub fn diff_patch_staged_relation(
+    table: &str,
+    capabilities: &BackendCapabilities,
+) -> StagedRelation {
+    StagedRelation::derive_for_capabilities("__smelt_diff_patch_", table, capabilities)
 }
 
 /// The `diff_patch` slice restriction for a repair cell: the candidate's own
@@ -273,7 +266,7 @@ pub async fn execute_diff_patch(
     let start = Instant::now();
     let full_table = format!("{schema}.{table}");
     let dialect = maintenance_dialect(backend.dialect())?;
-    let staged_relation = diff_patch_staged_relation(table);
+    let staged_relation = diff_patch_staged_relation(table, &backend.capabilities());
     let group = smelt_logical::maintenance::emit::emit_diff_patch(
         &full_table,
         &staged_relation,

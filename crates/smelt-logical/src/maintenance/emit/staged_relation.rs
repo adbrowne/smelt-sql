@@ -10,6 +10,7 @@
 //! 01-summary.md` — Trino/Iceberg has no transactional write capability at
 //! all).
 
+use smelt_dialect::BackendCapabilities;
 pub use smelt_dialect::StagedRelationResidence;
 
 /// A staged relation's derived name, where it lives, and whether the group
@@ -55,6 +56,28 @@ impl StagedRelation {
             residence: StagedRelationResidence::SessionTemporary,
             atomic: true,
         }
+    }
+
+    /// Derive a staged relation for `table`, reading residence and
+    /// atomicity off the target's own [`BackendCapabilities`] rather than a
+    /// caller-hardcoded shape (`docs/specs/multi_backend.md`
+    /// §"Column-scoped merge and conditional-write capabilities" —
+    /// "`staged_relation_residence` and `staged_relation_group_is_atomic`
+    /// are read from `BackendCapabilities` by every derivation site"). The
+    /// single owner every production caller must route through instead of
+    /// spelling `StagedRelationResidence::SessionTemporary`/`atomic: true`
+    /// literally.
+    pub fn derive_for_capabilities(
+        purpose: &str,
+        qualified_table: &str,
+        capabilities: &BackendCapabilities,
+    ) -> Self {
+        Self::derive(
+            purpose,
+            qualified_table,
+            capabilities.staged_relation_residence,
+            capabilities.staged_relation_group_is_atomic,
+        )
     }
 
     /// The `CREATE ... TABLE` prefix for this relation's residence —

@@ -1,5 +1,5 @@
 use super::*;
-use smelt_backend::{Backend, BackendError};
+use smelt_backend::{Backend, BackendCapabilities, BackendError};
 use smelt_logical::analysis::fingerprint::Projection as FingerprintProjection;
 use smelt_logical::maintenance::choice::{
     enrichment_restrict_column, resolve_recompute_restriction, RecomputeRestriction, RegionWrite,
@@ -8,7 +8,7 @@ use smelt_logical::maintenance::diff_patch::DeleteLeg;
 use smelt_logical::maintenance::emit::{
     emit_count_preservation_probe_from_body, emit_delete_insert,
     emit_delete_insert_delta_restricted, emit_diff_patch, MaintenanceDialect, Region,
-    StagedRelation, StagedRelationResidence, StatementGroup,
+    StagedRelation, StatementGroup,
 };
 use smelt_logical::maintenance::{RowPreservation, SkeletonSourceClosure};
 
@@ -47,6 +47,7 @@ pub fn build_delete_insert_group_dispatched(
     observed_delta: Option<&[String]>,
     region_write: Option<&RegionWrite>,
     dialect: MaintenanceDialect,
+    capabilities: &BackendCapabilities,
 ) -> StatementGroup {
     let restriction = resolve_recompute_restriction(skeleton_source_closure, observed_delta);
     match (restrict_column, restriction) {
@@ -71,11 +72,10 @@ pub fn build_delete_insert_group_dispatched(
                 // `StagedRelation::derive` flattens the embedded `.` so it
                 // never parses as a second schema qualifier on the staged
                 // relation's own name.
-                let staged_relation = StagedRelation::derive(
+                let staged_relation = StagedRelation::derive_for_capabilities(
                     "__smelt_diff_patch_",
                     table,
-                    StagedRelationResidence::SessionTemporary,
-                    true,
+                    capabilities,
                 );
                 let slice_predicate = region.predicate(Some(table), partition_col);
                 emit_diff_patch(
@@ -355,6 +355,7 @@ pub async fn execute_delete_insert_with_delta_restriction(
         delta.as_deref(),
         region_write,
         dialect,
+        &backend.capabilities(),
     );
     if ensure_sqls.is_empty() && pre_write_sqls.is_empty() {
         crate::execute::retry_backend_call(retry, || backend.execute_statement_group(&group))

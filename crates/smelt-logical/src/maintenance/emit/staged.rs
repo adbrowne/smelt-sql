@@ -7,6 +7,35 @@ use super::staged_relation::StagedRelation;
 use super::staged_relation::StagedRelationResidence;
 use super::types::*;
 
+/// Render the changed-row `DELETE` leg over a source relation (a staged
+/// relation, or another named/aliased source subquery), for `dialect` —
+/// single owner of the DuckDB/Spark/BigQuery `USING` form versus Trino's
+/// `USING`-less correlated form (`docs/specs/multi_backend.md`
+/// §"Column-scoped merge and conditional-write capabilities"; measured
+/// 2026-09-15, `crates/smelt-backend-trino/tests/staged_group_live.rs`).
+/// `predicate` is the full join-and-comparison text exactly as it would
+/// follow `WHERE` in the `USING` form — every caller's predicate already
+/// qualifies its own columns (`<table>.col`, `<source>.col`), so wrapping it
+/// unmodified inside `EXISTS (SELECT 1 FROM <source> WHERE <predicate>)` is
+/// semantically identical: a predicate clause that does not reference
+/// `<source>` evaluates the same whether it sits inside or outside the
+/// correlated subquery.
+pub(super) fn changed_row_delete(
+    table: &str,
+    source: &str,
+    predicate: &str,
+    dialect: MaintenanceDialect,
+) -> String {
+    match dialect {
+        MaintenanceDialect::Trino => {
+            format!("DELETE FROM {table} WHERE EXISTS (SELECT 1 FROM {source} WHERE {predicate})")
+        }
+        MaintenanceDialect::DuckDb | MaintenanceDialect::Spark | MaintenanceDialect::BigQuery => {
+            format!("DELETE FROM {table} USING {source} WHERE {predicate}")
+        }
+    }
+}
+
 /// The staged-candidate conditional `DELETE`+`INSERT` (T2, `docs/specs/
 /// model_transforms.md` §"Change-suppressed MERGE and the staged-candidate
 /// conditional DELETE+INSERT"): the merge-less realisation of the same
@@ -22,7 +51,9 @@ use super::types::*;
 /// 3. `DELETE FROM <table> USING <staged_relation> WHERE <key join> AND
 ///    (<IS DISTINCT FROM over compared_columns>)` — remove exactly the
 ///    stored rows whose staged candidate differs from what is stored (never
-///    a row whose applied effect is the identity).
+///    a row whose applied effect is the identity). On a dialect with no
+///    `USING` clause on `DELETE` (Trino), [`changed_row_delete`] renders the
+///    same predicate as a correlated `WHERE EXISTS` instead.
 /// 4. `INSERT INTO <table> SELECT s.* FROM <staged_relation> AS s WHERE NOT
 ///    EXISTS (target row still present for this key)` — reinsert the rows
 ///    just deleted, plus any brand-new key the target never had. A row
@@ -56,7 +87,7 @@ pub fn emit_staged_candidate_conditional(
     key: &[String],
     candidate_select: &str,
     compared_columns: &[String],
-    _dialect: MaintenanceDialect,
+    dialect: MaintenanceDialect,
 ) -> StatementGroup {
     assert!(
         !key.is_empty(),
@@ -87,8 +118,11 @@ pub fn emit_staged_candidate_conditional(
         staged_relation.create_prefix()
     );
     let insert_candidates = format!("INSERT INTO {name} {candidate_select}");
-    let delete = format!(
-        "DELETE FROM {table} USING {name} WHERE {key_join_table_staged} AND ({suppression})"
+    let delete = changed_row_delete(
+        table,
+        name,
+        &format!("{key_join_table_staged} AND ({suppression})"),
+        dialect,
     );
     let insert = format!(
         "INSERT INTO {table} SELECT s.* FROM {name} AS s WHERE NOT EXISTS (SELECT 1 FROM \
@@ -189,7 +223,7 @@ pub fn emit_staged_candidate_conditional_recompute(
     key: &[String],
     candidate_select: &str,
     compared_columns: &[String],
-    _dialect: MaintenanceDialect,
+    dialect: MaintenanceDialect,
 ) -> StatementGroup {
     assert!(
         !key.is_empty(),
@@ -227,8 +261,11 @@ pub fn emit_staged_candidate_conditional_recompute(
         staged_relation.create_prefix()
     );
     let insert_candidates = format!("INSERT INTO {name} {candidate_select}");
-    let delete_changed = format!(
-        "DELETE FROM {table} USING {name} WHERE {key_join_table_staged} AND ({suppression})"
+    let delete_changed = changed_row_delete(
+        table,
+        name,
+        &format!("{key_join_table_staged} AND ({suppression})"),
+        dialect,
     );
     let delete_departed = format!(
         "DELETE FROM {table} WHERE NOT EXISTS (SELECT 1 FROM {name} AS s WHERE \
@@ -421,6 +458,50 @@ mod staged_candidate_conditional_tests {
         assert_eq!(
             group.statements[4].sql,
             "DROP TABLE __smelt_staged_dim_users"
+        );
+    }
+
+    /// `docs/outcomes/20260913-trino-incremental` phase 5: under
+    /// `MaintenanceDialect::Trino`, the changed-row `DELETE` carries no
+    /// `USING` clause — a correlated `WHERE EXISTS` instead — while DuckDB's
+    /// text stays byte-unchanged.
+    #[test]
+    fn trino_changed_row_delete_uses_exists_not_using() {
+        let duckdb = emit_staged_candidate_conditional(
+            "main.dim_users",
+            &StagedRelation::session_temporary("__smelt_staged_dim_users"),
+            &["user_id".to_string()],
+            "SELECT user_id, tier, email FROM source_delta",
+            &["tier".to_string(), "email".to_string()],
+            MaintenanceDialect::DuckDb,
+        );
+        let trino = emit_staged_candidate_conditional(
+            "main.dim_users",
+            &StagedRelation::derive(
+                "__smelt_staged_",
+                "dim_users",
+                StagedRelationResidence::TargetSchema,
+                false,
+            ),
+            &["user_id".to_string()],
+            "SELECT user_id, tier, email FROM source_delta",
+            &["tier".to_string(), "email".to_string()],
+            MaintenanceDialect::Trino,
+        );
+
+        assert!(!duckdb.statements[2].sql.contains("EXISTS"));
+        assert!(duckdb.statements[2].sql.contains(" USING "));
+
+        // Trino's relation is non-atomic, so a leading reclaim `DROP ... IF
+        // EXISTS` statement shifts the delete to index 3, not 2.
+        let trino_delete = &trino.statements[3].sql;
+        assert!(!trino_delete.contains(" USING "), "{trino_delete}");
+        assert_eq!(
+            *trino_delete,
+            "DELETE FROM main.dim_users WHERE EXISTS (SELECT 1 FROM __smelt_staged_dim_users \
+             WHERE main.dim_users.user_id = __smelt_staged_dim_users.user_id AND \
+             (main.dim_users.tier IS DISTINCT FROM __smelt_staged_dim_users.tier OR \
+             main.dim_users.email IS DISTINCT FROM __smelt_staged_dim_users.email))"
         );
     }
 
@@ -683,5 +764,60 @@ mod staged_candidate_keyless_tests {
             MaintenanceDialect::DuckDb,
         );
         assert!(!mixed.transactional);
+    }
+}
+
+#[cfg(test)]
+mod recompute_variant_dialect_tests {
+    use super::*;
+
+    /// `docs/outcomes/20260913-trino-incremental` phase 5: the `_recompute`
+    /// variant's changed-row leg takes the same dialect branch as the plain
+    /// variant, while its departed-row leg — already a `WHERE NOT EXISTS`
+    /// with no `USING` clause — stays untouched by the dialect on every
+    /// backend, and the leading reclaim `DROP ... IF EXISTS` for a
+    /// non-atomic (Trino) relation is still emitted first.
+    #[test]
+    fn trino_recompute_variant_keeps_a_separate_departed_delete() {
+        let staged = StagedRelation::derive(
+            "__smelt_staged_",
+            "dim_users",
+            StagedRelationResidence::TargetSchema,
+            false,
+        );
+        let group = emit_staged_candidate_conditional_recompute(
+            "main.dim_users",
+            &staged,
+            &["user_id".to_string()],
+            "SELECT user_id, tier, email FROM source_full",
+            &["tier".to_string(), "email".to_string()],
+            MaintenanceDialect::Trino,
+        );
+
+        assert!(!group.transactional);
+        let sqls: Vec<&str> = group.statements.iter().map(|s| s.sql.as_str()).collect();
+        assert_eq!(
+            sqls[0], "DROP TABLE IF EXISTS __smelt_staged_dim_users",
+            "non-atomic group must reclaim before its own CREATE"
+        );
+        let delete_changed = sqls[3];
+        assert!(
+            !delete_changed.contains(" USING "),
+            "changed-row delete must not use USING on Trino: {delete_changed}"
+        );
+        assert_eq!(
+            delete_changed,
+            "DELETE FROM main.dim_users WHERE EXISTS (SELECT 1 FROM __smelt_staged_dim_users \
+             WHERE main.dim_users.user_id = __smelt_staged_dim_users.user_id AND \
+             (main.dim_users.tier IS DISTINCT FROM __smelt_staged_dim_users.tier OR \
+             main.dim_users.email IS DISTINCT FROM __smelt_staged_dim_users.email))"
+        );
+        let delete_departed = sqls[4];
+        assert_eq!(
+            delete_departed,
+            "DELETE FROM main.dim_users WHERE NOT EXISTS (SELECT 1 FROM \
+             __smelt_staged_dim_users AS s WHERE main.dim_users.user_id = s.user_id)",
+            "departed-row delete already carries no USING clause and needs no dialect branch"
+        );
     }
 }

@@ -179,6 +179,7 @@ impl WindowedKeyedRule for CumulativeClassification {
     /// staged-candidate realisation yet — this mechanism is reachable only
     /// for a bare keyed model until locality composes with it. `Merge`
     /// dispatches to the trait default (wraps [`Self::merge_sql`]).
+    #[allow(clippy::too_many_arguments)]
     fn write_group(
         &self,
         schema: &str,
@@ -187,6 +188,7 @@ impl WindowedKeyedRule for CumulativeClassification {
         slice: Option<&TargetSlicePredicate>,
         mechanism: &smelt_logical::maintenance::choice::KeyedWriteMechanism,
         dialect: MaintenanceDialect,
+        capabilities: &smelt_backend::BackendCapabilities,
     ) -> smelt_logical::maintenance::emit::StatementGroup {
         use smelt_logical::maintenance::choice::KeyedWriteMechanism;
         match mechanism {
@@ -213,12 +215,12 @@ impl WindowedKeyedRule for CumulativeClassification {
                         delta_sql,
                         dialect,
                     );
-                let staged_relation = smelt_logical::maintenance::emit::StagedRelation::derive(
-                    "__smelt_staged_",
-                    table,
-                    smelt_logical::maintenance::emit::StagedRelationResidence::SessionTemporary,
-                    true,
-                );
+                let staged_relation =
+                    smelt_logical::maintenance::emit::StagedRelation::derive_for_capabilities(
+                        "__smelt_staged_",
+                        table,
+                        capabilities,
+                    );
                 smelt_logical::maintenance::emit::emit_staged_candidate_conditional(
                     &schema_table,
                     &staged_relation,
@@ -2150,6 +2152,7 @@ mod tests {
             None,
             &KeyedWriteMechanism::Merge(suppression),
             MaintenanceDialect::DuckDb,
+            &smelt_backend::BackendCapabilities::duckdb(),
         );
         assert_eq!(group.statements.len(), 1);
         assert_eq!(group.statements[0].sql, direct_sql);
@@ -2193,6 +2196,7 @@ mod tests {
                 compared_columns: compared_columns.clone(),
             },
             MaintenanceDialect::DuckDb,
+            &smelt_backend::BackendCapabilities::duckdb(),
         );
 
         let folds = vec![(

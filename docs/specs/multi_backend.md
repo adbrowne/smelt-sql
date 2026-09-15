@@ -1015,6 +1015,25 @@ set is never offered that technique, at plan time, not surfaced as a runtime err
   adopted as live data by a later run. Concurrent runs of the same model are excluded by the state
   lock (`run_state.md`'s state locking), never by the relation's name.
 
+`staged_relation_residence` and `staged_relation_group_is_atomic` are read from
+`BackendCapabilities` by **every** derivation site that builds a `StagedRelation` — never
+hardcoded per caller. A caller that spells `StagedRelationResidence::SessionTemporary` or
+`atomic = true` literally, instead of reading them off the target's capabilities, silently
+strands Trino (or any future non-session-temporary backend) on a shape it cannot execute even
+though the capability data correctly says so.
+
+The staged group's changed-row `DELETE` leg has one further per-dialect spelling: DuckDB, Spark
+and BigQuery share `DELETE FROM <table> USING <source> WHERE <predicate>`; Trino's grammar has no
+`USING` clause on `DELETE` at all (measured 2026-09-15 against the live coordinator,
+`crates/smelt-backend-trino/tests/staged_group_live.rs`: `DELETE FROM t USING s WHERE …` refuses
+with `mismatched input 'USING'. Expecting: '.', '@', 'WHERE', <EOF>`), so it takes the correlated
+form `DELETE FROM <table> WHERE EXISTS (SELECT 1 FROM <source> WHERE <predicate>)` instead — the
+same predicate text, unwrapped into a subquery rather than an implicit join, which is
+semantically equivalent whenever (as here) every predicate clause that does not reference
+`<source>` is still safe to evaluate per correlated row. The departed-row delete needs no dialect
+branch: it is already the separate scoped `DELETE` the `WHEN NOT MATCHED BY SOURCE`-less lowering
+above names, and never carries a `USING` clause on any backend.
+
 These flags live in `BackendCapabilities` itself, queried by admission exactly like every other
 capability flag above — never re-derived by a consumer. `supports_column_scoped_merge`,
 `staged_relation_residence` and `staged_relation_group_is_atomic` are struct fields;

@@ -622,7 +622,9 @@ fn output_column_names(projection: &Projection) -> Vec<String> {
     names
 }
 
-fn dialect_and_capabilities(backend_type: BackendType) -> (SqlDialect, BackendCapabilities) {
+pub(crate) fn dialect_and_capabilities(
+    backend_type: BackendType,
+) -> (SqlDialect, BackendCapabilities) {
     match backend_type {
         BackendType::DuckDB => (SqlDialect::DuckDB, BackendCapabilities::duckdb()),
         BackendType::Spark => (SqlDialect::SparkSQL, BackendCapabilities::spark()),
@@ -1335,6 +1337,14 @@ impl SqlCompiler {
     /// target name is known (e.g. from `CompilerRegistry::new`).
     pub(crate) fn set_target_name(&mut self, name: &str) {
         self.target_name = name.to_string();
+    }
+
+    /// This compiler's target's capabilities — the single source a preview
+    /// or dry-run derivation site reads to build a
+    /// [`smelt_logical::maintenance::emit::StagedRelation`] without a live
+    /// backend connection, instead of hardcoding a session-temporary shape.
+    pub(crate) fn capabilities(&self) -> &BackendCapabilities {
+        &self.capabilities
     }
 
     /// Set cross-engine ref mappings (model_name -> parquet read expression).

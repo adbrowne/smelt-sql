@@ -9,7 +9,7 @@
 
 use std::collections::HashSet;
 
-use smelt_backend::IncrementalStrategy;
+use smelt_backend::{BackendCapabilities, IncrementalStrategy};
 use smelt_core::config::{
     CellTechnique, Grain as ConfigGrain, Granularity, MaintenanceCellConfig, MaintenanceConfig,
     MaintenanceDefaults, RefreshStrategy, TechniquePreference, TimeseriesConfig,
@@ -211,6 +211,7 @@ fn region_recompute_emits_the_conditional_staged_write_when_suppressible() {
         None,
         Some(&region_write),
         MaintenanceDialect::DuckDb,
+        &BackendCapabilities::duckdb(),
     );
     assert!(group.transactional);
     let sql: Vec<&str> = group.statements.iter().map(|s| s.sql.as_str()).collect();
@@ -257,6 +258,7 @@ fn region_recompute_keeps_the_widened_scan_without_a_proven_key() {
         None,
         None,
         MaintenanceDialect::DuckDb,
+        &BackendCapabilities::duckdb(),
     );
     assert_eq!(group_none, expected);
 
@@ -273,6 +275,7 @@ fn region_recompute_keeps_the_widened_scan_without_a_proven_key() {
         None,
         Some(&unconditional),
         MaintenanceDialect::DuckDb,
+        &BackendCapabilities::duckdb(),
     );
     assert_eq!(group_unconditional, expected);
 }
@@ -303,6 +306,7 @@ fn delta_restriction_wins_over_suppression_when_both_admit() {
         Some(&delta_keys),
         Some(&region_write),
         MaintenanceDialect::DuckDb,
+        &BackendCapabilities::duckdb(),
     );
     let expected = smelt_logical::maintenance::emit::emit_delete_insert_delta_restricted(
         "main.regions",

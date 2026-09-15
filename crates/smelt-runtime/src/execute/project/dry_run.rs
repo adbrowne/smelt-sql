@@ -258,6 +258,7 @@ pub(super) async fn build_dry_run_outcome(
                     continue;
                 }
             };
+            let capabilities = capabilities_for_target(config, &model_target);
             let partition_col = &inc.timeseries.partition_column;
             let table_name = format!("{schema}.{}", model_file.db_name_owned());
             let per_model_source_bounds =
@@ -393,6 +394,7 @@ pub(super) async fn build_dry_run_outcome(
                     None,
                     region_write_dry.as_ref(),
                     dialect,
+                    &capabilities,
                 );
                 let chunk = crate::reporter::ChunkInfo {
                     index: batch_idx,

@@ -591,7 +591,10 @@ fn build_technique_statements(
             );
             Ok(emit_per_group_recompute(
                 &table_name,
-                &crate::maintenance_driver::repair_staged_relation(&model.db_name_owned()),
+                &crate::maintenance_driver::repair_staged_relation(
+                    &model.db_name_owned(),
+                    registry.get(target).capabilities(),
+                ),
                 &key,
                 &affected_keys_select,
                 &candidate_select,

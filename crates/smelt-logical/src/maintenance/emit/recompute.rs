@@ -3,6 +3,7 @@
 //! per-group recompute, and the `diff_patch` write pattern.
 
 use super::fingerprint::key_expr_for_columns;
+use super::staged::changed_row_delete;
 use super::staged_relation::StagedRelation;
 use super::types::*;
 use crate::maintenance::diff_patch::DeleteLeg;
@@ -171,9 +172,11 @@ pub fn emit_per_group_recompute(
 
     let table_key_columns: Vec<String> = key.iter().map(|k| format!("{table}.{k}")).collect();
     let table_key_expr = key_expr_for_columns(&table_key_columns, dialect);
-    let delete = format!(
-        "DELETE FROM {table} USING {affected_relation} WHERE {table_key_expr} = \
-         __smelt_affected.delta_key"
+    let delete = changed_row_delete(
+        table,
+        &affected_relation,
+        &format!("{table_key_expr} = __smelt_affected.delta_key"),
+        dialect,
     );
 
     let staged_key_columns: Vec<String> = key.iter().map(|k| format!("s.{k}")).collect();
@@ -275,7 +278,7 @@ pub fn emit_diff_patch(
     compared_columns: &[String],
     slice_predicate: &str,
     delete_leg: &DeleteLeg,
-    _dialect: MaintenanceDialect,
+    dialect: MaintenanceDialect,
 ) -> StatementGroup {
     assert!(
         !key.is_empty(),
@@ -313,9 +316,11 @@ pub fn emit_diff_patch(
         staged_relation.create_prefix()
     );
     let insert_candidates = format!("INSERT INTO {name} {candidate_select}");
-    let delete_changed = format!(
-        "DELETE FROM {table} USING {name} WHERE {key_join_table_staged} AND ({suppression}) AND \
-         {slice_predicate}"
+    let delete_changed = changed_row_delete(
+        table,
+        name,
+        &format!("{key_join_table_staged} AND ({suppression}) AND {slice_predicate}"),
+        dialect,
     );
     let insert = format!(
         "INSERT INTO {table} SELECT s.* FROM {name} AS s WHERE NOT EXISTS (SELECT 1 FROM \
@@ -573,5 +578,85 @@ mod per_group_recompute_tests {
             "SELECT customer_id FROM orders_slice",
             MaintenanceDialect::DuckDb,
         );
+    }
+}
+
+#[cfg(test)]
+mod trino_dialect_delete_tests {
+    use super::*;
+    use crate::maintenance::emit::staged_relation::StagedRelationResidence;
+
+    /// `docs/outcomes/20260913-trino-incremental` phase 5: the repair
+    /// family's per-group recompute and the `diff_patch` update leg are the
+    /// other two `DELETE … USING` sites this phase routes through
+    /// [`changed_row_delete`] — both take the Trino EXISTS branch, DuckDB
+    /// stays byte-unchanged.
+    #[test]
+    fn trino_diff_patch_and_per_group_deletes_have_no_using_clause() {
+        let key = vec!["customer_id".to_string()];
+
+        let per_group_trino = emit_per_group_recompute(
+            "main.customer_totals",
+            &StagedRelation::derive(
+                "__smelt_repair_",
+                "customer_totals",
+                StagedRelationResidence::TargetSchema,
+                false,
+            ),
+            &key,
+            "SELECT customer_id FROM delta",
+            "SELECT customer_id, SUM(amount) AS total FROM orders_slice GROUP BY customer_id",
+            MaintenanceDialect::Trino,
+        );
+        let per_group_delete = &per_group_trino.statements[3].sql;
+        assert!(!per_group_delete.contains(" USING "), "{per_group_delete}");
+        assert!(
+            per_group_delete.starts_with("DELETE FROM main.customer_totals WHERE EXISTS"),
+            "{per_group_delete}"
+        );
+
+        let per_group_duckdb = emit_per_group_recompute(
+            "main.customer_totals",
+            &StagedRelation::session_temporary("__staged"),
+            &key,
+            "SELECT customer_id FROM delta",
+            "SELECT customer_id, SUM(amount) AS total FROM orders_slice GROUP BY customer_id",
+            MaintenanceDialect::DuckDb,
+        );
+        assert!(per_group_duckdb.statements[2].sql.contains(" USING "));
+
+        let diff_patch_trino = emit_diff_patch(
+            "main.t",
+            &StagedRelation::derive(
+                "__smelt_diff_patch_",
+                "t",
+                StagedRelationResidence::TargetSchema,
+                false,
+            ),
+            &key,
+            "SELECT customer_id, total FROM slice",
+            &["total".to_string()],
+            "main.t.customer_id IN (1, 2)",
+            &DeleteLeg::Complete,
+            MaintenanceDialect::Trino,
+        );
+        let delete_changed = &diff_patch_trino.statements[3].sql;
+        assert!(!delete_changed.contains(" USING "), "{delete_changed}");
+        assert!(
+            delete_changed.starts_with("DELETE FROM main.t WHERE EXISTS"),
+            "{delete_changed}"
+        );
+
+        let diff_patch_duckdb = emit_diff_patch(
+            "main.t",
+            &StagedRelation::session_temporary("__staged_t"),
+            &key,
+            "SELECT customer_id, total FROM slice",
+            &["total".to_string()],
+            "main.t.customer_id IN (1, 2)",
+            &DeleteLeg::Complete,
+            MaintenanceDialect::DuckDb,
+        );
+        assert!(diff_patch_duckdb.statements[2].sql.contains(" USING "));
     }
 }

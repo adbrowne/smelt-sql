@@ -481,3 +481,270 @@ async fn delete_insert_parity_on_trino() {
 
     common::drop_trino_schema(&schema).await;
 }
+
+fn stage_membership_project(project_dir: &Path, env: &TrinoEnv, schema: &str) {
+    std::fs::create_dir_all(project_dir.join("models/sources/raw")).unwrap();
+
+    std::fs::write(
+        project_dir.join("models/sources/raw/transactions.yml"),
+        "description: Transaction events.\n\
+         columns:\n\
+         \x20\x20- name: transaction_id\n\
+         \x20\x20\x20\x20type: INTEGER\n\
+         \x20\x20- name: user_id\n\
+         \x20\x20\x20\x20type: INTEGER\n\
+         \x20\x20- name: transaction_date\n\
+         \x20\x20\x20\x20type: DATE\n\
+         timeseries:\n\
+         \x20\x20event_time_column: transaction_date\n\
+         \x20\x20partition_column: transaction_date\n\
+         \x20\x20granularity: day\n\
+         mutation_profile:\n\
+         \x20\x20kind: append_only\n",
+    )
+    .unwrap();
+    std::fs::write(
+        project_dir.join("models/sources/raw/users.yml"),
+        "description: Raw user dimension.\n\
+         columns:\n\
+         \x20\x20- name: user_id\n\
+         \x20\x20\x20\x20type: INTEGER\n\
+         \x20\x20- name: tier\n\
+         \x20\x20\x20\x20type: VARCHAR\n\
+         mutation_profile:\n\
+         \x20\x20kind: mutable_snapshot\n\
+         unique_key: [user_id]\n",
+    )
+    .unwrap();
+
+    write_model(
+        project_dir,
+        "user_lifetime_status",
+        "---\n\
+         materialization: table\n\
+         refresh: incremental\n\
+         grain: key\n\
+         unique_key: user_id\n\
+         maintenance:\n\
+         \x20\x20scan_bounds:\n\
+         \x20\x20\x20\x20per_source:\n\
+         \x20\x20\x20\x20\x20\x20raw.users:\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20allow_full_scan: true\n\
+         \x20\x20\x20\x20\x20\x20raw.transactions:\n\
+         \x20\x20\x20\x20\x20\x20\x20\x20allow_full_scan: true\n\
+         ---\n\
+         SELECT t.user_id AS user_id, COUNT(t.transaction_id) AS event_count \
+         FROM smelt.sources.raw.transactions t \
+         JOIN smelt.sources.raw.users u ON t.user_id = u.user_id \
+         GROUP BY t.user_id\n",
+    );
+
+    let smelt_yml = format!(
+        "name: trino_statement_parity_staged_candidate\nversion: 1\npaths:\n  - models\n\
+         targets:\n  dev:\n    type: trino\n    host: {host}\n    port: {port}\n    \
+         user: {user}\n    catalog: {catalog}\n    schema: {schema}\n    tls: {tls}\n\
+         default_materialization: table\ntarget: dev\n",
+        host = env.host,
+        port = env.port,
+        user = env.user,
+        catalog = env.catalog,
+        tls = env.tls,
+    );
+    std::fs::write(project_dir.join("smelt.yml"), smelt_yml).unwrap();
+}
+
+/// Test 10 (`docs/outcomes/20260913-trino-incremental/phases/05-plan.md`):
+/// the membership-sensitive staged-candidate conditional recompute's
+/// executed statements, captured by a `RecordingBackend` wrapping a real
+/// `TrinoBackend` during a real `execute_project` run, are byte-identical
+/// to a direct `emit_staged_candidate_conditional_recompute` call over the
+/// batch's own inputs — the same shape `staged_candidate_conditional.rs`
+/// proves for DuckDB, now over Trino's `TargetSchema`-resident staged
+/// relation and its `USING`-less changed-row `DELETE`.
+#[tokio::test]
+async fn staged_candidate_conditional_parity_on_trino() {
+    let Some(env) = common::trino_env() else {
+        eprintln!("SMELT_TRINO_URL unset — skipping staged_candidate_conditional_parity_on_trino");
+        return;
+    };
+    let schema = common::trino_schema("staged_candidate");
+
+    let backend = common::trino_backend(&schema);
+    backend
+        .execute_sql(&format!("CREATE SCHEMA IF NOT EXISTS {schema}"))
+        .await
+        .expect("create schema");
+    backend
+        .execute_sql(&format!(
+            "CREATE TABLE {schema}.sources_raw_transactions (transaction_id INTEGER, user_id \
+             INTEGER, transaction_date DATE)"
+        ))
+        .await
+        .expect("create transactions source table");
+    backend
+        .execute_sql(&format!(
+            "INSERT INTO {schema}.sources_raw_transactions VALUES \
+             (1, 1, DATE '2026-01-01'), (2, 2, DATE '2026-01-01')"
+        ))
+        .await
+        .expect("seed transactions");
+    backend
+        .execute_sql(&format!(
+            "CREATE TABLE {schema}.sources_raw_users (user_id INTEGER, tier VARCHAR)"
+        ))
+        .await
+        .expect("create users source table");
+    backend
+        .execute_sql(&format!(
+            "INSERT INTO {schema}.sources_raw_users VALUES (1, 'gold'), (2, 'silver')"
+        ))
+        .await
+        .expect("seed users");
+
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path();
+    stage_membership_project(project_dir, &env, &schema);
+
+    let config = Arc::new(Config::load(project_dir).expect("load config"));
+    let scheme = if env.tls { "https" } else { "http" };
+
+    // Run 1: creation — the target doesn't exist yet, never the
+    // membership-recompute path.
+    {
+        let (db, graph) = build_db_and_graph(project_dir, &config);
+        let backend_slot: Arc<Mutex<Option<Arc<RecordingBackend>>>> = Arc::new(Mutex::new(None));
+        let factory = TrinoRecordingBackendFactory {
+            base_url: format!("{scheme}://{}:{}", env.host, env.port),
+            user: env.user.clone(),
+            catalog: env.catalog.clone(),
+            backend: Arc::clone(&backend_slot),
+        };
+        let outcome = execute_project(
+            "trino-staged-candidate-statement-parity-run-1".to_string(),
+            make_request("dev", "2026-01-01", "2026-01-02"),
+            Arc::clone(&config),
+            graph,
+            db,
+            project_dir,
+            &factory,
+            &smelt_runtime::NoOpReporter,
+            CancellationToken::new(),
+        )
+        .await;
+        if let Err(e) = &outcome {
+            common::drop_trino_schema(&schema).await;
+            panic!("execute_project run 1 (first-run create) failed: {e}");
+        }
+    }
+
+    // User 2 departs the dimension entirely between runs.
+    backend
+        .execute_sql(&format!(
+            "DELETE FROM {schema}.sources_raw_users WHERE user_id = 2"
+        ))
+        .await
+        .expect("user 2 departs");
+
+    // Run 2: the live cell dispatches the membership recompute — its
+    // statements are what this test asserts against.
+    let (db, graph) = build_db_and_graph(project_dir, &config);
+    let backend_slot: Arc<Mutex<Option<Arc<RecordingBackend>>>> = Arc::new(Mutex::new(None));
+    let factory = TrinoRecordingBackendFactory {
+        base_url: format!("{scheme}://{}:{}", env.host, env.port),
+        user: env.user.clone(),
+        catalog: env.catalog.clone(),
+        backend: Arc::clone(&backend_slot),
+    };
+    let outcome = execute_project(
+        "trino-staged-candidate-statement-parity-run-2".to_string(),
+        make_request("dev", "2026-01-02", "2026-01-03"),
+        Arc::clone(&config),
+        graph,
+        db,
+        project_dir,
+        &factory,
+        &smelt_runtime::NoOpReporter,
+        CancellationToken::new(),
+    )
+    .await;
+
+    if let Err(e) = &outcome {
+        common::drop_trino_schema(&schema).await;
+        panic!("execute_project (Trino staged-candidate recompute) failed: {e}");
+    }
+    let outcome = outcome.unwrap();
+    assert!(
+        outcome.models.contains_key("user_lifetime_status"),
+        "user_lifetime_status must have run: {:?}",
+        outcome.models.keys().collect::<Vec<_>>()
+    );
+
+    let recorded = backend_slot
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("backend recorded");
+    let groups = recorded.recorded_groups();
+    assert_eq!(
+        groups.len(),
+        1,
+        "one staged-candidate conditional recompute group must have executed: {groups:?}"
+    );
+
+    let group = &groups[0];
+    assert!(
+        !group.transactional,
+        "Trino's staged relation is non-atomic — the recorded group must say so"
+    );
+    let changed_row_delete = group
+        .statements
+        .iter()
+        .find(|s| s.sql.contains("EXISTS") && s.sql.starts_with("DELETE FROM"))
+        .map(|s| s.sql.as_str());
+    assert!(
+        changed_row_delete.is_some_and(|s| !s.contains(" USING ")),
+        "the changed-row delete must not use USING on Trino: {group:?}"
+    );
+
+    // The candidate select is the `INSERT INTO <staged> ...` statement's
+    // own SELECT body — the same text the emitter would receive.
+    let insert_into_staged = group
+        .statements
+        .iter()
+        .find(|s| s.sql.starts_with("INSERT INTO __smelt_staged_"))
+        .unwrap_or_else(|| panic!("no INSERT INTO staged relation found: {group:?}"));
+    let staged_name_end = insert_into_staged.sql["INSERT INTO ".len()..]
+        .find(' ')
+        .map(|i| i + "INSERT INTO ".len())
+        .expect("staged relation name");
+    let staged_name = &insert_into_staged.sql["INSERT INTO ".len()..staged_name_end];
+    let candidate_select = insert_into_staged.sql[staged_name_end..].trim().to_string();
+
+    let staged_relation = StagedRelation::derive_for_capabilities(
+        "__smelt_staged_",
+        "user_lifetime_status",
+        &smelt_backend::BackendCapabilities::trino_iceberg(),
+    );
+    assert_eq!(&staged_relation.name, staged_name);
+
+    let expected = emit_staged_candidate_conditional_recompute(
+        &format!("{schema}.user_lifetime_status"),
+        &staged_relation,
+        &["user_id".to_string()],
+        &candidate_select,
+        &["event_count".to_string()],
+        MaintenanceDialect::Trino,
+    );
+
+    let matches = &expected == group;
+    if !matches {
+        common::drop_trino_schema(&schema).await;
+    }
+    assert_eq!(
+        &expected, group,
+        "executed group must be byte-identical to a direct \
+         emit_staged_candidate_conditional_recompute call over the same inputs"
+    );
+
+    common::drop_trino_schema(&schema).await;
+}

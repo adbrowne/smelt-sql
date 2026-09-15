@@ -2,7 +2,7 @@ use super::*;
 use anyhow::Result;
 use smelt_backend::{maintenance_dialect, Backend, ExecutionResult, PartitionRange};
 use smelt_logical::maintenance::emit::{
-    emit_staged_candidate_conditional_recompute, StagedRelation, StagedRelationResidence,
+    emit_staged_candidate_conditional_recompute, StagedRelation,
 };
 use std::time::Instant;
 
@@ -47,12 +47,8 @@ pub async fn execute_staged_membership_recompute(
     let start = Instant::now();
     let full_table = format!("{schema}.{table}");
     let dialect = maintenance_dialect(backend.dialect())?;
-    let staged_relation = StagedRelation::derive(
-        "__smelt_staged_",
-        table,
-        StagedRelationResidence::SessionTemporary,
-        true,
-    );
+    let staged_relation =
+        StagedRelation::derive_for_capabilities("__smelt_staged_", table, &backend.capabilities());
     let group = emit_staged_candidate_conditional_recompute(
         &full_table,
         &staged_relation,
@@ -159,12 +155,18 @@ pub async fn execute_staged_keyless_recompute(
     let start = Instant::now();
     let full_table = format!("{schema}.{table}");
     let dialect = maintenance_dialect(backend.dialect())?;
-    let staged_relation = smelt_logical::maintenance::emit::StagedRelation::session_temporary(
-        format!("__smelt_staged_{table}"),
+    let caps = backend.capabilities();
+    let staged_relation = smelt_logical::maintenance::emit::StagedRelation::derive_for_capabilities(
+        "__smelt_staged_",
+        table,
+        &caps,
     );
-    let sentinel_relation = smelt_logical::maintenance::emit::StagedRelation::session_temporary(
-        format!("__smelt_sentinel_{table}"),
-    );
+    let sentinel_relation =
+        smelt_logical::maintenance::emit::StagedRelation::derive_for_capabilities(
+            "__smelt_sentinel_",
+            table,
+            &caps,
+        );
     let group = smelt_logical::maintenance::emit::emit_staged_candidate_conditional_keyless(
         &full_table,
         &staged_relation,

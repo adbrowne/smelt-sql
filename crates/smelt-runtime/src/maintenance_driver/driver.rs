@@ -140,7 +140,13 @@ pub trait WindowedKeyedRule: Send + Sync {
     /// does); the default panics rather than silently falling back to
     /// `merge_sql`, since `resolve_keyed_write_mechanism` only ever produces
     /// `StagedCandidate` for a rule this driver's real (`keyed`) family
-    /// serves.
+    /// serves. `capabilities` is the target's own `BackendCapabilities` —
+    /// an override's `StagedCandidate` arm must derive its
+    /// [`smelt_logical::maintenance::emit::StagedRelation`] from it
+    /// (`derive_for_capabilities`), never hardcode a session-temporary
+    /// shape (`docs/specs/multi_backend.md` §"Column-scoped merge and
+    /// conditional-write capabilities").
+    #[allow(clippy::too_many_arguments)]
     fn write_group(
         &self,
         schema: &str,
@@ -149,8 +155,10 @@ pub trait WindowedKeyedRule: Send + Sync {
         slice: Option<&TargetSlicePredicate>,
         mechanism: &smelt_logical::maintenance::choice::KeyedWriteMechanism,
         dialect: MaintenanceDialect,
+        capabilities: &smelt_backend::BackendCapabilities,
     ) -> StatementGroup {
         use smelt_logical::maintenance::choice::KeyedWriteMechanism;
+        let _ = capabilities;
         match mechanism {
             KeyedWriteMechanism::Merge(suppression) => StatementGroup {
                 statements: vec![MaintenanceStatement {
@@ -408,6 +416,7 @@ pub async fn run_windowed_keyed_maintenance(
                 slice_predicate.as_ref(),
                 &mechanism,
                 smelt_backend::maintenance_dialect(backend.dialect())?,
+                &backend.capabilities(),
             ),
         };
         let action_sql = action_group
