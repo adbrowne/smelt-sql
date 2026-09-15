@@ -6984,6 +6984,54 @@ fn test_interval_numeric_round_trip() {
     }
 }
 
+#[test]
+fn interval_quoted_number_bare_unit_parses() {
+    // INTERVAL '3' DAY — quoted-number spelling with a bare trailing unit
+    // keyword. Today this fails with "Expected AND_KW, found IDENT" because
+    // the typed-literal branch stops at the string literal.
+    let parse = parse(
+        "SELECT * FROM t WHERE d BETWEEN TIMESTAMP '2025-01-14' - INTERVAL '3' DAY \
+         AND TIMESTAMP '2025-01-14'",
+    );
+    assert_eq!(parse.errors.len(), 0, "parse errors: {:?}", parse.errors);
+}
+
+#[test]
+fn interval_quoted_number_bare_unit_roundtrips() {
+    let sql = "SELECT d - INTERVAL '3' DAY AS x FROM t";
+    let parse1 = parse(sql);
+    assert_eq!(
+        parse1.errors.len(),
+        0,
+        "original parse failed: {:?}",
+        parse1.errors
+    );
+    let file = File::cast(parse1.syntax()).expect("FILE node");
+    let printed = file.to_string();
+    assert_eq!(printed, sql, "round-trip must be byte-identical");
+    let parse2 = parse(&printed);
+    assert_eq!(
+        parse2.errors.len(),
+        0,
+        "round-trip parse failed: printed={printed:?}, errors={:?}",
+        parse2.errors
+    );
+}
+
+#[test]
+fn interval_quoted_string_alias_is_not_absorbed() {
+    // `INTERVAL '3' foo` must not swallow `foo` as a unit — it is not a
+    // recognised unit keyword, so it is left as a separate identifier
+    // (e.g. a column alias).
+    let parse = parse("SELECT INTERVAL '3' foo FROM t");
+    assert_eq!(parse.errors.len(), 0, "parse errors: {:?}", parse.errors);
+    let file = File::cast(parse.syntax()).expect("FILE node");
+    // `foo` is not absorbed into the INTERVAL expression — it is printed
+    // back as a normalised `AS foo` alias, the same as any other bare alias.
+    let printed = file.to_string();
+    assert_eq!(printed, "SELECT INTERVAL '3' AS foo FROM t");
+}
+
 // ===== Phase 3: smelt.test declaration grammar =====
 
 use crate::ast::{RecordLiteral, SmeltTest};

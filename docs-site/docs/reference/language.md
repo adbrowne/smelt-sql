@@ -318,6 +318,10 @@ A numeric literal immediately followed by letters with no separating space — `
 
 Dollar-quoted string literals — `$$...$$` and tagged `$tag$...$tag$` (tag: a letter or underscore followed by letters, digits, or underscores) — also lex as ordinary string literals and infer as Text. The body needs no escaping: embedded single quotes are content, and a `$$` inside a tagged body is content too (only the exact matching closing delimiter ends the string). An unterminated dollar-quote is a parse error rather than being silently split into smaller tokens.
 
+### Interval literals
+
+`INTERVAL` accepts three equivalent spellings: `INTERVAL '<n> <unit>'` (the value and unit both inside the quotes, e.g. `INTERVAL '3 days'`), `INTERVAL '<n>' <UNIT>` (a quoted number with a bare trailing unit keyword, e.g. `INTERVAL '3' DAY`), and `INTERVAL <n> <UNIT>` (fully bare, e.g. `INTERVAL 3 DAY`). All three fold to the same offset — a unit of `SECOND`/`MINUTE`/`HOUR`/`DAY`/`WEEK` (singular or plural) is a fixed-length duration, while `MONTH`/`YEAR` is a non-uniform, calendar-relative offset that a bound-relevant position (e.g. a `WHERE`/`JOIN` filter or window frame that scopes an incremental model's source read) cannot resolve to a fixed value.
+
 ## Date/time extraction
 
 ```sql

@@ -720,30 +720,43 @@ fn classify_binary(bin: &BinaryExpr, declared_monotonic: bool) -> Classification
     Classification::disproven("binary +/- is not a column ± constant interval shift")
 }
 
-/// Parse an `INTERVAL '<value>'` literal expression (e.g. `INTERVAL '1
-/// day'`) into an `Offset`. Note this parses the literal *string content of
-/// a single INTERVAL token already located via the AST* — not a
-/// text/substring search over the classifier's control flow.
+/// Parse an `INTERVAL` literal expression (e.g. `INTERVAL '1 day'`,
+/// `INTERVAL '1' HOUR`, `INTERVAL 1 HOUR`) into an `Offset`. Token-level
+/// input — the same three spellings [`source_bounds::parse_interval_literal_after_keyword`]
+/// recognises over text, here read directly off the AST tokens of a single
+/// INTERVAL expression already located by the caller, then folded through
+/// the shared value+unit combinator so both owners agree (e.g. `INTERVAL
+/// '1' HOUR` folds to 3600s, never 1s).
 fn parse_interval_literal(expr: &Expr) -> Option<Offset> {
-    use smelt_parser::SyntaxKind::{IDENT, STRING};
+    use smelt_parser::SyntaxKind::{IDENT, NUMBER, STRING};
 
     let tokens: Vec<_> = expr
         .syntax()
         .children_with_tokens()
         .filter_map(|e| e.into_token())
+        .filter(|t| !t.kind().is_trivia())
         .collect();
 
-    let is_interval_keyword = tokens
+    let interval_pos = tokens
         .iter()
-        .any(|t| t.kind() == IDENT && t.text().eq_ignore_ascii_case("INTERVAL"));
-    if !is_interval_keyword {
-        return None;
-    }
+        .position(|t| t.kind() == IDENT && t.text().eq_ignore_ascii_case("INTERVAL"))?;
 
-    let string_tok = tokens.iter().find(|t| t.kind() == STRING)?;
-    let raw = string_tok.text();
-    let value = raw.trim_matches(|c| c == '\'' || c == '"');
-    source_bounds::parse_interval(value)
+    let value_tok = tokens.get(interval_pos + 1)?;
+    let value = match value_tok.kind() {
+        STRING => value_tok
+            .text()
+            .trim_matches(|c| c == '\'' || c == '"')
+            .to_string(),
+        NUMBER => value_tok.text().to_string(),
+        _ => return None,
+    };
+
+    let trailing_unit = tokens
+        .get(interval_pos + 2)
+        .filter(|t| t.kind() == IDENT)
+        .map(|t| t.text().to_string());
+
+    source_bounds::parse_interval_value_and_unit(&value, trailing_unit.as_deref())
 }
 
 /// Parse a bare (non-`INTERVAL`) signed integer literal expression (e.g. `5`
@@ -1337,6 +1350,27 @@ mod tests {
                 ..
             } => {
                 assert_eq!(offset, Offset::Seconds(Seconds::days(1)));
+                assert!(monotonicity.is_strict);
+            }
+            other => panic!("expected Traceable, got {other:?}"),
+        }
+    }
+
+    /// `ts + INTERVAL '1' HOUR` — quoted-number-bare-unit spelling — traces
+    /// with `Offset::Seconds(3600)`, not `Seconds(1)` (the pre-fix bug: the
+    /// quoted STRING token "1" alone has no unit and used to be misread as
+    /// seconds).
+    #[test]
+    fn event_time_shift_by_quoted_number_bare_unit() {
+        let expr = first_select_expr("SELECT event_ts + INTERVAL '1' HOUR AS event_time FROM t");
+        let ctx = events_ctx();
+        match trace_event_time(&expr, &ctx) {
+            EventTimeTrace::Traceable {
+                offset,
+                monotonicity,
+                ..
+            } => {
+                assert_eq!(offset, Offset::Seconds(Seconds::hours(1)));
                 assert!(monotonicity.is_strict);
             }
             other => panic!("expected Traceable, got {other:?}"),

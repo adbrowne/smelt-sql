@@ -15,6 +15,18 @@
 
 use crate::SyntaxKind::*;
 
+/// Recognised `INTERVAL` unit keywords (singular or plural), shared by the
+/// bare-numeric (`INTERVAL 3 DAY`) and quoted-number (`INTERVAL '3' DAY`)
+/// spellings so a trailing IDENT is absorbed only when it names a real unit —
+/// never any following identifier, e.g. an alias in `INTERVAL '3' foo`.
+fn is_interval_unit_ident(text: &str) -> bool {
+    let upper = text.to_uppercase();
+    matches!(
+        upper.trim_end_matches('S'),
+        "YEAR" | "MONTH" | "WEEK" | "DAY" | "HOUR" | "MINUTE" | "SECOND"
+    )
+}
+
 impl<'a> super::Parser<'a> {
     pub(super) fn parse_expression(&mut self) {
         self.start_node(EXPRESSION);
@@ -695,10 +707,28 @@ impl<'a> super::Parser<'a> {
         } else if self.at(IDENT) && self.is_typed_literal() {
             // Typed literal: DATE '2024-01-01', TIMESTAMP '...', etc.
             // Wrap in EXPRESSION so Expr::cast() works
+            let type_kw_token = self.tokens[self.pos];
+            let is_interval = self.input[self.offset..self.offset + type_kw_token.len]
+                .eq_ignore_ascii_case("INTERVAL");
             self.start_node(EXPRESSION);
             self.advance(); // type keyword (IDENT)
             self.skip_trivia();
             self.advance(); // string literal
+            if is_interval {
+                // Quoted-number spelling `INTERVAL '3' DAY`: absorb a
+                // trailing bare unit keyword into the same EXPRESSION node,
+                // mirroring the numeric-INTERVAL branch below. Only a
+                // recognised unit is absorbed — `INTERVAL '3' foo` leaves
+                // `foo` untouched (e.g. as a column alias).
+                self.skip_trivia();
+                if self.at(IDENT) {
+                    let unit_token = self.tokens[self.pos];
+                    let unit_text = &self.input[self.offset..self.offset + unit_token.len];
+                    if is_interval_unit_ident(unit_text) {
+                        self.advance(); // unit keyword (DAY, MONTH, YEAR, HOUR, …)
+                    }
+                }
+            }
             self.finish_node();
         } else if self.at(IDENT) && self.is_numeric_interval() {
             // Numeric INTERVAL forms: `INTERVAL 1 DAY`, `INTERVAL (n) DAY`.
@@ -720,7 +750,11 @@ impl<'a> super::Parser<'a> {
             }
             self.skip_trivia();
             if self.at(IDENT) {
-                self.advance(); // unit keyword (DAY, MONTH, YEAR, HOUR, …)
+                let unit_token = self.tokens[self.pos];
+                let unit_text = &self.input[self.offset..self.offset + unit_token.len];
+                if is_interval_unit_ident(unit_text) {
+                    self.advance(); // unit keyword (DAY, MONTH, YEAR, HOUR, …)
+                }
             }
             self.finish_node();
         } else if self.at(IDENT) && self.at_smelt_as_struct_trigger() {

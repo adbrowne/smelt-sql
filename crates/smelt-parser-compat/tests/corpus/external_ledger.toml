@@ -214,10 +214,6 @@ note = "sqllogictest ${...} template placeholder substituted at test-run time by
 category = "if_function_vs_ternary_ambiguity"
 note = "SQL IF(cond, a, b) 3-argument function call is not parsed; IF is reserved for the meta-language ternary and is not in at_keyword_as_function_name's list"
 
-["11364d332cae94d5"]
-category = "interval_string_literal_unit_in_arg_list"
-note = "A DuckDB-style `interval '1' day` typed string literal with a trailing unit keyword is only consumed correctly at SELECT-item top level (where the unit is accidentally swallowed as an implicit column alias); inside a function argument list the unit keyword is left dangling and fails with 'Expected RPAREN'. The statement's original RANGE-keyword failure was fixed by the quality-grind range_keyword_as_identifier_or_function phase; this is the distinct root cause left once that one is gone."
-
 ["bb786c3a21b69bb3"]
 category = "lambda_or_lateral_syntax"
 note = "Lambda-arrow/`lambda x, y: ...`/LATERAL join syntax used in a form not yet parsed"
@@ -293,10 +289,6 @@ note = "DuckDB's ^@ string starts-with operator is not parsed"
 ["eb04a0882f486e64"]
 category = "sqllogictest_template_placeholder"
 note = "sqllogictest ${...} template placeholder substituted at test-run time by the upstream harness, never valid standalone SQL"
-
-["165601706514a57b"]
-category = "at_time_zone_or_time_tz_type"
-note = "AT TIME ZONE operator / TIME WITH[OUT] TIME ZONE type literal is not parsed (tracked gaps.rs::at_time_zone)"
 
 ["bf4f9acc846503da"]
 category = "asof_join_syntax"

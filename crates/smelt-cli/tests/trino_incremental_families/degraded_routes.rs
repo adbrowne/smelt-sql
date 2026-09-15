@@ -73,7 +73,7 @@ fn stage_repair_project(tmp: &tempfile::TempDir, schema: &str) -> std::path::Pat
          unique_key: customer_id\n\
          ---\n\
          SELECT customer_id, MAX(amount) AS max_amount FROM smelt.sources.repair_orders \
-         WHERE order_date BETWEEN TIMESTAMP '2025-01-14' - INTERVAL '3 days' AND TIMESTAMP \
+         WHERE order_date BETWEEN TIMESTAMP '2025-01-14' - INTERVAL '3' DAY AND TIMESTAMP \
          '2025-01-14' GROUP BY customer_id\n",
     )
     .unwrap();
@@ -146,35 +146,19 @@ fn per_group_recompute_cell_is_explain_visible_on_trino() {
     assert_eq!(downgrade["missing"], "fingerprint sidecar");
 }
 
-/// Test 2 (STILL NOT achieved — see `docs/outcomes/20260913-trino-incremental/
-/// outcome.md`'s Blocked log, 2026-09-15 "phase 6c"): `per_group_recompute_
-/// matches_full_refresh_on_trino` was meant to run the repair model
-/// end-to-end through `smelt run --target trino`, then assert row-identity
-/// to a `--full-refresh` oracle after a genuine in-place source mutation.
-/// Phase 6c's own fix (the sidecar requirement + downgrade) IS proven —
-/// `per_group_recompute_cell_is_explain_visible_on_trino` above shows the
-/// cell downgrading to `DeleteInsert` exactly as `resolve_availability` now
-/// derives, and `crates/smelt-runtime/tests/repair_lowering.rs::
-/// repair_downgrade_matches_full_refresh_offline` proves the SAME downgrade
-/// is oracle-equal with no live tier at all. What blocks this SPECIFIC live
-/// test is a second, unrelated, newly-discovered gap in the repair
-/// fixture's own obligation-4 admission: the Form B bound-derivation
-/// classifier (`smelt_logical::analysis::source_bounds::parse_quoted_interval`)
-/// recognises only the quoted-string spelling `INTERVAL '3 days'` — which
-/// `smelt-parser` accepts but Trino's live engine cannot execute
-/// (`io.trino.spi.type.TypeNotFoundException: Unknown type: interval`).  The
-/// two ANSI alternates were also tried live: `INTERVAL '3' DAY` (quoted
-/// number, bare unit) fails to even PARSE in `smelt-parser` (`Expected
-/// AND_KW, found IDENT` inside the `BETWEEN` clause); `INTERVAL 3 DAY` (bare
-/// number, bare unit) parses fine but is not a spelling
-/// `parse_quoted_interval`'s text scan recognises at all, so obligation 4
-/// fails closed (`RepairSliceUnbounded`) before the sidecar question is ever
-/// reached. None of the three spellings lets this model's own Form B band
-/// admit AND execute on Trino today. Following phase 3's own
-/// `#[allow(dead_code)]` convention for a discovered gap outside this
-/// phase's task list, rather than leaving a permanently-red `#[test]` in the
-/// tree.
-#[allow(dead_code)]
+/// Test 2: `per_group_recompute_matches_full_refresh_on_trino` runs the
+/// repair model end-to-end through `smelt run --target trino`, then asserts
+/// row-identity to a `--full-refresh` oracle after a genuine in-place source
+/// mutation. Phase 6c's own fix (the sidecar requirement + downgrade) is
+/// proven above by `per_group_recompute_cell_is_explain_visible_on_trino`;
+/// the second, previously blocking gap — the Form B bound-derivation
+/// classifier only recognising the quoted-string spelling `INTERVAL '3
+/// days'`, which `smelt-parser` accepts but Trino's live engine cannot
+/// execute (`Unknown type: interval`) — is fixed by phase 6e: the fixture's
+/// band now spells the offset as the ANSI `INTERVAL '3' DAY` form (quoted
+/// number, bare unit), which the classifier now folds correctly and Trino
+/// executes natively.
+#[test]
 fn per_group_recompute_matches_full_refresh_on_trino() {
     let Some(_env) = trino_env() else {
         eprintln!(

@@ -135,6 +135,92 @@ pub(crate) fn parse_interval(value: &str) -> Option<Offset> {
     }
 }
 
+/// True if `word` names a recognised `INTERVAL` unit keyword (singular or
+/// plural) — shared between the text-scanning owner below and
+/// `monotonicity::parse_interval_literal`'s token-level owner, so a trailing
+/// bare identifier is absorbed as a unit only when it actually is one.
+pub(crate) fn is_interval_unit_keyword(word: &str) -> bool {
+    let upper = word.to_uppercase();
+    matches!(
+        upper.trim_end_matches('S'),
+        "YEAR" | "MONTH" | "WEEK" | "DAY" | "HOUR" | "MINUTE" | "SECOND"
+    )
+}
+
+/// Combine an interval `value` (the text between quotes, or a bare number)
+/// with an optional trailing bare unit word into the unified [`Offset`].
+/// Shared by both the text-scanning owner ([`parse_interval_literal_after_keyword`])
+/// and `monotonicity::parse_interval_literal`'s token-level owner, so
+/// `INTERVAL '1' HOUR` and `INTERVAL 1 HOUR` fold identically to `INTERVAL
+/// '1 hour'` regardless of which spelling produced the (value, unit) pair.
+pub(crate) fn parse_interval_value_and_unit(
+    value: &str,
+    trailing_unit: Option<&str>,
+) -> Option<Offset> {
+    let value_trimmed = value.trim();
+    let has_inline_unit = value_trimmed.split_whitespace().count() >= 2;
+    if !has_inline_unit {
+        if let Some(unit) = trailing_unit {
+            if is_interval_unit_keyword(unit) {
+                return parse_interval(&format!("{value_trimmed} {unit}"));
+            }
+        }
+    }
+    parse_interval(value_trimmed)
+}
+
+/// Return the leading contiguous "word" (letters, digits, `.`, `-`) at the
+/// start of `text`, after skipping leading whitespace. `None` if `text` is
+/// empty or starts with something else (e.g. a comma, a closing paren).
+fn leading_word(text: &str) -> Option<&str> {
+    let trimmed = text.trim_start();
+    let end = trimmed
+        .find(|c: char| !(c.is_alphanumeric() || c == '.' || c == '-'))
+        .unwrap_or(trimmed.len());
+    if end == 0 {
+        None
+    } else {
+        Some(&trimmed[..end])
+    }
+}
+
+/// Single owner for interval-literal recognition after the `INTERVAL`
+/// keyword (`docs/specs/model_properties.md` "Unified bound / reach
+/// derivation"). Handles all three spellings smelt's parser accepts:
+/// `INTERVAL '<n> <unit>'`, `INTERVAL '<n>' <UNIT>`, `INTERVAL <n> <UNIT>`.
+///
+/// `text` is everything *after* the `INTERVAL` keyword in the source SQL
+/// (which may run to the end of the statement); this function only ever
+/// looks at the token immediately following the keyword — a quote or a
+/// number, optionally followed by a bare unit word — and fails closed
+/// (`None`) otherwise, rather than scanning forward and grabbing a later,
+/// unrelated quoted literal.
+pub(crate) fn parse_interval_literal_after_keyword(text: &str) -> Option<Offset> {
+    let trimmed = text.trim_start();
+    if let Some(rest) = trimmed.strip_prefix('\'') {
+        // Quoted form: INTERVAL '<value>' [UNIT]
+        let quote_end = rest.find('\'')?;
+        let value = &rest[..quote_end];
+        let after_quote = &rest[quote_end + 1..];
+        let trailing_unit = leading_word(after_quote).filter(|w| is_interval_unit_keyword(w));
+        parse_interval_value_and_unit(value, trailing_unit)
+    } else {
+        // Bare numeric form: INTERVAL <n> [UNIT]
+        let num_word = leading_word(trimmed)?;
+        if !num_word
+            .chars()
+            .next()
+            .map(|c| c.is_ascii_digit())
+            .unwrap_or(false)
+        {
+            return None;
+        }
+        let after_num = &trimmed[num_word.len()..];
+        let trailing_unit = leading_word(after_num).filter(|w| is_interval_unit_keyword(w));
+        parse_interval_value_and_unit(num_word, trailing_unit)
+    }
+}
+
 /// The result of resolving a source's run-relative scan window against a
 /// concrete run window: either a resolved `(start, end)` pair rendered in
 /// the axis's own domain, or an unresolved verdict naming why — never a
@@ -1944,17 +2030,14 @@ fn extract_interval_seconds_in_text(text: &str) -> Option<Seconds> {
     None
 }
 
-/// Parse a quoted interval like " '1 day'" or " '30 minutes'" into the
-/// unified [`Offset`] representation (see `parse_interval`).
+/// Parse an interval literal like " '1 day'", " '3' DAY", or " 3 DAY" —
+/// text starting right after the `INTERVAL` keyword — into the unified
+/// [`Offset`] representation. Delegates to the single owner,
+/// [`parse_interval_literal_after_keyword`], which recognises all three
+/// spellings and fails closed rather than grabbing a later unrelated quoted
+/// literal.
 fn parse_quoted_interval_offset(text: &str) -> Option<Offset> {
-    let trimmed = text.trim();
-    // Find the quoted value
-    let quote_start = trimmed.find('\'')?;
-    let rest = &trimmed[quote_start + 1..];
-    let quote_end = rest.find('\'')?;
-    let value = &rest[..quote_end];
-
-    parse_interval(value)
+    parse_interval_literal_after_keyword(text)
 }
 
 /// Parse a quoted interval like " '1 day'" or " '30 minutes'" and return
@@ -2492,6 +2575,71 @@ mod tests {
             } => {
                 assert_eq!(source_partition_col, "event_date");
                 assert_eq!(*before, Seconds::days(1), "before must be 1 day");
+                assert_eq!(*after, Seconds::ZERO, "after must be zero");
+            }
+            other => panic!("Expected Bounded, got {:?}", other),
+        }
+    }
+
+    /// `INTERVAL '3' DAY` — quoted-number spelling with a bare trailing unit
+    /// — folds to `Seconds::days(3)`, not 3 seconds (the pre-fix bug: the
+    /// quoted value "3" alone has no unit and used to be misread as seconds).
+    #[test]
+    fn interval_quoted_number_bare_unit_folds_to_days() {
+        assert_eq!(
+            parse_interval_literal_after_keyword(" '3' DAY"),
+            Some(Offset::Seconds(Seconds::days(3)))
+        );
+    }
+
+    /// `INTERVAL 3 DAY` — fully bare-numeric spelling — also folds to
+    /// `Seconds::days(3)`.
+    #[test]
+    fn interval_bare_number_bare_unit_folds_to_days() {
+        assert_eq!(
+            parse_interval_literal_after_keyword(" 3 DAY"),
+            Some(Offset::Seconds(Seconds::days(3)))
+        );
+    }
+
+    /// Both new spellings classify MONTH/YEAR as `Offset::Symbolic`, and
+    /// `has_symbolic_interval_in_bound_position` sees them too.
+    #[test]
+    fn interval_bare_unit_month_is_symbolic() {
+        assert_eq!(
+            parse_interval_literal_after_keyword(" '3' MONTH"),
+            Some(Offset::Symbolic("3 MONTH".to_string()))
+        );
+        assert_eq!(
+            parse_interval_literal_after_keyword(" 3 MONTH"),
+            Some(Offset::Symbolic("3 MONTH".to_string()))
+        );
+        assert!(has_symbolic_interval_in_bound_position(
+            "WHERE D BETWEEN X - INTERVAL '3' MONTH AND X"
+        ));
+        assert!(has_symbolic_interval_in_bound_position(
+            "WHERE D BETWEEN X - INTERVAL 3 MONTH AND X"
+        ));
+    }
+
+    /// A Form B band written with the quoted-number-bare-unit spelling
+    /// derives the same `Bounded` reach as the established `'3 days'`
+    /// spelling.
+    #[test]
+    fn form_b_band_admits_quoted_number_bare_unit() {
+        let sql = "SELECT * FROM smelt.silver.sessions s \
+                   WHERE s.event_date BETWEEN m.partition_date - INTERVAL '3' DAY AND m.partition_date";
+        let ctx = BoundContext::new().with_source("silver.sessions", "event_date");
+        let bounds = derive_model_bounds(sql, &ctx);
+        let bound = bounds.get("silver.sessions").unwrap();
+        match bound {
+            BoundResult::Bounded {
+                source_partition_col,
+                before,
+                after,
+            } => {
+                assert_eq!(source_partition_col, "event_date");
+                assert_eq!(*before, Seconds::days(3), "before must be 3 days");
                 assert_eq!(*after, Seconds::ZERO, "after must be zero");
             }
             other => panic!("Expected Bounded, got {:?}", other),
