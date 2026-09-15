@@ -1246,6 +1246,13 @@ Which landing state that is, per `Technique`, is derived once by
 | `ColumnScopedMerge`, `InPlaceUpdate` | downgraded — no transactional merge ledger, exactly as on Spark (Delta) | `MaintenanceStateDowngraded` |
 | `SuccessionPatch` | downgraded to `DeleteInsert` (full rebuild), never a ledger-less patch | `MaintenanceStateDowngraded` |
 
+On a backend realising no reconciliation ledger — Trino as above, and Spark (Delta) for the same
+reason — a membership-sensitive `grain: key` model's staged-candidate conditional recompute is
+subsumed by the same model's `KeyedFold` whole-target-rebuild downgrade, which recomputes
+everything the narrower recompute would have patched; the staged-candidate emitter is still
+correct on either dialect and its statements execute there, it is simply never the route a keyed
+model takes once its fold technique has already downgraded to a full rebuild.
+
 `supports_column_scoped_merge = ✓` and the `ColumnScopedMerge` row above are **not** in conflict:
 the flag describes a statement shape Trino can execute (§"Whole-row MERGE"'s column-by-column
 form), while the plan cell's technique demands a correctness structure — the transactional merge

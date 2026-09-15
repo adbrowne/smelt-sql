@@ -689,16 +689,25 @@ fn stage_membership_project(project_dir: &Path, env: &TrinoEnv, schema: &str) {
     std::fs::write(project_dir.join("smelt.yml"), smelt_yml).unwrap();
 }
 
-/// Test 10 (`docs/outcomes/20260913-trino-incremental/phases/05-plan.md`):
-/// the membership-sensitive staged-candidate conditional recompute's
-/// executed statements, captured by a `RecordingBackend` wrapping a real
-/// `TrinoBackend` during a real `execute_project` run, are byte-identical
-/// to a direct `emit_staged_candidate_conditional_recompute` call over the
-/// batch's own inputs — the same shape `staged_candidate_conditional.rs`
-/// proves for DuckDB, now over Trino's `TargetSchema`-resident staged
-/// relation and its `USING`-less changed-row `DELETE`.
+/// Test 3 (`docs/outcomes/20260913-trino-incremental/phases/06f-plan.md`,
+/// retargeting phase 05's original `staged_candidate_conditional_parity_on_trino`
+/// per option (c) of phase 6d's finding): this fixture's `NewData`-trigger
+/// cell is necessarily *also* `Technique::KeyedFold`-eligible (its aggregate
+/// is a `COUNT` fold over a fact joined to a mutable dimension), and Trino's
+/// missing reconciliation ledger permanently downgrades that cell to a
+/// whole-target rebuild — which subsumes the narrower staged-candidate
+/// conditional recompute the fixture's model would otherwise take
+/// (`docs/specs/multi_backend.md` §"Incremental & schema evolution per
+/// backend"). So no live `execute_project` run over *this* model shape can
+/// ever exercise the staged-candidate write on Trino; this test instead
+/// proves the whole-target-rebuild route it *does* take is dispatched
+/// exactly once (6d's double-dispatch fix's own live regression guard),
+/// mirroring `additive_keyed_fold_downgrade_parity_on_trino`'s assertions.
+/// The staged-candidate emitter's own Trino byte-identity proof moved to
+/// `staged_candidate_conditional_emitter_executes_on_trino` below, a direct
+/// harness that is not shaped by this classifier interaction at all.
 #[tokio::test]
-async fn staged_candidate_conditional_parity_on_trino() {
+async fn membership_model_whole_target_rebuild_parity_on_trino() {
     let Some(env) = common::trino_env() else {
         eprintln!("SMELT_TRINO_URL unset — skipping staged_candidate_conditional_parity_on_trino");
         return;
@@ -781,8 +790,9 @@ async fn staged_candidate_conditional_parity_on_trino() {
         .await
         .expect("user 2 departs");
 
-    // Run 2: the live cell dispatches the membership recompute — its
-    // statements are what this test asserts against.
+    // Run 2: the whole-target-rebuild downgrade fires (KeyedFold has no
+    // reconciliation ledger on Trino) — 6d's fix means this is the ONLY
+    // dispatched route, never alongside a membership-recompute group.
     let (db, graph) = build_db_and_graph(project_dir, &config);
     let backend_slot: Arc<Mutex<Option<Arc<RecordingBackend>>>> = Arc::new(Mutex::new(None));
     let factory = TrinoRecordingBackendFactory {
@@ -792,7 +802,7 @@ async fn staged_candidate_conditional_parity_on_trino() {
         backend: Arc::clone(&backend_slot),
     };
     let outcome = execute_project(
-        "trino-staged-candidate-statement-parity-run-2".to_string(),
+        "trino-membership-model-rebuild-statement-parity-run-2".to_string(),
         make_request("dev", "2026-01-02", "2026-01-03"),
         Arc::clone(&config),
         graph,
@@ -806,7 +816,7 @@ async fn staged_candidate_conditional_parity_on_trino() {
 
     if let Err(e) = &outcome {
         common::drop_trino_schema(&schema).await;
-        panic!("execute_project (Trino staged-candidate recompute) failed: {e}");
+        panic!("execute_project (Trino whole-target rebuild) failed: {e}");
     }
     let outcome = outcome.unwrap();
     assert!(
@@ -824,63 +834,152 @@ async fn staged_candidate_conditional_parity_on_trino() {
     assert_eq!(
         groups.len(),
         1,
-        "one staged-candidate conditional recompute group must have executed: {groups:?}"
+        "the downgraded rebuild must execute exactly one statement group — never alongside a \
+         second (e.g. membership-recompute) group: {groups:?}"
     );
+    assert_eq!(groups[0].statements.len(), 1);
 
-    let group = &groups[0];
+    let create_sql = &groups[0].statements[0].sql;
+    let prefix = format!("CREATE TABLE {schema}.user_lifetime_status AS ");
+    if !create_sql.starts_with(&prefix) {
+        common::drop_trino_schema(&schema).await;
+        panic!("unexpected create statement: {create_sql}");
+    }
     assert!(
-        !group.transactional,
-        "Trino's staged relation is non-atomic — the recorded group must say so"
+        !create_sql.contains("MERGE INTO") && !create_sql.starts_with("INSERT INTO __smelt_staged_"),
+        "the downgraded rebuild must never contain a MERGE or a staged-candidate write: {create_sql}"
     );
-    let changed_row_delete = group
-        .statements
-        .iter()
-        .find(|s| s.sql.contains("EXISTS") && s.sql.starts_with("DELETE FROM"))
-        .map(|s| s.sql.as_str());
-    assert!(
-        changed_row_delete.is_some_and(|s| !s.contains(" USING ")),
-        "the changed-row delete must not use USING on Trino: {group:?}"
-    );
-
-    // The candidate select is the `INSERT INTO <staged> ...` statement's
-    // own SELECT body — the same text the emitter would receive.
-    let insert_into_staged = group
-        .statements
-        .iter()
-        .find(|s| s.sql.starts_with("INSERT INTO __smelt_staged_"))
-        .unwrap_or_else(|| panic!("no INSERT INTO staged relation found: {group:?}"));
-    let staged_name_end = insert_into_staged.sql["INSERT INTO ".len()..]
-        .find(' ')
-        .map(|i| i + "INSERT INTO ".len())
-        .expect("staged relation name");
-    let staged_name = &insert_into_staged.sql["INSERT INTO ".len()..staged_name_end];
-    let candidate_select = insert_into_staged.sql[staged_name_end..].trim().to_string();
-
-    let staged_relation = StagedRelation::derive_for_capabilities(
-        "__smelt_staged_",
-        "user_lifetime_status",
-        &smelt_backend::BackendCapabilities::trino_iceberg(),
-    );
-    assert_eq!(&staged_relation.name, staged_name);
-
-    let expected = emit_staged_candidate_conditional_recompute(
+    let create_select = &create_sql[prefix.len()..];
+    let expected_create = emit_create_table_as(
         &format!("{schema}.user_lifetime_status"),
-        &staged_relation,
-        &["user_id".to_string()],
-        &candidate_select,
-        &["event_count".to_string()],
+        create_select,
         MaintenanceDialect::Trino,
     );
 
-    let matches = &expected == group;
+    let matches = expected_create == groups[0];
     if !matches {
         common::drop_trino_schema(&schema).await;
     }
     assert_eq!(
-        &expected, group,
-        "executed group must be byte-identical to a direct \
-         emit_staged_candidate_conditional_recompute call over the same inputs"
+        expected_create, groups[0],
+        "executed whole-target-rebuild group must be byte-identical to a direct \
+         emit_create_table_as call"
     );
 
     common::drop_trino_schema(&schema).await;
+}
+
+/// Test 4 (`docs/outcomes/20260913-trino-incremental/phases/06f-plan.md`):
+/// criterion 5's surviving proof for the staged-candidate conditional
+/// recompute family on Trino, now that no `execute_project` route reaches
+/// it for this outcome's own membership fixture (see the test above). A
+/// direct harness: `emit_staged_candidate_conditional_recompute(...,
+/// MaintenanceDialect::Trino)`'s statements are executed in order against a
+/// real `TrinoBackend` over a seeded target and a hand-written candidate
+/// select, and the target lands row- and column-equal to a direct recompute
+/// oracle — proving the emitter owns the statements and Trino runs them
+/// correctly, independent of which live model shapes route to it.
+#[tokio::test]
+async fn staged_candidate_conditional_emitter_executes_on_trino() {
+    let Some(_env) = common::trino_env() else {
+        eprintln!(
+            "SMELT_TRINO_URL unset — skipping staged_candidate_conditional_emitter_executes_on_trino"
+        );
+        return;
+    };
+    let schema = common::trino_schema("staged_candidate_emitter");
+    let backend = common::trino_backend(&schema);
+
+    backend
+        .execute_sql(&format!("CREATE SCHEMA IF NOT EXISTS {schema}"))
+        .await
+        .expect("create schema");
+    backend
+        .execute_sql(&format!(
+            "CREATE TABLE {schema}.dim_users (user_id INTEGER, tier VARCHAR, run_marker VARCHAR)"
+        ))
+        .await
+        .expect("create target table");
+    backend
+        .execute_sql(&format!(
+            "INSERT INTO {schema}.dim_users VALUES (1, 'bronze', 'run1'), (2, 'silver', \
+             'run1'), (3, 'gold', 'run1')"
+        ))
+        .await
+        .expect("seed target table");
+
+    // user 1: unchanged tier (must be suppressed, not rewritten); user 2:
+    // changed tier; user 4: brand new; user 3 genuinely departs (absent from
+    // the candidate's own full recompute).
+    let candidate_select = "SELECT * FROM (VALUES (1, 'bronze', 'run2'), (2, 'platinum', \
+                             'run2'), (4, 'new', 'run2')) AS t(user_id, tier, run_marker)";
+    let key = vec!["user_id".to_string()];
+    let compared_columns = vec!["tier".to_string()];
+
+    let staged_relation = StagedRelation::derive_for_capabilities(
+        "__smelt_staged_",
+        "dim_users",
+        &smelt_backend::BackendCapabilities::trino_iceberg(),
+    );
+    let group = emit_staged_candidate_conditional_recompute(
+        &format!("{schema}.dim_users"),
+        &staged_relation,
+        &key,
+        candidate_select,
+        &compared_columns,
+        MaintenanceDialect::Trino,
+    );
+
+    let exec_result = backend.execute_statement_group(&group).await;
+    if let Err(e) = &exec_result {
+        common::drop_trino_schema(&schema).await;
+        panic!("staged-candidate conditional recompute group failed on live Trino: {e}");
+    }
+
+    let rows = backend
+        .execute_sql(&format!(
+            "SELECT user_id, tier, run_marker FROM {schema}.dim_users ORDER BY user_id"
+        ))
+        .await;
+    let rows = match rows {
+        Ok(r) => r,
+        Err(e) => {
+            common::drop_trino_schema(&schema).await;
+            panic!("read back target failed: {e}");
+        }
+    };
+    let batch = &rows[0];
+    let ids = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Int32Array>()
+        .expect("user_id is Int32")
+        .values()
+        .to_vec();
+    let tiers: Vec<String> = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .expect("tier is Utf8")
+        .iter()
+        .map(|v| v.expect("tier non-null").to_string())
+        .collect();
+    let markers: Vec<String> = batch
+        .column(2)
+        .as_any()
+        .downcast_ref::<arrow::array::StringArray>()
+        .expect("run_marker is Utf8")
+        .iter()
+        .map(|v| v.expect("run_marker non-null").to_string())
+        .collect();
+
+    common::drop_trino_schema(&schema).await;
+
+    // Oracle: user 1 unchanged (row1, so its own marker must stay 'run1' —
+    // proving the unchanged row was never touched); user 2 updated to
+    // 'platinum'/'run2'; user 3 deleted (genuinely departed); user 4
+    // inserted as 'new'/'run2'.
+    assert_eq!(ids, vec![1, 2, 4]);
+    assert_eq!(tiers, vec!["bronze", "platinum", "new"]);
+    assert_eq!(markers, vec!["run1", "run2", "run2"]);
 }

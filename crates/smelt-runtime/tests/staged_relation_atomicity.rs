@@ -193,7 +193,11 @@ fn every_production_derivation_site_reads_the_capability() {
     assert!(src_dir.is_dir(), "src dir not found: {src_dir:?}");
 
     let mut offending = Vec::new();
+    let exclusions = external_test_module_files(&src_dir);
     for entry in walk_rs_files(&src_dir) {
+        if exclusions.contains(&entry) {
+            continue;
+        }
         let contents = std::fs::read_to_string(&entry).expect("read source file");
         let production_prefix = match contents.find("#[cfg(test)]") {
             Some(idx) => &contents[..idx],
@@ -262,6 +266,67 @@ fn derivation_sites_yield_target_schema_for_trino_caps() {
     assert!(!diff_patch_trino.atomic);
 }
 
+/// Proves the `#[cfg(test)] mod <ident>;` exclusion is scoped to genuine
+/// external test-module files, not a blanket exemption: a synthetic tree
+/// with both an excluded test-module file and a genuine production file
+/// hardcoding the literal must still flag the production file.
+#[test]
+fn census_still_flags_a_production_file() {
+    let root = std::env::temp_dir().join(format!(
+        "smelt_staged_relation_census_{}_{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock")
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&root).expect("create synthetic root");
+
+    std::fs::write(
+        root.join("mod.rs"),
+        "#[cfg(test)]\nmod tests;\n\nfn production_fn() {}\n",
+    )
+    .expect("write mod.rs");
+    std::fs::write(
+        root.join("tests.rs"),
+        "fn t() { let _ = StagedRelation::session_temporary(\"x\"); }\n",
+    )
+    .expect("write tests.rs");
+    std::fs::write(
+        root.join("other.rs"),
+        "fn production_fn() { let _ = StagedRelation::session_temporary(\"y\"); }\n",
+    )
+    .expect("write other.rs");
+
+    let exclusions = external_test_module_files(&root);
+    assert!(exclusions.contains(&root.join("tests.rs")));
+
+    let mut offending = Vec::new();
+    for entry in walk_rs_files(&root) {
+        if exclusions.contains(&entry) {
+            continue;
+        }
+        let contents = std::fs::read_to_string(&entry).expect("read source file");
+        let production_prefix = match contents.find("#[cfg(test)]") {
+            Some(idx) => &contents[..idx],
+            None => contents.as_str(),
+        };
+        if production_prefix.contains("StagedRelationResidence::SessionTemporary")
+            || production_prefix.contains("StagedRelation::session_temporary(")
+        {
+            offending.push(entry);
+        }
+    }
+
+    std::fs::remove_dir_all(&root).expect("clean up synthetic root");
+
+    assert_eq!(
+        offending,
+        vec![root.join("other.rs")],
+        "the excluded test-module file must not blind the census to a genuine production hit"
+    );
+}
+
 fn walk_rs_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
     let mut out = Vec::new();
     for entry in std::fs::read_dir(dir).expect("read dir") {
@@ -273,4 +338,56 @@ fn walk_rs_files(dir: &std::path::Path) -> Vec<std::path::PathBuf> {
         }
     }
     out
+}
+
+/// A whole file declared as `#[cfg(test)] mod <ident>;` by a sibling module
+/// is a test module living in its own file — the production-prefix scan
+/// (which truncates a file at its own first `#[cfg(test)]`) cannot see that
+/// declaration from *inside* the referenced file, so it must be excluded by
+/// the census up front. Resolves `<dir>/<ident>.rs` and `<dir>/<ident>/mod.rs`,
+/// matching Rust's own module resolution.
+fn external_test_module_files(
+    root: &std::path::Path,
+) -> std::collections::HashSet<std::path::PathBuf> {
+    let mut exclusions = std::collections::HashSet::new();
+    for entry in walk_rs_files(root) {
+        let contents = std::fs::read_to_string(&entry).expect("read source file");
+        let dir = entry.parent().expect("file has parent dir");
+        for mod_name in cfg_test_external_mod_names(&contents) {
+            let sibling_file = dir.join(format!("{mod_name}.rs"));
+            if sibling_file.is_file() {
+                exclusions.insert(sibling_file);
+            }
+            let mod_dir_file = dir.join(&mod_name).join("mod.rs");
+            if mod_dir_file.is_file() {
+                exclusions.insert(mod_dir_file);
+            }
+        }
+    }
+    exclusions
+}
+
+/// Finds every `mod <ident>;` (no braces — an external-file module, not an
+/// inline one) immediately gated by `#[cfg(test)]`, tolerant of the
+/// attribute and the `mod` keyword sharing a line or not.
+fn cfg_test_external_mod_names(contents: &str) -> Vec<String> {
+    let mut names = Vec::new();
+    let mut search_from = 0;
+    while let Some(rel_idx) = contents[search_from..].find("#[cfg(test)]") {
+        let attr_end = search_from + rel_idx + "#[cfg(test)]".len();
+        let rest = contents[attr_end..].trim_start();
+        if let Some(after_mod) = rest.strip_prefix("mod ") {
+            let ident_end = after_mod.find(|c: char| !(c.is_alphanumeric() || c == '_'));
+            if let Some(end) = ident_end {
+                let ident = after_mod[..end].trim();
+                // Only a bare `mod ident;` (external file) counts — `mod ident {`
+                // is an inline module and already visible to the prefix scan.
+                if after_mod[end..].trim_start().starts_with(';') && !ident.is_empty() {
+                    names.push(ident.to_string());
+                }
+            }
+        }
+        search_from = attr_end;
+    }
+    names
 }

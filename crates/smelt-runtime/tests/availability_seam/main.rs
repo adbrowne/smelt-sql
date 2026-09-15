@@ -325,3 +325,125 @@ fn a_trino_target_model_is_profiled_not_failed() {
         trino_profile.cell_verdicts
     );
 }
+
+/// `docs/outcomes/20260913-trino-incremental/phases/06f-plan.md` test 5: the
+/// double-dispatch shape phase 6d fixed for membership recompute
+/// (`execute/project/mod.rs`'s `used_membership_recompute` arm gained `&&
+/// whole_target_rebuild_downgrade.is_none()`) has a structural LOOKALIKE at
+/// the column-scoped-merge dispatch site (~line 2216), which carries no such
+/// guard. **Measured here: it is not the same bug — the two live cells can
+/// never coexist for one model, so there is nothing for that site to
+/// double-dispatch.**
+///
+/// `resolve_keyed_fold_state_downgrade`/`resolve_repair_state_downgrade`
+/// (the two `whole_target_rebuild_downgrade` sources) only ever fire for a
+/// `Grain::Key` model's OWN `NewData` fold cell (`Technique::KeyedFold` or a
+/// repair-admitted `PerGroupRecompute`), which requires that model's
+/// top-level `SELECT` to carry a `GROUP BY` (`derive_new_data`'s fold
+/// admission). But `resolve_live_column_scoped_cell` only resolves
+/// `Technique::ColumnScopedMerge` for a source whose column group has EMPTY
+/// `membership_sensitivity` (`derive::mutation::derive_mutation`), and
+/// `skeleton_source_closure`'s v1 scope restriction
+/// (`crates/smelt-logical/src/analysis/skeleton_closure.rs` line ~131:
+/// "this scope has a GROUP BY above the enrichment join ... is Open
+/// regardless of the five conjuncts") makes that proof impossible whenever
+/// the enrichment join shares a scope with a `GROUP BY` — which it always
+/// does here, since the fold's own `GROUP BY` and any enrichment join
+/// reachable from `column_scoped_cell` are the SAME top-level scope. An
+/// unpruned (`Open`) enrichment source always lands in
+/// `membership_sensitivity` (`grouping.rs::scan_scope_membership`'s
+/// unconditional `sensitivity.insert`), forcing `Technique::DeleteInsert`,
+/// never `ColumnScopedMerge`, for that source.
+///
+/// The other route to a live `ColumnScopedMerge` cell — a model-edge
+/// enrichment (`append_model_edge_cells`,
+/// `crates/smelt-logical/tests/model_edge_enrichment_mutation.rs`) — is
+/// documented there as reachable only for "a `grain: partition` downstream
+/// with no derivable key grain"; a `grain: partition` model's OWN creation
+/// technique is always `Technique::DeleteInsert` (reachable, never
+/// downgraded — `docs/specs/multi_backend.md` §"Incremental & schema
+/// evolution per backend"), so `whole_target_rebuild_downgrade` is never
+/// derived for it either.
+///
+/// So: a live `ColumnScopedMerge` cell needs a scope with no governing
+/// `GROUP BY`; a live whole-target-rebuild downgrade needs one. Proven here
+/// with the exact fixture
+/// `crates/smelt-logical/tests/maintenance_new_data_enrich_only_waiver.rs::
+/// admits_enrich_only_covered_mutable_source` uses at the hand-built-
+/// `ColumnGroup` layer (which bypasses the real grouping walk and so cannot
+/// see this restriction) — over the REAL SQL-derived walk, `dim`'s cell
+/// lands on `Technique::DeleteInsert`, never `ColumnScopedMerge`, so
+/// `resolve_live_column_scoped_cell` correctly returns `None` and the
+/// `execute/project/mod.rs` dispatch site this test targets is
+/// unreachable-together with a whole-target rebuild today. No fix is made;
+/// this test is the regression guard should a future classifier change
+/// (e.g. relaxing the v1 scope restriction) make the combination reachable.
+#[test]
+fn column_scoped_cell_is_suppressed_by_a_whole_target_rebuild() {
+    let sql = "SELECT f.user_id AS user_id, SUM(f.amount) AS lifetime_spend, \
+               d.status AS status \
+               FROM smelt.sources.fact f \
+               LEFT JOIN smelt.sources.dim d ON f.user_id = d.user_id \
+               GROUP BY f.user_id";
+    let metadata = ModelMetadata {
+        refresh: Some(RefreshStrategy::Incremental),
+        grain: Some(ConfigGrain::Key),
+        unique_key: Some(vec!["user_id".to_string()]),
+        ..Default::default()
+    };
+    let sources = vec![
+        SourceFacts {
+            name: "fact".to_string(),
+            mutation: MutationProfile::AppendOnly,
+            partition_col: None,
+            unique_key: vec![],
+            allow_full_scan: false,
+        },
+        SourceFacts {
+            name: "dim".to_string(),
+            mutation: MutationProfile::MutableSnapshot,
+            partition_col: None,
+            unique_key: vec!["user_id".to_string()],
+            allow_full_scan: true,
+        },
+    ];
+    let explicitly_mutable: HashSet<String> = ["dim".to_string()].into_iter().collect();
+    let ledger_less = StateAvailability::resolve(
+        WarehouseTables::Allowed,
+        &realisable_state_structures(SqlDialect::SparkSQL),
+    );
+
+    let downgrade = smelt_runtime::maintenance_driver::resolve_keyed_fold_state_downgrade(
+        sql,
+        "user_lifetime_status",
+        &metadata,
+        &sources,
+        &explicitly_mutable,
+        &ledger_less,
+    );
+    assert!(
+        downgrade.is_some(),
+        "fact's additive fold must downgrade to a whole-target rebuild on a ledger-less target"
+    );
+
+    let column_scoped = smelt_runtime::maintenance_driver::resolve_live_column_scoped_cell(
+        sql,
+        "user_lifetime_status",
+        &metadata,
+        &sources,
+        &explicitly_mutable,
+        &[],
+        true,
+        &[],
+        &ledger_less,
+    )
+    .expect("resolve_live_column_scoped_cell must not error");
+
+    assert!(
+        column_scoped.is_none(),
+        "measured unreachable: dim's enrichment join shares a scope with fact's fold GROUP BY, \
+         so skeleton_source_closure's v1 scope restriction can never prune its membership \
+         sensitivity — dim's cell must land on Technique::DeleteInsert, never ColumnScopedMerge, \
+         got {column_scoped:?}"
+    );
+}
