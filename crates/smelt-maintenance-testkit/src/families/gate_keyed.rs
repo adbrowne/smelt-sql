@@ -108,8 +108,13 @@ pub async fn drive_keyed_and_assert_for(
             insert_row_keyed_for(backend.as_ref(), &schema, recipe, row).await?;
         }
 
-        let snapshot =
-            read_source_snapshot_via_backend(backend.as_ref(), &schema, &recipe.source).await?;
+        let snapshot = read_source_snapshot_via_backend(
+            backend.as_ref(),
+            &schema,
+            &recipe.source,
+            b.string_type(),
+        )
+        .await?;
 
         let mut request = base_request(b.engine_name());
         request.start = Some(window.start.format("%Y-%m-%d").to_string());

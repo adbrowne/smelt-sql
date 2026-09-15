@@ -292,7 +292,43 @@ fn render_target_block(target: ConformanceTarget, db_path: &Path) -> (&'static s
             )
         }
         ConformanceTarget::BigQuery { dataset } => ("bq", render_bigquery_target_body(&dataset)),
+        ConformanceTarget::Trino { schema } => ("trino", render_trino_target_body(&schema)),
     }
+}
+
+/// The body of a `trino:` target block for `schema` (4-space indented, no
+/// leading key) — the same `host`/`port`/`user`/`catalog`/`schema`/`tls`
+/// shape `crates/smelt-cli/tests/common/mod.rs::trino_target_body` renders,
+/// since both target the same `Target` YAML surface
+/// (`docs/specs/multi_backend.md` §Surface). Read from the environment
+/// (`crate::recipe::trino_env`) rather than threaded as parameters, mirroring
+/// [`render_target_block`]'s BigQuery/Spark arms.
+///
+/// Defaults gracefully (mirroring [`render_bigquery_target_body`]'s
+/// `unwrap_or_default` convention, rather than `common::trino_target_body`'s
+/// panic-if-unset one) when `SMELT_TRINO_URL` is unset — a caller reaching
+/// the `Trino` arm at all has already gone through the harness's own
+/// skip-when-unset gate (`ConformanceBackend::skip_reason`), so this never
+/// renders a default into a live run; it just keeps this function's own
+/// network-free unit test (`trino_target_renders_a_trino_block_with_the_case_schema`)
+/// independent of ambient environment state.
+fn render_trino_target_body(schema: &str) -> String {
+    let env = crate::recipe::trino_env();
+    let host = env.as_ref().map(|e| e.host.clone()).unwrap_or_default();
+    let port = env.as_ref().map(|e| e.port).unwrap_or(8080);
+    let user = env
+        .as_ref()
+        .map(|e| e.user.clone())
+        .unwrap_or_else(|| "smelt".to_string());
+    let catalog = env
+        .as_ref()
+        .map(|e| e.catalog.clone())
+        .unwrap_or_else(|| "iceberg".to_string());
+    let tls = env.as_ref().map(|e| e.tls).unwrap_or(false);
+    format!(
+        "type: trino\n    host: {host}\n    port: {port}\n    user: {user}\n    \
+         catalog: {catalog}\n    schema: {schema}\n    tls: {tls}",
+    )
 }
 
 /// The body of a `bq:` target block for `dataset` (4-space indented, no
@@ -421,8 +457,17 @@ pub fn stage(
 /// staged source table in the case's own dataset
 /// ([`crate::recipe::ConformanceTarget::BigQuery`]'s `dataset` field) — a
 /// fresh dataset per case, so unlike the Spark arm no drop-before-seed step
-/// is needed (nothing from a prior run can collide with it).
-#[cfg(any(feature = "spark", feature = "bigquery"))]
+/// is needed (nothing from a prior run can collide with it). `Trino` mirrors
+/// `BigQuery`'s arm exactly (fresh-per-case schema, no drop-before-seed) but
+/// additionally issues an explicit `CREATE SCHEMA IF NOT EXISTS` first
+/// (`create_trino_source_table`'s own doc comment): unlike Spark's/BigQuery's
+/// constructors, `TrinoBackend::new` makes no network call and creates
+/// nothing on its own.
+///
+/// No feature gate on this function itself: `Trino`'s arm has no optional
+/// dependency to gate on (`smelt-backend-trino` is unconditional), so this
+/// function must compile even with neither `spark` nor `bigquery` enabled —
+/// only the `SparkDelta`/`BigQuery` arms below stay individually gated.
 pub fn stage_for_target(
     recipe: &ModelRecipe,
     project_dir: &Path,
@@ -509,7 +554,73 @@ pub fn stage_for_target(
                 )
             }
         }
+        ConformanceTarget::Trino { schema } => {
+            std::fs::create_dir_all(project_dir.join("models/sources"))?;
+            std::fs::write(
+                project_dir.join(format!("models/{}.sql", recipe.model_name)),
+                render_model_file(recipe),
+            )?;
+            std::fs::write(
+                project_dir.join(format!("models/sources/{}.yml", recipe.source.name)),
+                render_source_yaml(recipe),
+            )?;
+            std::fs::write(
+                project_dir.join("smelt.yml"),
+                render_smelt_yml_for(target.clone(), db_path),
+            )?;
+
+            create_trino_source_table(
+                schema,
+                &recipe.source.name,
+                &format!(
+                    "{d} DATE, {id} INTEGER, {val} INTEGER",
+                    d = recipe.source.clock_column,
+                    id = recipe.source.key_column,
+                    val = recipe.source.payload_column,
+                ),
+            )?;
+
+            crate::link_c_harness::LinkCProject::load(
+                project_dir.to_path_buf(),
+                db_path.to_path_buf(),
+            )
+        }
     }
+}
+
+/// Create the staged source table in `schema` (Trino/Iceberg column types —
+/// `INTEGER`/`DATE`, the same spellings `smelt-backend-trino`'s own live
+/// tests use) through a direct Trino connection
+/// ([`crate::link_c_harness::open_trino_conformance_backend`]). Unlike
+/// [`create_bigquery_source_table`]'s dataset (created implicitly by
+/// `BigQueryBackend::new`'s own session-init call) and Spark's warehouse
+/// (persistent, drop-before-seed instead), Trino's `TrinoBackend::new` makes
+/// no network call and creates nothing (`docs/specs/multi_backend.md`
+/// §"Session initialization"), so this issues `ensure_schema` explicitly
+/// before the `CREATE TABLE` — the one step `execute_project`'s own run
+/// pipeline would otherwise take on this crate's behalf. No drop-before-seed
+/// step: every schema this crate constructs is fresh per case
+/// ([`crate::recipe::trino_conformance_schema`]), so a `CREATE TABLE` with
+/// no prior table can never collide.
+pub(crate) fn create_trino_source_table(
+    schema: &str,
+    source_name: &str,
+    column_defs: &str,
+) -> anyhow::Result<()> {
+    let schema = schema.to_string();
+    let source_name = source_name.to_string();
+    let column_defs = column_defs.to_string();
+    crate::link_c_harness::block_on_isolated(async move {
+        let backend = crate::link_c_harness::open_trino_conformance_backend(&schema).await?;
+        let table = format!("{schema}.sources_{source_name}");
+        smelt_backend::Backend::execute_sql(
+            backend.as_ref(),
+            &format!("CREATE TABLE {table} ({column_defs})"),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("create Trino source table {table}: {e}"))?;
+        Ok::<(), anyhow::Error>(())
+    })
 }
 
 /// Drop then (re)create `<schema>.sources_<name>` AND drop any stale
@@ -851,8 +962,11 @@ pub fn stage_keyed_with_downstream(
 /// idempotency [`stage_for_target`]'s Spark arm needs, since the Delta
 /// warehouse persists across test invocations. `BigQuery` mirrors
 /// [`stage_for_target`]'s BigQuery arm: no drop-before-seed step, since the
-/// case's dataset is fresh.
-#[cfg(any(feature = "spark", feature = "bigquery"))]
+/// case's dataset is fresh. `Trino` mirrors the BigQuery arm, plus the same
+/// explicit `ensure_schema` step [`stage_for_target`]'s Trino arm needs.
+///
+/// No feature gate on this function itself — see [`stage_for_target`]'s doc
+/// comment for why.
 pub fn stage_keyed_for_target(
     recipe: &KeyedRecipe,
     project_dir: &Path,
@@ -942,6 +1056,41 @@ pub fn stage_keyed_for_target(
                      smelt-maintenance-testkit"
                 )
             }
+        }
+        ConformanceTarget::Trino { schema } => {
+            std::fs::create_dir_all(project_dir.join("models/sources"))?;
+            std::fs::write(
+                project_dir.join(format!("models/{}.sql", recipe.model_name)),
+                render_keyed_model_file(recipe),
+            )?;
+            std::fs::write(
+                project_dir.join(format!("models/sources/{}.yml", recipe.source.name)),
+                recipe.source.source_yaml(),
+            )?;
+            std::fs::write(
+                project_dir.join("smelt.yml"),
+                render_smelt_yml_for(target.clone(), db_path),
+            )?;
+
+            let column_defs = match recipe.source.posture {
+                SourcePosture::AppendOnly => format!(
+                    "{d} DATE, {id} INTEGER, {val} INTEGER",
+                    d = recipe.source.clock_column,
+                    id = recipe.source.key_column,
+                    val = recipe.source.payload_column,
+                ),
+                SourcePosture::MutableSnapshot => format!(
+                    "{id} INTEGER, {val} INTEGER",
+                    id = recipe.source.key_column,
+                    val = recipe.source.payload_column,
+                ),
+            };
+            create_trino_source_table(schema, &recipe.source.name, &column_defs)?;
+
+            crate::link_c_harness::LinkCProject::load(
+                project_dir.to_path_buf(),
+                db_path.to_path_buf(),
+            )
         }
     }
 }
@@ -1149,8 +1298,11 @@ pub fn stage_composed(
 /// [`stage_for_target`]/[`stage_keyed_for_target`]'s convention — the Delta
 /// warehouse persists across test invocations). `BigQuery` mirrors
 /// [`stage_for_target`]'s BigQuery arm: no drop-before-seed step, since the
-/// case's dataset is fresh.
-#[cfg(any(feature = "spark", feature = "bigquery"))]
+/// case's dataset is fresh. `Trino` mirrors the BigQuery arm, plus the same
+/// explicit `ensure_schema` step [`stage_for_target`]'s Trino arm needs.
+///
+/// No feature gate on this function itself — see [`stage_for_target`]'s doc
+/// comment for why.
 pub fn stage_composed_for_target(
     recipe: &ComposedKeyedRecipe,
     project_dir: &Path,
@@ -1247,6 +1399,37 @@ pub fn stage_composed_for_target(
                      smelt-maintenance-testkit"
                 )
             }
+        }
+        ConformanceTarget::Trino { schema } => {
+            std::fs::create_dir_all(project_dir.join("models/sources"))?;
+            std::fs::write(
+                project_dir.join(format!("models/{}.sql", recipe.model_name)),
+                render_composed_model_file(recipe),
+            )?;
+            std::fs::write(
+                project_dir.join(format!("models/sources/{}.yml", recipe.source.name)),
+                recipe.source.source_yaml(),
+            )?;
+            std::fs::write(
+                project_dir.join("smelt.yml"),
+                render_smelt_yml_for(target.clone(), db_path),
+            )?;
+
+            create_trino_source_table(
+                schema,
+                &recipe.source.name,
+                &format!(
+                    "{d} DATE, {id} INTEGER, {val} INTEGER",
+                    d = recipe.source.clock_column,
+                    id = recipe.source.key_column,
+                    val = recipe.source.payload_column,
+                ),
+            )?;
+
+            crate::link_c_harness::LinkCProject::load(
+                project_dir.to_path_buf(),
+                db_path.to_path_buf(),
+            )
         }
     }
 }
@@ -1381,3 +1564,37 @@ pub use succession::{
     render_succession_model_body, render_succession_model_file, render_succession_oracle_body_over,
     render_succession_source_file, stage_succession_for_target,
 };
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `trino_target_renders_a_trino_block_with_the_case_schema`
+    /// (`docs/outcomes/20260913-trino-incremental/phases/08-plan.md` test 3):
+    /// the Trino arm of `render_smelt_yml_for` emits a `trino:` target block
+    /// naming the case schema — network-free, since `render_trino_target_body`
+    /// defaults gracefully when `SMELT_TRINO_URL` is unset (see its own doc
+    /// comment).
+    #[test]
+    fn trino_target_renders_a_trino_block_with_the_case_schema() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let db_path = tmp.path().join("unused.duckdb");
+        let target = ConformanceTarget::Trino {
+            schema: "smelt_conf_gate_pool_123_case0".to_string(),
+        };
+        let yaml = render_smelt_yml_for(target, &db_path);
+
+        assert!(
+            yaml.contains("trino:"),
+            "expected a `trino:` target block, got:\n{yaml}"
+        );
+        assert!(
+            yaml.contains("type: trino"),
+            "expected `type: trino`, got:\n{yaml}"
+        );
+        assert!(
+            yaml.contains("schema: smelt_conf_gate_pool_123_case0"),
+            "expected the target block to name the case schema, got:\n{yaml}"
+        );
+    }
+}

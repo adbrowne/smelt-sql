@@ -328,6 +328,7 @@ pub async fn drive_mixed_and_assert_for(
                     backend.as_ref(),
                     &schema,
                     &recipe.fact,
+                    b.string_type(),
                 )
                 .await?;
                 let k = tracker.record_run(*start, *end, snapshot);

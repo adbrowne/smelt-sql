@@ -228,7 +228,6 @@ pub fn stage_feed_keyed(
 /// `BigQuery` mirrors the same classify-only staging, creating both tables
 /// in the case's own dataset with no drop-before-seed step (the dataset is
 /// fresh).
-#[cfg(any(feature = "spark", feature = "bigquery"))]
 pub fn stage_feed_keyed_for_target(
     recipe: &KeyedRecipe,
     project_dir: &std::path::Path,
@@ -299,6 +298,16 @@ pub fn stage_feed_keyed_for_target(
                      smelt-maintenance-testkit"
                 )
             }
+        }
+        crate::recipe::ConformanceTarget::Trino { schema } => {
+            // The change-feed-admission family is not yet in Trino's
+            // generative pool (`docs/specs/multi_backend.md` §Known
+            // Divergences) — no caller constructs `ConformanceTarget::Trino`
+            // through this path today.
+            let _ = schema;
+            unimplemented!(
+                "ConformanceTarget::Trino is not yet wired into the change-feed-admission family"
+            )
         }
     }
 }

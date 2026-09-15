@@ -20,18 +20,26 @@
 //! `registry`, `repair`) neither Spark nor BigQuery exercise. See this
 //! plan's "Explicitly deferred" section.
 
-// Kept compiling by the "Gated conformance twin compile check" step in the
-// Lint job (`.github/workflows/test.yml`), which runs `cargo check -p
-// smelt-maintenance-testkit --features spark,bigquery --all-targets` on every
-// PR — compile-only, no live Spark server or BigQuery credentials needed.
-#![cfg(any(feature = "spark", feature = "bigquery"))]
+// No longer feature-gated: this module used to compile only under `spark`/
+// `bigquery` (kept green by the "Gated conformance twin compile check" step
+// in the Lint job, `.github/workflows/test.yml`'s `cargo check -p
+// smelt-maintenance-testkit --features spark,bigquery --all-targets`), but
+// Trino's arm (`docs/outcomes/20260913-trino-incremental/phases/08-plan.md`)
+// has no feature flag of its own — it needs no optional client library, only
+// a runtime env gate — so every family here must compile unconditionally for
+// `crates/smelt-cli/tests/maintenance_conformance_trino/` to reach it with
+// neither `spark` nor `bigquery` enabled. Nothing inside this module or its
+// submodules references the optional Spark/BigQuery backend crates directly
+// (that stays behind `render.rs`'s/`link_c_harness.rs`'s own per-function
+// `#[cfg(feature = "spark")]`/`#[cfg(feature = "bigquery")]` arms), so lifting
+// this gate changes no other build's compiled surface.
 
 use std::path::Path;
 
 use anyhow::Result;
 use smelt_backend::Backend;
 
-use crate::recipe::{ConformanceTarget, ModelRecipe};
+use crate::recipe::{ConformanceTarget, ConstructKind, ModelRecipe};
 
 pub mod dags;
 pub mod feed;
@@ -172,6 +180,39 @@ pub trait ConformanceBackend: Sync {
     /// overrides this with `"FLOAT64"`.
     fn double_type(&self) -> &str {
         "DOUBLE"
+    }
+
+    /// This backend's `CAST(... AS <this>)` spelling for an unsized string
+    /// column — the seam [`crate::schedule_gen::read_source_snapshot_via_backend`]
+    /// casts a clock column through, so the Arrow column type is a stable
+    /// string regardless of the backend's own DATE-formatting behaviour.
+    /// Default `"STRING"`, correct for Spark SQL and GoogleSQL (both accept
+    /// `STRING` as their unsized-text type name); Trino has no `STRING`
+    /// type at all (`Unknown type: STRING`, measured live against a real
+    /// coordinator, `docs/outcomes/20260913-trino-incremental/phases/08-plan.md`)
+    /// — it spells the same concept `VARCHAR`, and overrides this.
+    fn string_type(&self) -> &str {
+        "STRING"
+    }
+
+    /// [`ConstructKind`]s [`crate::recipe::RecipePool::partition_append_only`]
+    /// must not sample for this backend — a genuine, measured registry gap
+    /// rather than a harness defect, so the pool is narrowed instead of the
+    /// gap being papered over. Default empty: DuckDB, Spark, and BigQuery all
+    /// have an exact lowering for every construct in the pool today. Trino
+    /// overrides this with `[ConstructKind::HolisticAgg]` — `MEDIAN` has no
+    /// native Trino form and no exact `PERCENTILE_CONT`/`WITHIN GROUP`
+    /// ordered-set aggregate either (only the approximate
+    /// `approx_percentile`), measured live (`Function 'median' not
+    /// registered`); the registry gap is tracked as `MEDIAN`/Trino in
+    /// `crates/smelt-db/tests/dialect_audit/ledger.rs` (issue #209) and
+    /// `docs/specs/multi_backend.md` §"Exact-median lowering". Excluding the
+    /// construct here — rather than leaving it in the pool to fail, or
+    /// inventing an ad hoc lowering outside the registry — keeps this
+    /// backend's equivalence proof honest about what it actually covers
+    /// (`docs/specs/multi_backend.md` §"Generative equivalence coverage").
+    fn excluded_constructs(&self) -> &[ConstructKind] {
+        &[]
     }
 
     /// This backend's SQL dialect, for a family that needs to build a

@@ -188,10 +188,12 @@ the plan, the downgrade, or the report themselves. Statement rendering for Trino
 fixed-recipe parity tests — on every supported backend, via a single dual-execution harness that
 owns the recipe pool, run schedules, and multiset-comparison oracle; the backend under test is a
 parameter, not a duplicated implementation. The parameter is a `ConformanceTarget` naming the
-backend a staged case runs against — DuckDB, Spark/Delta, or BigQuery (the last carrying the
-dataset the case isolates in, derived rather than threaded so staging and read-back agree
-without shared state) — which every staging/render/run entry point in the harness accepts, so
-adding a backend widens the harness's target seam rather than duplicating it. The test families
+backend a staged case runs against — DuckDB, Spark/Delta, BigQuery, or Trino (BigQuery and Trino
+both carry the per-case schema/dataset the case isolates in, derived rather than threaded so
+staging and read-back agree without shared state — Trino needs the same per-case isolation
+BigQuery does, since both address one shared coordinator/catalog where only the schema separates
+two cases' tables) — which every staging/render/run entry point in the harness accepts, so adding
+a backend widens the harness's target seam rather than duplicating it. The test families
 themselves have a single owner: each is written once, target-generically, and a backend supplies
 only what genuinely differs about it — the corruption statement its dialect accepts, the pacing
 its rate limits require, how a case's target and schema are named — through declared hooks. A
@@ -199,9 +201,13 @@ family never branches on which backend it is running against; a family that did 
 duplicated implementation wearing a parameter. On DuckDB this
 runs per-PR as `cargo test -p smelt-cli --test maintenance_conformance`. On Spark this runs in
 the gated tier (see "CI tiering" below) as `cargo test -p smelt-cli --features smelt-cli/spark
---test maintenance_conformance_spark`, with a reduced deterministic case count; rollout across
-the recipe pool is tracked incrementally, with any leg still DuckDB-only recorded in §Known
-Divergences until it lands.
+--test maintenance_conformance_spark`, with a reduced deterministic case count. On Trino this
+runs in the same gated tier as `cargo test -p smelt-cli --test maintenance_conformance_trino --
+--test-threads=1`, also with a reduced deterministic case count; Trino supplies its own oracle
+relation the same way BigQuery does, because the engine has no session-scoped temporary view — an
+inline derived table over the same portable row-set query stands in for the materialized `S_k`
+view the DuckDB/Spark default uses. Rollout across the recipe pool is tracked incrementally, with
+any leg still absent from a given backend's pool recorded in §Known Divergences until it lands.
 
 **A comparison against a full-refresh oracle must reach two distinct stores.** Where a family
 stages a case twice — an incremental project and a full-refresh oracle twin — the two must resolve
@@ -1686,6 +1692,28 @@ adopted as live data by a later run.
   backend trait. Full per-leg disposition is tracked in the gap table in
   `docs/plans/20260719-prod-w4-spark.md`; the remaining DuckDB-only legs are follow-up work, not
   blockers to the supported-vs-beta label decision.
+
+- **The generative maintenance-conformance leg on Trino covers the append-only partition pool
+  only, minus one construct the registry cannot yet lower exactly.** All six of the pool's
+  standing properties (equivalence, admission-rate floor, redelivery idempotency, full-refresh
+  interleave, boundary-row reach, and column-add recovery) run green live against a real
+  Trino/Iceberg coordinator, and the harness self-check independently proves the oracle catches a
+  seeded divergence on this backend before any of those are trusted. The pool itself excludes the
+  holistic-aggregate construct on Trino (`ConformanceBackend::excluded_constructs`): `MEDIAN` has
+  no native Trino/Presto form (`Function 'median' not registered`, measured live) and Trino has no
+  exact `PERCENTILE_CONT`/`WITHIN GROUP` ordered-set aggregate either (only the approximate
+  `approx_percentile`), so the exact-lowering technique BigQuery's own `MEDIAN` gap used
+  (`Emission::Rewrite(RewriteId::BigQueryMedian)`, this section's earlier entry) has no equivalent
+  Trino target construction yet — an unregistered gap in
+  `crates/smelt-types/src/signatures/builtins/extended_aggregates.rs`
+  (`crates/smelt-db/tests/dialect_audit/ledger.rs`'s `MEDIAN`/Trino row, issue #209), not a harness
+  defect, and excluding the construct from the pool keeps the equivalence proof honest about what
+  it actually covers rather than exercising a call the registry cannot yet answer for. The
+  keyed-fold, mixed-dimension, composed-pool, DAG-propagation and pinned-hazard legs Spark and
+  BigQuery already cover are not yet in Trino's pool at all — Trino's own maintenance techniques
+  downgrade every keyed/versioned cell to a full-refresh recompute (see the ledger carve-out
+  above), so those legs land once that downgrade path itself is under generative coverage. Tracked
+  in `docs/outcomes/20260913-trino-incremental`.
 
 ## References
 

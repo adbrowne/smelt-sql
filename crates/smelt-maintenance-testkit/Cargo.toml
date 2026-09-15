@@ -13,6 +13,13 @@ smelt-db = { path = "../smelt-db" }
 smelt-logical = { path = "../smelt-logical" }
 smelt-backend = { path = "../smelt-backend" }
 smelt-backend-duckdb = { path = "../smelt-backend-duckdb" }
+# Unconditional (no feature flag, env-gated only): `smelt-backends`/`smelt-cli`
+# already depend on `smelt-backend-trino` unconditionally, and Trino's
+# generative-conformance arm needs no cloud credential or optional client
+# library the way `spark`/`bigquery` do — only a reachable Docker tier, gated
+# entirely at runtime via `SMELT_TRINO_URL`
+# (`docs/outcomes/20260913-trino-incremental/phases/08-plan.md`).
+smelt-backend-trino = { path = "../smelt-backend-trino" }
 smelt-runtime = { path = "../smelt-runtime" }
 # `migrate_step.rs`'s shared derive→apply-or-refuse driver reads/writes the
 # same `FileStore`-backed deployed-schema + migration-approval state

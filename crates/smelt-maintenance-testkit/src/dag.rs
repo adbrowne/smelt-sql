@@ -665,7 +665,6 @@ pub fn classify_node(project: &LinkCProject, model_name: &str) -> anyhow::Result
 /// direct Spark/Delta connection to `crate::recipe::SPARK_CONFORMANCE_SCHEMA`.
 /// `BigQuery` mirrors `crate::render::stage_for_target`'s BigQuery arm: no
 /// drop-before-seed step, since the case's dataset is fresh.
-#[cfg(any(feature = "spark", feature = "bigquery"))]
 pub fn stage_dag_for_target(
     dag: &DagRecipe,
     project_dir: &Path,
@@ -755,6 +754,16 @@ pub fn stage_dag_for_target(
                 )
             }
         }
+        crate::recipe::ConformanceTarget::Trino { schema } => {
+            // The DAG-propagation family is not yet in Trino's generative
+            // pool (`docs/specs/multi_backend.md` §Known Divergences) — no
+            // caller constructs `ConformanceTarget::Trino` through this path
+            // today.
+            let _ = schema;
+            unimplemented!(
+                "ConformanceTarget::Trino is not yet wired into the DAG-propagation family"
+            )
+        }
     }
 }
 
@@ -817,7 +826,6 @@ fn reset_and_create_spark_dag_tables(
 /// rather than hardcoding `SPARK_CONFORMANCE_SCHEMA` — `families::dags` (the
 /// only caller) resolves it once per case via `ConformanceBackend::schema`
 /// and threads it through, the same way every other shared family does.
-#[cfg(any(feature = "spark", feature = "bigquery"))]
 pub async fn insert_rows_via_backend(
     backend: &dyn smelt_backend::Backend,
     dag: &DagRecipe,
@@ -850,7 +858,6 @@ pub async fn insert_rows_via_backend(
 /// `emit_recurrence_bound_probe` had — `STRING` is accepted by both Spark
 /// and GoogleSQL) rather than DuckDB's `VARCHAR`. Takes `schema` explicitly
 /// for the same reason [`insert_rows_via_backend`] does.
-#[cfg(any(feature = "spark", feature = "bigquery"))]
 pub async fn fetch_node_multiset_via_backend(
     backend: &dyn smelt_backend::Backend,
     dag: &DagRecipe,

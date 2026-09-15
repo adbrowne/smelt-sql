@@ -54,6 +54,8 @@ jobs:
               - 'crates/smelt-backend-trino/**'
               - 'crates/smelt-backends/**'
               - 'crates/smelt-cli/tests/trino_*'
+              - 'crates/smelt-cli/tests/maintenance_conformance_trino/**'
+              - 'crates/smelt-maintenance-testkit/**'
               - 'crates/smelt-cli/tests/common/**'
               - 'crates/smelt-runtime/**'
               - 'crates/smelt-dialect/**'
@@ -610,6 +612,61 @@ jobs:
       - name: Stop Spark Connect
         if: always()
         run: bash scripts/spark-down.sh
+
+  maintenance-conformance-trino:
+    name: Maintenance Conformance Trino Twin (Iceberg, Docker)
+    runs-on: ubuntu-latest
+    needs: changes
+    # Same trigger discipline as trino-integration/maintenance-conformance-spark:
+    # nightly, explicitly labeled, or when this PR/push touches Trino-relevant
+    # paths. Gated tier only — the generative recipe pool over a live Trino
+    # coordinator is too slow for per-PR runs.
+    if: ${{ !cancelled() && (github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'run-docker-tests') || needs.changes.outputs.trino == 'true') }}
+
+    env:
+      DUCKDB_LIB_DIR: /usr/local/lib
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Setup DuckDB system library
+        uses: ./.github/actions/setup-duckdb
+
+      - name: Setup mise (rust, node)
+        uses: jdx/mise-action@v2
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-maintenance-conformance-trino-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Start Trino/Iceberg/MinIO tier
+        run: |
+          bash scripts/trino-up.sh
+          source scripts/trino-env.sh
+          {
+            echo "SMELT_TRINO_URL=${SMELT_TRINO_URL}"
+            echo "SMELT_TRINO_USER=${SMELT_TRINO_USER}"
+            echo "SMELT_TRINO_CATALOG=${SMELT_TRINO_CATALOG}"
+          } >> "$GITHUB_ENV"
+
+      - name: Run maintenance-conformance Trino twin (reduced sample, single-threaded)
+        run: |
+          set -o pipefail
+          cargo test -p smelt-cli --test maintenance_conformance_trino -- --test-threads=1 2>&1 | tee trino-conformance-test.log | tail -60
+          if grep -qi skipping trino-conformance-test.log; then
+            echo "::error::a Trino leg in maintenance_conformance_trino skipped with the tier up — SMELT_TRINO_URL should be set in this job"
+            exit 1
+          fi
+
+      - name: Stop Trino/Iceberg/MinIO tier
+        if: always()
+        run: bash scripts/trino-down.sh
 
   maintenance-conformance-soak:
     name: Maintenance Conformance Soak (Nightly, deep sample)

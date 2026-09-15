@@ -164,9 +164,13 @@ pub async fn drive_and_assert_for(
                     insert_row_for(backend.as_ref(), &schema, recipe, row).await?;
                 }
 
-                let snapshot =
-                    read_source_snapshot_via_backend(backend.as_ref(), &schema, &recipe.source)
-                        .await?;
+                let snapshot = read_source_snapshot_via_backend(
+                    backend.as_ref(),
+                    &schema,
+                    &recipe.source,
+                    b.string_type(),
+                )
+                .await?;
 
                 let mut request = base_request(b.engine_name());
                 request.start = Some(start.format("%Y-%m-%d").to_string());
@@ -202,9 +206,13 @@ pub async fn drive_and_assert_for(
                 // Redelivery: same window as an earlier `RunWindow`, no new
                 // rows. Never-fold-twice under the partition-grain
                 // DELETE+INSERT full-replace technique must hold.
-                let snapshot =
-                    read_source_snapshot_via_backend(backend.as_ref(), &schema, &recipe.source)
-                        .await?;
+                let snapshot = read_source_snapshot_via_backend(
+                    backend.as_ref(),
+                    &schema,
+                    &recipe.source,
+                    b.string_type(),
+                )
+                .await?;
 
                 let mut request = base_request(b.engine_name());
                 request.start = Some(start.format("%Y-%m-%d").to_string());
@@ -236,9 +244,13 @@ pub async fn drive_and_assert_for(
                 // Unwindowed run: `execute_project` takes the full-refresh
                 // arm (drop + rebuild from the CURRENT full source
                 // contents) whenever no `start`/`end` is supplied.
-                let snapshot =
-                    read_source_snapshot_via_backend(backend.as_ref(), &schema, &recipe.source)
-                        .await?;
+                let snapshot = read_source_snapshot_via_backend(
+                    backend.as_ref(),
+                    &schema,
+                    &recipe.source,
+                    b.string_type(),
+                )
+                .await?;
 
                 let mut request = base_request(b.engine_name());
                 request.full_refresh = true;
@@ -270,9 +282,13 @@ pub async fn drive_and_assert_for(
             ConformanceStep::BackfillRegion { start, end } => {
                 // An explicit backfill: same execution shape as `RunWindow`
                 // with no accompanying insert.
-                let snapshot =
-                    read_source_snapshot_via_backend(backend.as_ref(), &schema, &recipe.source)
-                        .await?;
+                let snapshot = read_source_snapshot_via_backend(
+                    backend.as_ref(),
+                    &schema,
+                    &recipe.source,
+                    b.string_type(),
+                )
+                .await?;
 
                 let mut request = base_request(b.engine_name());
                 request.start = Some(start.format("%Y-%m-%d").to_string());
@@ -358,6 +374,7 @@ pub async fn drive_and_assert_for(
                             backend.as_ref(),
                             &schema,
                             &recipe.source,
+                            b.string_type(),
                         )
                         .await?;
                         let k = tracker.record_full_refresh(snapshot);
@@ -416,7 +433,9 @@ pub async fn count_via_backend(backend: &dyn Backend, sql: &str) -> Result<i64> 
 /// `maintenance_conformance::gate::append_only_partition_pool_upholds_equivalence`.
 pub async fn run_append_only_partition_pool(b: &dyn ConformanceBackend, n: usize) -> Result<()> {
     let mut runner = TestRunner::deterministic();
-    let recipe_strat = arb_recipe(RecipePool::partition_append_only());
+    let recipe_strat = arb_recipe(RecipePool::partition_append_only_excluding(
+        b.excluded_constructs(),
+    ));
     let mut admitted_cases = 0;
 
     for i in 0..n {
@@ -463,7 +482,9 @@ pub async fn run_admission_rate_stays_above_floor(
     n: usize,
 ) -> Result<()> {
     let mut runner = TestRunner::deterministic();
-    let recipe_strat = arb_recipe(RecipePool::partition_append_only());
+    let recipe_strat = arb_recipe(RecipePool::partition_append_only_excluding(
+        b.excluded_constructs(),
+    ));
 
     let mut admitted = 0;
     for i in 0..n {

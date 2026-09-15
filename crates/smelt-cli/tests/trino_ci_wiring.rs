@@ -416,24 +416,35 @@ fn the_trino_job_fails_if_a_leg_skips_with_the_tier_up() {
 /// leg lands in this gate the moment its file exists, with no second commit
 /// to teach this test its name.
 ///
-/// Test: every derived live-gated `(crate, binary)` pair must appear in the
-/// `trino-integration` job — either covered by a whole-crate step (`-p
-/// <crate>` with no narrowing `--test` flag anywhere in that step's `run:`
-/// block) or named explicitly (`--test <binary>` in a step that also
-/// carries `-p <crate>`). Fails today for any binary the job's steps don't
-/// yet run — `trino_incremental_families`, `trino_state_residency`,
-/// `trino_ddl_live`, `trino_lock_versioning`, … are unrun in CI until the
-/// smelt-cli step's `--test` list is widened to cover them.
+/// Test: every derived live-gated `(crate, binary)` pair must appear in
+/// EITHER the `trino-integration` job or the `maintenance-conformance-trino`
+/// job — each covered by a whole-crate step (`-p <crate>` with no narrowing
+/// `--test` flag anywhere in that step's `run:` block) or named explicitly
+/// (`--test <binary>` in a step that also carries `-p <crate>`). A binary
+/// run by NEITHER job still fails — the census accepting two jobs widens
+/// where a binary may run, not whether it must. Fails today for any binary
+/// neither job's steps run — `trino_incremental_families`,
+/// `trino_state_residency`, `trino_ddl_live`, `trino_lock_versioning`, … are
+/// unrun in CI until the smelt-cli step's `--test` list is widened to cover
+/// them.
 #[test]
 fn the_trino_job_runs_every_live_gated_trino_test_binary() {
     let wf = workflow();
-    let body = job_body(&wf, "trino-integration");
-    // Every `run:` block's raw text, so a binary named in one step and a
-    // crate named in another don't falsely combine into "covered".
-    let run_blocks: Vec<&str> = body
-        .split("- name:")
-        .filter(|block| block.contains("run:") || block.contains("run: |"))
+    // Every `run:` block's raw text across BOTH Trino jobs, so a binary
+    // named in one job's step and a crate named in another don't falsely
+    // combine into "covered" — each job's own blocks are checked
+    // independently, and a binary is covered if EITHER job covers it.
+    let run_blocks_owned: Vec<String> = ["trino-integration", "maintenance-conformance-trino"]
+        .iter()
+        .flat_map(|job_name| {
+            let body = job_body(&wf, job_name);
+            body.split("- name:")
+                .filter(|block| block.contains("run:") || block.contains("run: |"))
+                .map(|s| s.to_string())
+                .collect::<Vec<_>>()
+        })
         .collect();
+    let run_blocks: Vec<&str> = run_blocks_owned.iter().map(|s| s.as_str()).collect();
 
     for bin in live_gated_census() {
         let crate_flag = format!("-p {}", bin.krate);
@@ -447,8 +458,9 @@ fn the_trino_job_runs_every_live_gated_trino_test_binary() {
         });
         assert!(
             covered,
-            "trino-integration job has no step running `-p {} --test {}` (nor an unnarrowed \
-             `-p {}` step) — every live-gated Trino test binary must run in CI:\n{body}",
+            "neither trino-integration nor maintenance-conformance-trino has a step running \
+             `-p {} --test {}` (nor an unnarrowed `-p {}` step) — every live-gated Trino test \
+             binary must run in CI, in at least one of the two Trino jobs",
             bin.krate, bin.binary, bin.krate
         );
     }

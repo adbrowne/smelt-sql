@@ -220,6 +220,30 @@ fn per_group_recompute_no_key_scope_row_is_split_by_repair_admission() {
     );
 }
 
+/// §"Generative equivalence coverage" must name Trino's `ConformanceTarget`
+/// arm and its gated-tier test command (phase 8 —
+/// `docs/outcomes/20260913-trino-incremental/phases/08-plan.md`), alongside
+/// Spark's and BigQuery's.
+#[test]
+fn generative_equivalence_coverage_names_trino() {
+    let text = read_spec("multi_backend.md");
+    let sect = section(&text, "**Generative equivalence coverage.**");
+
+    assert!(
+        sect.contains("Trino"),
+        "§\"Generative equivalence coverage\" does not mention Trino"
+    );
+    assert!(
+        sect.contains("maintenance_conformance_trino"),
+        "§\"Generative equivalence coverage\" does not name the Trino test binary"
+    );
+    assert!(
+        sect.contains("oracle relation") || sect.contains("temporary view"),
+        "§\"Generative equivalence coverage\" does not state why Trino supplies its own oracle \
+         relation"
+    );
+}
+
 /// Trino introduces no new diagnostic code: the section names only the three
 /// existing codes, and each exists in the diagnostics catalogue.
 #[test]

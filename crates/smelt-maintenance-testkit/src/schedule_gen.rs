@@ -592,16 +592,21 @@ pub fn read_source_snapshot(conn: &Connection, source: &SourceRecipe) -> Vec<Gen
 /// to `BIGINT` so the Arrow column type is a stable `Int64Array` regardless
 /// of the backend's native narrower integer width (Spark's `INT` maps to
 /// Arrow `Int32`, unlike DuckDB's own widening behaviour that
-/// [`read_source_snapshot`] relies on).
+/// [`read_source_snapshot`] relies on). `string_type` is the caller's
+/// `ConformanceBackend::string_type()` — the clock column's unsized-string
+/// cast spelling, which is NOT portable across every backend this function
+/// serves (Trino has no `STRING` type at all; see that method's own doc
+/// comment).
 pub async fn read_source_snapshot_via_backend(
     backend: &dyn smelt_backend::Backend,
     schema: &str,
     source: &SourceRecipe,
+    string_type: &str,
 ) -> anyhow::Result<Vec<GenRow>> {
     let table = format!("{schema}.sources_{}", source.name);
     let sql = format!(
-        "SELECT CAST({d} AS STRING), CAST({id} AS BIGINT), CAST({val} AS BIGINT) FROM {table} \
-         ORDER BY {d}, {id}",
+        "SELECT CAST({d} AS {string_type}), CAST({id} AS BIGINT), CAST({val} AS BIGINT) FROM \
+         {table} ORDER BY {d}, {id}",
         d = source.clock_column,
         id = source.key_column,
         val = source.payload_column,

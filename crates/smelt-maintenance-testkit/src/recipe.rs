@@ -56,11 +56,18 @@ pub fn arb_payload_value() -> impl Strategy<Value = i64> {
 /// "these two projects write different tables" expressible, which is what
 /// `families::dags`'s full-refresh oracle twin needs to be a real comparison
 /// rather than one table read twice.
+/// `Trino` mirrors `BigQuery`'s per-case-schema shape rather than Spark's
+/// single persistent one: Trino's Iceberg REST catalog is likewise one
+/// shared coordinator/catalog where only the schema separates two cases'
+/// tables, so a case isolates in its own fresh schema
+/// ([`trino_conformance_schema`]) the same way BigQuery isolates in its own
+/// fresh dataset (`docs/outcomes/20260913-trino-incremental/phases/08-plan.md`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConformanceTarget {
     DuckDb,
     SparkDelta { schema: String },
     BigQuery { dataset: String },
+    Trino { schema: String },
 }
 
 impl ConformanceTarget {
@@ -168,6 +175,75 @@ pub fn bq_location() -> Option<String> {
 /// (`docs/specs/multi_backend.md` §Surface).
 pub fn bq_access_token() -> Option<String> {
     std::env::var("SMELT_BQ_ACCESS_TOKEN").ok()
+}
+
+/// The live Trino environment the conformance harness's Trino arm connects
+/// to — a private mirror of `crates/smelt-cli/tests/common/mod.rs::trino_env`'s
+/// convention (`SMELT_TRINO_URL`/`SMELT_TRINO_USER`/`SMELT_TRINO_CATALOG`),
+/// deliberately NOT reached into: this crate has no dependency on
+/// `smelt-cli`'s test-only module (`docs/outcomes/20260913-trino-incremental/phases/08-plan.md`
+/// task 2). `None` when `SMELT_TRINO_URL` is unset, meaning the caller
+/// should skip.
+pub struct TrinoConformanceEnv {
+    pub host: String,
+    pub port: u16,
+    pub user: String,
+    pub catalog: String,
+    pub tls: bool,
+}
+
+/// Reads `SMELT_TRINO_URL` (`scheme://host[:port]`) plus the optional
+/// `SMELT_TRINO_USER`/`SMELT_TRINO_CATALOG` overrides, mirroring
+/// `crates/smelt-cli/tests/common/mod.rs::trino_env`'s parsing exactly.
+pub fn trino_env() -> Option<TrinoConformanceEnv> {
+    let url = std::env::var("SMELT_TRINO_URL").ok()?;
+    let user = std::env::var("SMELT_TRINO_USER").unwrap_or_else(|_| "smelt".to_string());
+    let catalog = std::env::var("SMELT_TRINO_CATALOG").unwrap_or_else(|_| "iceberg".to_string());
+    let tls = url.starts_with("https://");
+    let rest = url
+        .strip_prefix("https://")
+        .or_else(|| url.strip_prefix("http://"))
+        .unwrap_or(&url);
+    let (host, port_str) = rest
+        .split_once(':')
+        .unwrap_or((rest, if tls { "443" } else { "8080" }));
+    let port: u16 = port_str
+        .parse()
+        .unwrap_or_else(|e| panic!("SMELT_TRINO_URL has an unparseable port '{port_str}': {e}"));
+    Some(TrinoConformanceEnv {
+        host: host.to_string(),
+        port,
+        user,
+        catalog,
+        tls,
+    })
+}
+
+/// The Trino/Iceberg schema a generative-conformance `(family, case)` pair
+/// isolates in — the Trino counterpart of [`bq_conformance_dataset`], held
+/// to the identical `pid + family + case` shape and to the same legal-
+/// identifier rules `crates/smelt-cli/tests/trino_ci_wiring.rs`'s
+/// `assert_legal_trino_identifier` checks (starts with an ASCII letter,
+/// `[a-z0-9_]` only): the `smelt_conf_` prefix guarantees an alphabetic
+/// first character regardless of what `family`/`case` sanitize to.
+pub fn trino_conformance_schema(family: &str, case: &str) -> String {
+    let sanitize = |s: &str| -> String {
+        s.chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_ascii_lowercase()
+                } else {
+                    '_'
+                }
+            })
+            .collect::<String>()
+    };
+    format!(
+        "smelt_conf_{family}_{pid}_{case}",
+        family = sanitize(family),
+        pid = std::process::id(),
+        case = sanitize(case),
+    )
 }
 
 /// A source's mutation posture (`docs/plans/20260712-generative-maintenance-conformance.md`
@@ -308,6 +384,21 @@ impl RecipePool {
                 ConstructKind::DecomposedAgg,
                 ConstructKind::HolisticAgg,
             ],
+        }
+    }
+
+    /// [`Self::partition_append_only`], minus every construct in `excluded` —
+    /// [`crate::families::ConformanceBackend::excluded_constructs`]'s
+    /// counterpart, so a backend with a genuine, measured registry gap over
+    /// one construct (Trino's `MEDIAN`) never has that construct sampled in
+    /// the first place, rather than sampling it and failing.
+    pub fn partition_append_only_excluding(excluded: &[ConstructKind]) -> Self {
+        Self {
+            constructs: Self::partition_append_only()
+                .constructs
+                .into_iter()
+                .filter(|c| !excluded.contains(c))
+                .collect(),
         }
     }
 }
@@ -2098,6 +2189,46 @@ mod tests {
 
         let different_case = bq_conformance_dataset("additive", "case1");
         assert_ne!(a1, different_case, "dataset name must differ across case");
+    }
+
+    /// `trino_conformance_schema` mirrors `conformance_dataset_is_derived_not_threaded`
+    /// above, for the Trino arm.
+    #[test]
+    fn trino_conformance_schema_is_derived_not_threaded() {
+        let a1 = trino_conformance_schema("additive", "case0");
+        let a2 = trino_conformance_schema("additive", "case0");
+        assert_eq!(
+            a1, a2,
+            "two independent calls with the same (family, case) must agree \
+             without threading state between them"
+        );
+
+        let different_family = trino_conformance_schema("idempotent", "case0");
+        assert_ne!(
+            a1, different_family,
+            "schema name must differ across family"
+        );
+
+        let different_case = trino_conformance_schema("additive", "case1");
+        assert_ne!(a1, different_case, "schema name must differ across case");
+    }
+
+    /// `trino_conformance_schema` must produce a legal Trino identifier per
+    /// `crates/smelt-cli/tests/trino_ci_wiring.rs`'s `assert_legal_trino_identifier`
+    /// rules: starts with an ASCII letter, `[a-z0-9_]` only.
+    #[test]
+    fn trino_conformance_schema_is_a_legal_trino_identifier() {
+        let name = trino_conformance_schema("Some Family!", "Case-7");
+        let first = name.chars().next().expect("non-empty");
+        assert!(
+            first.is_ascii_alphabetic(),
+            "schema name {name:?} must start with an ASCII letter"
+        );
+        assert!(
+            name.chars()
+                .all(|c| c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'),
+            "schema name {name:?} must contain only [a-z0-9_]"
+        );
     }
 
     /// `reachability_sample_inhabits_every_pool_construct` (plan Phase 1 TDD

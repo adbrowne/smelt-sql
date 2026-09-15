@@ -642,6 +642,28 @@ impl LinkCProject {
                     )
                 }
             }
+            ConformanceTarget::Trino { schema } => {
+                // The schema reaches the run through the project's own
+                // `smelt.yml` (`render::render_smelt_yml_for` wrote it from
+                // this same target), exactly as the Spark/BigQuery arms'
+                // schema/dataset do — `TrinoBackendFactory` reads config, not
+                // this binding.
+                let _ = &schema;
+                let (db, graph) = self.build_db_and_graph();
+                let outcome = execute_project(
+                    run_id.to_string(),
+                    request,
+                    Arc::clone(&self.config),
+                    graph,
+                    db,
+                    &self.project_dir,
+                    &TrinoBackendFactory,
+                    reporter,
+                    CancellationToken::new(),
+                )
+                .await?;
+                Ok(outcome)
+            }
         }
     }
 
@@ -704,6 +726,7 @@ impl LinkCProject {
                     )
                 }
             }
+            ConformanceTarget::Trino { schema } => open_trino_conformance_backend(&schema).await,
         }
     }
 }
@@ -779,6 +802,98 @@ pub async fn open_bigquery_backend(dataset: &str) -> Result<Box<dyn Backend>> {
         .await
         .map_err(|e| anyhow::anyhow!("BigQuery backend init failed: {e}"))?;
     Ok(Box::new(backend))
+}
+
+/// Open a Trino backend bound to `schema` — the Trino-arm counterpart of
+/// [`open_bigquery_backend`], parametrized over the schema rather than one
+/// fixed constant since every case in the pool isolates in its own fresh
+/// schema (`crate::recipe::trino_conformance_schema`). Host/port/user/
+/// catalog/tls are read from the environment (`crate::recipe::trino_env`).
+///
+/// Unlike `SparkBackend::new`/`BigQueryBackend::new` (both open a session and
+/// so already ensure their own schema/database exists as a side effect),
+/// `TrinoBackend::new` makes no network call and creates nothing
+/// (`docs/specs/multi_backend.md` §"Session initialization") — this calls
+/// `ensure_schema` explicitly right after construction, the one step a real
+/// `execute_project` run takes on this crate's behalf but a direct
+/// out-of-band connection like this one must take itself.
+///
+/// No feature gate: `smelt-backend-trino` is an unconditional dependency of
+/// this crate (`docs/outcomes/20260913-trino-incremental/phases/08-plan.md`
+/// task 2).
+pub async fn open_trino_conformance_backend(schema: &str) -> Result<Box<dyn Backend>> {
+    use smelt_backend_trino::{TrinoBackend, TrinoClientConfig};
+
+    let env = crate::recipe::trino_env()
+        .ok_or_else(|| anyhow::anyhow!("Trino arm requires SMELT_TRINO_URL"))?;
+    let scheme = if env.tls { "https" } else { "http" };
+    let backend = TrinoBackend::new(TrinoClientConfig {
+        base_url: format!("{scheme}://{}:{}", env.host, env.port),
+        user: env.user,
+        catalog: env.catalog,
+        schema: schema.to_string(),
+        password: None,
+    });
+    backend
+        .ensure_schema(schema)
+        .await
+        .map_err(|e| anyhow::anyhow!("Trino ensure_schema({schema}) failed: {e}"))?;
+    Ok(Box::new(backend))
+}
+
+/// `BackendFactory` that opens a Trino backend from whatever `Target` config
+/// `execute_project` resolves for the run's target name — mirrors
+/// `crates/smelt-backends/src/lib.rs::create_backend`'s production Trino arm
+/// so the harness's Trino run path exercises the same field resolution
+/// (`host`/`user`/`catalog`/`schema`/`tls`) real runs do, the same
+/// duplication-over-reuse convention [`SparkBackendFactory`]/
+/// [`BigQueryBackendFactory`] already established rather than adding a
+/// `smelt-backends` dependency to this dev-only crate. Unlike those two,
+/// `TrinoBackend::new` makes no network call and creates nothing — the
+/// run's own `requires_schema_init` step (`smelt-runtime`'s `execute_project`)
+/// is what ensures the schema exists before any model writes into it, not
+/// this factory.
+pub struct TrinoBackendFactory;
+
+impl BackendFactory for TrinoBackendFactory {
+    fn create<'a>(
+        &'a self,
+        _target_name: &'a str,
+        target_config: &'a smelt_core::config::Target,
+        _project_dir: &'a Path,
+    ) -> BackendFuture<'a> {
+        Box::pin(async move {
+            use smelt_backend_trino::{TrinoBackend, TrinoClientConfig};
+
+            let host = target_config
+                .host
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("Trino target requires 'host' field"))?;
+            let user = target_config
+                .user
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("Trino target requires 'user' field"))?;
+            let catalog = target_config
+                .catalog
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("Trino target requires 'catalog' field"))?;
+            let scheme = if target_config.tls.unwrap_or(false) {
+                "https"
+            } else {
+                "http"
+            };
+            let base_url = format!("{scheme}://{host}:{}", target_config.effective_trino_port());
+
+            let backend = TrinoBackend::new(TrinoClientConfig {
+                base_url,
+                user: user.to_string(),
+                catalog: catalog.to_string(),
+                schema: target_config.schema.clone(),
+                password: target_config.password.clone(),
+            });
+            Ok(Box::new(backend) as Box<dyn Backend>)
+        })
+    }
 }
 
 /// Build a fully qualified, backtick-quoted BigQuery table name

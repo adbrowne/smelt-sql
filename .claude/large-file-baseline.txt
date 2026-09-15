@@ -85,9 +85,9 @@ crates/smelt-lsp/src/tests.rs 2828
 crates/smelt-lsp/tests/e2e.rs 1406
 crates/smelt-lsp/tests/example_workspaces.rs 1517
 crates/smelt-lsp/tests/integration.rs 4810
-crates/smelt-maintenance-testkit/src/link_c_harness.rs 1027
-crates/smelt-maintenance-testkit/src/recipe.rs 2327
-crates/smelt-maintenance-testkit/src/render.rs 1383
+crates/smelt-maintenance-testkit/src/link_c_harness.rs 1142
+crates/smelt-maintenance-testkit/src/recipe.rs 2458
+crates/smelt-maintenance-testkit/src/render.rs 1600
 crates/smelt-maintenance-testkit/src/s_tracker.rs 1151
 crates/smelt-parser/src/ast/declarations.rs 1083
 crates/smelt-parser/src/ast/expr.rs 1475
@@ -113,6 +113,7 @@ crates/smelt-runtime/tests/observed_delta/main.rs 1078
 crates/smelt-runtime/tests/repair_lowering.rs 1992
 crates/smelt-runtime/tests/since_upstream_propagation.rs 2326
 crates/smelt-runtime/tests/statement_parity/region_and_keyed_fold.rs 1006
+crates/smelt-runtime/tests/statement_parity/structural_and_ledger.rs 1061
 crates/smelt-runtime/tests/technique_lowering/basic.rs 1123
 crates/smelt-runtime/tests/windowing_parity.rs 1151
 crates/smelt-state/src/ddl_duckdb.rs 1883

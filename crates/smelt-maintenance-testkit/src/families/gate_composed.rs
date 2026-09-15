@@ -341,6 +341,7 @@ async fn drive_composed_route3_and_assert_for(
             &run_date_str,
             &next_day_str,
             &smelt_core::config::Granularity::Day,
+            smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
         )?;
         b.before_step().await;
         run_windowed_keyed_maintenance(
@@ -351,6 +352,7 @@ async fn drive_composed_route3_and_assert_for(
             &steps,
             &classification,
             Some(&slice),
+            smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
             &composed_route3_suppression(),
             // The route-3 composed recipe stages no `maintenance.cells[].write` pin.
             None,
@@ -503,8 +505,13 @@ mod tests {
     /// (plan Phase 7, Gap 2 TDD test): GoogleSQL rejects a `(VALUES …)`
     /// table-value constructor in `FROM` position (`400 Syntax error:
     /// Expected keyword JOIN but got ","`, measured live against BigQuery)
-    /// — the BigQuery-dialect row set must contain no `VALUES` at all and
-    /// must be the portable chained `UNION ALL` rewrite instead.
+    /// — the BigQuery-dialect row set must contain no `VALUES` at all.
+    /// Updated to the `UNNEST([STRUCT(…), …])` array-of-structs form
+    /// `smelt_core::build_row_set_table` settled on instead of the
+    /// originally-planned chained `UNION ALL` rewrite (`docs/specs/
+    /// multi_backend.md` §"Inline row-set construction": the chained
+    /// rewrite costs one query operand PER ROW, which BigQuery refuses
+    /// outright at realistic row counts, so it is not used).
     #[test]
     fn composed_delta_values_sql_under_bigquery_dialect_has_no_values_table_constructor() {
         let rows = sample_rows();
@@ -515,13 +522,13 @@ mod tests {
              constructor, got: {bq:?}"
         );
         assert!(
-            bq.contains("UNION ALL"),
-            "expected a chained UNION ALL rewrite, got: {bq:?}"
+            bq.contains("UNNEST"),
+            "expected the UNNEST([STRUCT(...), ...]) array-of-structs rewrite, got: {bq:?}"
         );
         assert_eq!(
             bq,
-            "(SELECT 900 AS id, DATE '2024-03-01' AS d, 10 AS val UNION ALL \
-             SELECT 5000, DATE '2024-03-02', 1) AS t"
+            "(SELECT * FROM UNNEST([STRUCT(900 AS id, DATE '2024-03-01' AS d, 10 AS val), \
+             (5000, DATE '2024-03-02', 1)])) AS t"
         );
     }
 
