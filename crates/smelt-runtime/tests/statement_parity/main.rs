@@ -517,6 +517,7 @@ mod column_scoped_merge;
 mod delta_region;
 mod fingerprint_backbuild;
 mod keyed_fold_pins_and_previews;
+mod plan_derivation_census;
 mod region_and_keyed_fold;
 mod repair_and_key_addressed;
 mod staged_candidate_conditional;

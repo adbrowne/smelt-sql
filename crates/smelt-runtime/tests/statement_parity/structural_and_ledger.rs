@@ -215,6 +215,7 @@ pub(super) fn repo_root() -> std::path::PathBuf {
 }
 
 /// One forbidden-shape hit: `(file, 1-based line number, line text)`.
+#[derive(Debug)]
 struct StatementAuthoringHit {
     file: std::path::PathBuf,
     line_no: usize,
@@ -239,6 +240,16 @@ struct StatementAuthoringHit {
 /// the remaining gap, is out of Phase 4's file scope (`docs/plans/
 /// 20260710-emit-unification.md` Phase 4 "Critical files" — the backend
 /// crates are not listed); tracked as follow-up, not fixed here.
+///
+/// The three `smelt-backend-bigquery` entries (`docs/outcomes/
+/// 20260913-trino-incremental/phases/07-plan.md`) are the same class,
+/// measured when BigQuery joined the scan: `sql.rs:32`/`sql.rs:108` are
+/// `create_table_as`/`delete_partitions`, matching the pre-existing
+/// DuckDB/Spark entries above; `lib.rs:275` is a `tracing::debug!` log
+/// message that happens to echo the same shape in its format string, not a
+/// second authoring site — the actual SQL text still comes from
+/// `sql::create_table_as` on the next line. `smelt-backend-trino` needs no
+/// entry: measured clean, no matching shape found.
 const STATEMENT_AUTHORING_ALLOWLIST: &[(&str, &str)] = &[
     (
         "smelt-backend-duckdb/src/lib.rs",
@@ -255,6 +266,18 @@ const STATEMENT_AUTHORING_ALLOWLIST: &[(&str, &str)] = &[
     (
         "smelt-backend-spark/src/sql.rs",
         "DELETE FROM {} WHERE {} >= {} AND {} < {}",
+    ),
+    (
+        "smelt-backend-bigquery/src/sql.rs",
+        "CREATE OR REPLACE TABLE {} AS {}",
+    ),
+    (
+        "smelt-backend-bigquery/src/sql.rs",
+        "DELETE FROM {} WHERE {} >= {} AND {} < {}",
+    ),
+    (
+        "smelt-backend-bigquery/src/lib.rs",
+        "CREATE OR REPLACE TABLE {} AS ...",
     ),
 ];
 
@@ -437,19 +460,30 @@ fn scan_statement_authoring_dir(dir: &Path, hits: &mut Vec<StatementAuthoringHit
 /// (`Backend::execute_statement_group`); they never author
 /// maintenance-statement text of their own
 /// (`docs/specs/incremental_models.md` §"Statement emission (single owner)").
+/// Every crate this structural gate scans for hand-authored maintenance
+/// statement text (`docs/outcomes/20260913-trino-incremental/phases/
+/// 07-plan.md`) — hoisted to a `const` so the gate itself and the
+/// crate-membership tests below (`trino_backend_is_in_the_no_authoring_
+/// scan_scope`, `bigquery_backend_is_in_the_no_authoring_scan_scope`) read
+/// one source rather than risking the test asserting against a copy that
+/// drifts from what the gate actually scans.
+pub(super) const SCANNED_CRATES: &[&str] = &[
+    "smelt-backend",
+    "smelt-backend-duckdb",
+    "smelt-backend-spark",
+    "smelt-backend-trino",
+    "smelt-backend-bigquery",
+    "smelt-backends",
+    "smelt-runtime",
+    "smelt-logical",
+    "smelt-state",
+];
+
 #[test]
 fn no_maintenance_statement_authoring_outside_the_emitter() {
     let crates_dir = repo_root().join("crates");
     let mut hits = Vec::new();
-    for crate_name in [
-        "smelt-backend",
-        "smelt-backend-duckdb",
-        "smelt-backend-spark",
-        "smelt-backends",
-        "smelt-runtime",
-        "smelt-logical",
-        "smelt-state",
-    ] {
+    for crate_name in SCANNED_CRATES {
         scan_statement_authoring_dir(&crates_dir.join(crate_name).join("src"), &mut hits);
     }
     assert!(
@@ -461,6 +495,56 @@ fn no_maintenance_statement_authoring_outside_the_emitter() {
             .map(|h| format!("  {}:{}: {}", h.file.display(), h.line_no, h.text))
             .collect::<Vec<_>>()
             .join("\n")
+    );
+}
+
+/// Criterion 5's second half (`docs/outcomes/20260913-trino-incremental/
+/// outcome.md`): the no-authoring scan must actually cover
+/// `smelt-backend-trino`, not stop at DuckDB/Spark. Reads [`SCANNED_CRATES`]
+/// rather than duplicating a literal list, so this test tracks whatever the
+/// gate itself scans.
+#[test]
+fn trino_backend_is_in_the_no_authoring_scan_scope() {
+    assert!(
+        SCANNED_CRATES.contains(&"smelt-backend-trino"),
+        "the no-authoring scan must cover smelt-backend-trino"
+    );
+}
+
+/// Same claim for `smelt-backend-bigquery`, the second backend this phase
+/// measured as unscanned.
+#[test]
+fn bigquery_backend_is_in_the_no_authoring_scan_scope() {
+    assert!(
+        SCANNED_CRATES.contains(&"smelt-backend-bigquery"),
+        "the no-authoring scan must cover smelt-backend-bigquery"
+    );
+}
+
+/// Proves the scan catches Trino's own `MERGE` spelling — double-quoted
+/// identifiers, not DuckDB's — rather than passing only because
+/// `smelt-backend-trino` happens to be clean of the DuckDB/Spark-flavored
+/// shapes the scan was originally written against. A synthetic temp tree
+/// stands in for the crate so this test doesn't depend on the real crate
+/// staying clean forever.
+#[test]
+fn a_trino_spelled_merge_in_a_backend_file_is_flagged() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let file = tmp.path().join("lib.rs");
+    std::fs::write(
+        &file,
+        "fn f() -> String {\n    format!(\"MERGE INTO \\\"iceberg\\\".\\\"s\\\".\\\"t\\\" USING (SELECT 1)\")\n}\n",
+    )
+    .unwrap();
+
+    let mut hits = Vec::new();
+    scan_statement_authoring_file(&file, &mut hits);
+
+    assert_eq!(
+        hits.len(),
+        1,
+        "Trino's double-quoted MERGE spelling must be flagged: {:#?}",
+        hits
     );
 }
 
