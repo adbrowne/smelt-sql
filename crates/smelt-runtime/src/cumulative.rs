@@ -699,8 +699,12 @@ pub async fn execute_snapshot_reconcile(
     let table_exists = backend
         .table_exists(schema, db_table_name)
         .await
-        .unwrap_or(false);
-
+        .with_context(|| {
+            format!(
+                "Failed to check whether table exists: {}.{}",
+                schema, db_table_name
+            )
+        })?;
     if !table_exists {
         backend
             .create_table_as(schema, db_table_name, &compiled.sql)

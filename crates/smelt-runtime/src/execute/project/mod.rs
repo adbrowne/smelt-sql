@@ -1494,7 +1494,7 @@ pub async fn execute_project(
                 let stored_state = backend
                     .table_exists(schema, &plan.model_file.db_name_owned())
                     .await
-                    .unwrap_or(false);
+                    .with_context(|| format!("Failed to check whether table exists: {}.{}", schema, &plan.model_file.db_name_owned()))?;
                 match crate::execute::retention_admission::check_full_refresh_retention(
                     &plan.model_file,
                     source_infos,
@@ -1545,7 +1545,7 @@ pub async fn execute_project(
             let table_exists_before_run = backend
                 .table_exists(schema, &db_table_name)
                 .await
-                .unwrap_or(false);
+                .with_context(|| format!("Failed to check whether table exists: {}.{}", schema, &db_table_name))?;
             // Hoisted above `resolve_live_column_scoped_cell` below (phase 5) so
             // its enrichment-keyed route is visible.
             let keyed_model_edges = model_edges_for(&plan.model_file, model_by_addr, source_infos);
@@ -2414,7 +2414,22 @@ pub async fn execute_project(
             if let Some((source, cell, _group_columns, write)) =
                 membership_recompute_cell.as_ref()
             {
-                if table_exists_before_run && !used_column_scoped_merge {
+                // `whole_target_rebuild_downgrade.is_some()` means this
+                // run's fold/repair cell is ALREADY forcing an unconditional
+                // whole-target drop+recreate below (`exec_result`'s own
+                // `Some(downgrade)` arm) — a full recompute of the model's
+                // entire current admitted state, which by construction
+                // already reflects every departed/changed key the
+                // membership recompute exists to patch narrowly. Dispatching
+                // both against the same run produced two executed statement
+                // groups for one cell (`docs/outcomes/
+                // 20260913-trino-incremental/phases/06d-plan.md`, the
+                // measured live-Trino conditional-write parity failure) —
+                // this is not a masked error, it's genuine double dispatch.
+                if table_exists_before_run
+                    && !used_column_scoped_merge
+                    && whole_target_rebuild_downgrade.is_none()
+                {
                     let mutation_gate = resolve_upstream_mutation_gate(
                         backend,
                         &plan.name,
@@ -3240,7 +3255,7 @@ pub async fn execute_project(
                             let table_exists = backend
                                 .table_exists(schema, &plan.model_file.db_name_owned())
                                 .await
-                                .unwrap_or(false);
+                                .with_context(|| format!("Failed to check whether table exists: {}.{}", schema, &plan.model_file.db_name_owned()))?;
                             // The join-contribution proof is only meaningful
                             // (and only computed) for the `PartitionLocal::Yes`
                             // corner — the accepted-full-scan corner has no
@@ -3323,7 +3338,7 @@ pub async fn execute_project(
                 let table_exists_before_run = backend
                     .table_exists(schema, &plan.model_file.db_name_owned())
                     .await
-                    .unwrap_or(false);
+                    .with_context(|| format!("Failed to check whether table exists: {}.{}", schema, &plan.model_file.db_name_owned()))?;
                 let key_edge_dispatch = resolve_and_dispatch_key_addressed_edge_cell(
                     backend,
                     schema,
@@ -3908,7 +3923,7 @@ pub async fn execute_project(
                         let exists = backend
                             .table_exists(schema, &plan.model_file.db_name_owned())
                             .await
-                            .unwrap_or(false);
+                            .with_context(|| format!("Failed to check whether table exists: {}.{}", schema, &plan.model_file.db_name_owned()))?;
                         if exists {
                             delta_restriction_facts.as_ref()
                         } else {
@@ -3926,7 +3941,7 @@ pub async fn execute_project(
                         let exists = backend
                             .table_exists(schema, &plan.model_file.db_name_owned())
                             .await
-                            .unwrap_or(false);
+                            .with_context(|| format!("Failed to check whether table exists: {}.{}", schema, &plan.model_file.db_name_owned()))?;
                         if exists {
                             external_delta_restriction_facts.as_ref()
                         } else {

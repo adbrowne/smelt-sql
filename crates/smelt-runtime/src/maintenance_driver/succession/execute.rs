@@ -1,6 +1,6 @@
 use std::time::Instant;
 
-use anyhow::{bail, Result};
+use anyhow::{bail, Context, Result};
 
 use smelt_backend::{Backend, BackendError, ExecutionResult};
 use smelt_state::{ledger as state_ledger, tombstone as state_tombstone};
@@ -170,7 +170,9 @@ pub async fn execute_succession_maintenance(
         // violating it. Uniform every window, including the first — no
         // special-cased branch (design bullet "Uniform patch path for
         // every window, including the first").
-        let table_exists = backend.table_exists(schema, table).await.unwrap_or(false);
+        let table_exists = backend.table_exists(schema, table).await.with_context(|| {
+            format!("Failed to check whether table exists: {}.{}", schema, table)
+        })?;
         let mut ensure_sqls = vec![
             state_tombstone::tombstone_table_ddl(
                 backend.dialect(),
@@ -429,7 +431,10 @@ pub async fn rebuild_succession_state(
             .await
             .map_err(|e| anyhow::anyhow!("succession full-rebuild: ensure DDL failed: {e}"))?;
     }
-    let table_exists = backend.table_exists(schema, table).await.unwrap_or(false);
+    let table_exists = backend
+        .table_exists(schema, table)
+        .await
+        .with_context(|| format!("Failed to check whether table exists: {}.{}", schema, table))?;
     if !table_exists {
         let shell = smelt_logical::maintenance::emit::emit_create_empty_table(
             &cell.presented_table,

@@ -320,6 +320,12 @@ pub(super) struct RecordingBackend {
     pub(super) table_exists: Mutex<bool>,
     pub(super) calls: Mutex<Vec<String>>,
     pub(super) dialect: SqlDialect,
+    /// When set, `table_exists` returns this error instead of consulting
+    /// `table_exists` above — the masked-error shape phase 6d measured live
+    /// on Trino (`docs/outcomes/20260913-trino-incremental/
+    /// phases/06d-plan.md`): a fresh backend's existence check failing must
+    /// refuse the run, never collapse to "does not exist".
+    pub(super) table_exists_error: Mutex<Option<String>>,
 }
 
 impl Default for RecordingBackend {
@@ -328,6 +334,7 @@ impl Default for RecordingBackend {
             table_exists: Mutex::new(false),
             calls: Mutex::new(Vec::new()),
             dialect: SqlDialect::DuckDB,
+            table_exists_error: Mutex::new(None),
         }
     }
 }
@@ -389,6 +396,9 @@ impl Backend for RecordingBackend {
         Ok(vec![])
     }
     async fn table_exists(&self, _schema: &str, _name: &str) -> Result<bool, BackendError> {
+        if let Some(msg) = self.table_exists_error.lock().unwrap().clone() {
+            return Err(BackendError::Other(anyhow::anyhow!(msg)));
+        }
         Ok(*self.table_exists.lock().unwrap())
     }
     async fn ensure_schema(&self, _schema: &str) -> Result<(), BackendError> {
@@ -571,6 +581,60 @@ async fn staged_candidate_pin_over_an_unconditional_cell_refuses() {
         "error must name the pin: {err}"
     );
     assert!(backend.calls.lock().unwrap().is_empty());
+}
+
+/// The masked-error shape phase 6d measured live on Trino
+/// (`docs/outcomes/20260913-trino-incremental/phases/06d-plan.md`): a fresh
+/// backend's `table_exists` check failing (rather than honestly returning
+/// `false`) must fail the run, never silently retake the first-run
+/// `CREATE TABLE … AS` route over a target it never actually checked.
+#[tokio::test]
+async fn first_run_check_propagates_a_backend_error() {
+    let backend = RecordingBackend::default();
+    *backend.table_exists_error.lock().unwrap() = Some("connection reset".to_string());
+    let steps = driving_steps(
+        "2024-01-01",
+        "2024-01-02",
+        &Granularity::Day,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
+    )
+    .unwrap();
+    let result = run_windowed_keyed_maintenance(
+        &backend,
+        "model.under.test",
+        "main",
+        "t",
+        &steps,
+        &SumRule,
+        None,
+        smelt_logical::maintenance::emit::PartitionColumnType::Undeclared,
+        &unconditional_suppression(),
+        None,
+        |step| {
+            Ok(format!(
+                "SELECT * FROM src WHERE d = '{}'",
+                step.partition_value
+            ))
+        },
+        &no_retry_policy(),
+        &crate::probes::ProbePolicy::per_run(),
+    )
+    .await;
+    let err = format!("{:#}", result.unwrap_err());
+    assert!(
+        err.contains("connection reset"),
+        "the backend's own error must propagate, not a masked `false`: {err}"
+    );
+    assert!(
+        backend
+            .calls
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|c| !c.starts_with("create_table_as") && !c.contains("CREATE TABLE")),
+        "no CREATE TABLE may run over a target whose existence was never actually checked: {:?}",
+        backend.calls.lock().unwrap()
+    );
 }
 
 #[tokio::test]

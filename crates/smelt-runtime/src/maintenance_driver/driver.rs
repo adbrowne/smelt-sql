@@ -349,7 +349,9 @@ pub async fn run_windowed_keyed_maintenance(
         let delta_sql = compile_step(step)
             .with_context(|| format!("Failed to compile model: {}", model_name))?;
 
-        let table_exists = backend.table_exists(schema, table).await.unwrap_or(false);
+        let table_exists = backend.table_exists(schema, table).await.with_context(|| {
+            format!("Failed to check whether table exists: {}.{}", schema, table)
+        })?;
 
         // The first-run `CREATE TABLE … AS` and the merge both come from
         // the single-owner emitters in `smelt-logical::maintenance::emit`
