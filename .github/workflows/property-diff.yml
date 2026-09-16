@@ -58,7 +58,7 @@ jobs:
         run: |
           BIN=./target/release/smelt
           : > body.md
-          for project in examples/timeseries examples/retail_analytics; do
+          for project in examples/timeseries examples/retail_analytics examples/web_analytics; do
             echo "## $project" >> body.md
             "$BIN" explain --diff "$BASE_SHA" --markdown --project-dir "$project" >> body.md
             echo >> body.md

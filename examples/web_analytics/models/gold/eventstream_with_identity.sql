@@ -61,12 +61,15 @@ SELECT
     e.event_name,
     e.platform,
     e.url,
+    d.device_type,
     s.session_id,
     COALESCE(f.forward_only_amplitude_id,        'd:' || CAST(e.device_id AS VARCHAR)) AS forward_only_amplitude_id,
     COALESCE(b.backward_fill_amplitude_id,       'd:' || CAST(e.device_id AS VARCHAR)) AS backward_fill_amplitude_id,
     COALESCE(c.connected_components_amplitude_id, 'd:' || CAST(e.device_id AS VARCHAR)) AS connected_components_amplitude_id,
     COALESCE(c.connected_components_cluster_id,   'd:' || CAST(e.device_id AS VARCHAR)) AS connected_components_cluster_id
 FROM smelt.silver.events_deduped e
+JOIN smelt.sources.raw.devices d
+    ON e.device_id = d.device_id
 JOIN smelt.silver.sessions s
     ON e.device_id = s.device_id
    AND e.event_ts >= s.session_start
@@ -83,8 +86,8 @@ LEFT JOIN smelt.gold.identity_connected_components c
 -- event still finds its D-1-started session. Kept as a WHERE filter rather than
 -- a JOIN condition so the incremental safety classifier reads it cleanly.
 WHERE s.session_start_date
-    BETWEEN e.event_date - INTERVAL '1 day'
-        AND e.event_date + INTERVAL '1 day'
+    BETWEEN e.event_date - INTERVAL '7 days'
+        AND e.event_date + INTERVAL '7 days'
 -- Form B: this model's own `event_date` and `silver.events_deduped`'s
 -- `first_seen_date` are the same value by construction (both are
 -- `MIN(event_date)` per `event_id` upstream) — a true 1:1, zero-skew read.
