@@ -1,0 +1,169 @@
+// docs-site/docs/maes-words/ui.js
+import { WORDS, FRAMES } from './words.js';
+import { initialState, introduceWords, applyAnswer, planRound, isCorrect, learnedWords,
+         ROUND_LENGTH } from './game.js';
+import { KEY, load, serialize } from './storage.js';
+
+const $ = id => document.getElementById(id);
+const screens = ['screen-home', 'screen-turn', 'screen-end', 'screen-grownup'];
+const rng = () => Math.random();
+
+const readSave = () => { try { return load(localStorage.getItem(KEY), WORDS); } catch { return null; } };
+const writeSave = s => { try { localStorage.setItem(KEY, serialize(s)); } catch { /* private mode: play in memory */ } };
+
+let state = readSave() ?? initialState(WORDS);
+let turns = [];
+let turnIndex = 0;
+let roundStars = 0;
+let busy = false;
+
+function showScreen(id) {
+  for (const s of screens) $(s).hidden = s !== id;
+  $('speak-btn').hidden = !(id === 'screen-turn' && 'speechSynthesis' in window);
+}
+
+function renderStars() { $('star-count').textContent = String(state.stars); }
+
+function renderWall(el) {
+  el.innerHTML = '';
+  for (const w of learnedWords(state, WORDS)) {
+    const chip = document.createElement('div');
+    chip.className = 'chip';
+    chip.innerHTML = `<span class="e">${w.e}</span><span>${w.w}</span>`;
+    el.append(chip);
+  }
+}
+
+function renderProgress() {
+  const el = $('progress');
+  el.innerHTML = '';
+  turns.forEach((_, i) => {
+    const d = document.createElement('div');
+    d.className = 'dot' + (i < turnIndex ? ' done' : '');
+    el.append(d);
+  });
+}
+
+function tile(label, { emoji = false } = {}) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'tile' + (emoji ? ' emoji' : '');
+  b.textContent = label;
+  return b;
+}
+
+function renderRead(turn) {
+  const prompt = $('prompt');
+  prompt.className = 'prompt';
+  prompt.textContent = turn.word.w;
+  const opts = $('options');
+  opts.className = 'options';
+  opts.innerHTML = '';
+  for (const o of turn.options) {
+    const b = tile(o.e, { emoji: true });
+    b.addEventListener('click', () => answer(o.w, b));
+    opts.append(b);
+  }
+}
+
+function renderPick(turn) {
+  const prompt = $('prompt');
+  prompt.className = 'prompt emoji';
+  prompt.textContent = turn.word.e;
+  const opts = $('options');
+  opts.className = 'options three';
+  opts.innerHTML = '';
+  for (const o of turn.options) {
+    const b = tile(o.w);
+    b.addEventListener('click', () => answer(o.w, b));
+    opts.append(b);
+  }
+}
+
+// Filled in by later tasks.
+function renderBuild(turn) { renderPick(turn); }
+function renderSentence(turn) { renderPick(turn); }
+
+const RENDER = { read: renderRead, pick: renderPick, build: renderBuild, sentence: renderSentence };
+
+function showTurn() {
+  if (turnIndex >= turns.length) return endRound();
+  busy = false;
+  $('slots').hidden = true;
+  renderProgress();
+  RENDER[turns[turnIndex].activity](turns[turnIndex]);
+}
+
+/** Resolve the current turn. `chosenEl` is the tapped tile (or null for build); marks it and advances. */
+function answer(value, chosenEl) {
+  if (busy) return;
+  busy = true;
+  const turn = turns[turnIndex];
+  const correct = isCorrect(turn, value);
+  state = applyAnswer(state, turn.word, correct);
+  writeSave(state);
+  renderStars();
+  const tiles = [...$('options').querySelectorAll('.tile')];
+  for (const t of tiles) t.disabled = true;
+  if (correct) {
+    roundStars += 1;
+    if (chosenEl) chosenEl.classList.add('correct');
+    $('progress').children[turnIndex]?.classList.add('star');
+    celebrate();
+  } else {
+    if (chosenEl) chosenEl.classList.add('wrong');
+    const right = tiles.find(t => t.textContent === turn.word.w || t.textContent === turn.word.e);
+    if (right) right.classList.add('correct');
+  }
+  setTimeout(() => { turnIndex += 1; showTurn(); }, correct ? 900 : 1500);
+}
+
+function celebrate() {
+  const box = $('confetti');
+  const colors = ['#e91e8c', '#ffc107', '#4caf50', '#42a5f5', '#ffd6e7'];
+  for (let i = 0; i < 18; i++) {
+    const bit = document.createElement('div');
+    bit.className = 'bit';
+    bit.style.left = `${Math.random() * 100}vw`;
+    bit.style.background = colors[i % colors.length];
+    bit.style.animationDelay = `${Math.random() * 0.2}s`;
+    box.append(bit);
+    setTimeout(() => bit.remove(), 1400);
+  }
+}
+
+function startRound() {
+  state = introduceWords(state, WORDS);
+  writeSave(state);
+  turns = planRound(state, WORDS, FRAMES, rng);
+  turnIndex = 0;
+  roundStars = 0;
+  showScreen('screen-turn');
+  showTurn();
+}
+
+function endRound() {
+  $('end-stars').textContent = `⭐ ${roundStars} / ${ROUND_LENGTH}`;
+  renderWall($('end-wall'));
+  showScreen('screen-end');
+  if (roundStars === ROUND_LENGTH) celebrate();
+}
+
+function goHome() {
+  renderStars();
+  renderWall($('home-wall'));
+  showScreen('screen-home');
+}
+
+$('play-btn').addEventListener('click', startRound);
+$('again-btn').addEventListener('click', startRound);
+$('speak-btn').addEventListener('click', () => {
+  const turn = turns[turnIndex];
+  if (!turn || !('speechSynthesis' in window)) return;
+  const u = new SpeechSynthesisUtterance(turn.word.w);
+  u.rate = 0.8;
+  speechSynthesis.cancel();
+  speechSynthesis.speak(u);
+});
+
+goHome();
