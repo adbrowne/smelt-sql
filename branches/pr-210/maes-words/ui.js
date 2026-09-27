@@ -1,7 +1,7 @@
 // docs-site/docs/maes-words/ui.js
 import { WORDS, FRAMES } from './words.js';
 import { initialState, introduceWords, applyAnswer, planRound, isCorrect, learnedWords,
-         shuffle, ROUND_LENGTH } from './game.js';
+         shuffle, ROUND_LENGTH, refreshTurn } from './game.js';
 import { KEY, load, serialize } from './storage.js';
 
 const $ = id => document.getElementById(id);
@@ -172,6 +172,7 @@ function showTurn() {
   if (turnIndex >= turns.length) return endRound();
   busy = false;
   $('slots').hidden = true;
+  turns[turnIndex] = refreshTurn(turns[turnIndex], state, WORDS, FRAMES, rng);
   renderProgress();
   RENDER[turns[turnIndex].activity](turns[turnIndex]);
 }
@@ -216,6 +217,7 @@ function celebrate() {
 }
 
 function startRound() {
+  if (turns.length && turnIndex < turns.length && !$('screen-turn').hidden) return;
   state = introduceWords(state, WORDS);
   writeSave(state);
   turns = planRound(state, WORDS, FRAMES, rng);
@@ -246,7 +248,7 @@ $('speak-btn').addEventListener('click', () => {
   if (!turn || !('speechSynthesis' in window)) return;
   const u = new SpeechSynthesisUtterance(turn.word.w);
   u.rate = 0.8;
-  speechSynthesis.cancel();
+  if (speechSynthesis.speaking) speechSynthesis.cancel();
   speechSynthesis.speak(u);
 });
 
@@ -269,7 +271,7 @@ function renderGrownup() {
   for (const label of shuffle(['rest', 'reset', 'resit'], Math.random)) {
     const b = tile(label);
     b.addEventListener('click', () => {
-      if (label !== 'reset') { b.classList.add('wrong'); setTimeout(() => b.classList.remove('wrong'), 600); return; }
+      if (label !== 'reset') { goHome(); return; }
       state = initialState(WORDS);
       writeSave(state);
       goHome();
