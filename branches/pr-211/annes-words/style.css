@@ -1,0 +1,153 @@
+:root {
+  --correct: #6aaa64;
+  --present: #c9b458;
+  --absent: #787c7e;
+  --border: #d3d6da;
+  --border-filled: #878a8c;
+  --key-bg: #d3d6da;
+  --fg: #1a1a1b;
+  --bg: #ffffff;
+}
+* { box-sizing: border-box; }
+html, body { height: 100%; }
+body {
+  margin: 0; background: var(--bg); color: var(--fg);
+  font-family: "Helvetica Neue", Helvetica, Arial, sans-serif;
+  display: flex; flex-direction: column;
+  height: 100vh; height: 100dvh;  /* dvh fallback: pre-15.4 iOS Safari drops the 2nd rule */
+  -webkit-user-select: none; user-select: none;
+}
+header {
+  border-bottom: 1px solid var(--border); display: flex;
+  align-items: center; justify-content: center; height: 50px; flex: none;
+}
+h1 { margin: 0; font-size: 28px; font-weight: 700; letter-spacing: .01em; }
+main { flex: 1; display: flex; flex-direction: column; align-items: center;
+       justify-content: space-between; padding: 8px;
+       /* Never let a too-tall layout silently swallow #footer: scroll instead of clipping.
+          Horizontal overflow stays clipped (nothing here should ever need it). */
+       overflow-x: hidden; overflow-y: auto;
+       /* viewport-fit=cover (see <meta name=viewport> in index.html) lets content run under
+          the iOS home indicator / Safari bottom bar; #footer is the last flex child, so give
+          it clearance instead of letting it sit underneath. env() with a 0px fallback is a
+          no-op on browsers without safe-area support. */
+       padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px));
+       padding-left: calc(8px + env(safe-area-inset-left, 0px));
+       padding-right: calc(8px + env(safe-area-inset-right, 0px)); }
+
+#board { display: grid; grid-template-rows: repeat(6, 1fr); gap: 5px;
+         padding: 10px; width: auto; height: 420px; max-height: 420px;
+         max-width: min(350px, 100%); aspect-ratio: 350 / 420;
+         flex: 0 1 auto; min-height: 0; }
+.row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 5px; }
+.tile {
+  display: flex; align-items: center; justify-content: center;
+  border: 2px solid var(--border); font-size: 2rem; font-weight: 700;
+  text-transform: uppercase; line-height: 1; color: var(--fg);
+}
+.tile[data-state="filled"] { border-color: var(--border-filled); animation: pop .1s ease-in-out; }
+.tile[data-state="correct"] { background: var(--correct); border-color: var(--correct); color: #fff; }
+.tile[data-state="present"] { background: var(--present); border-color: var(--present); color: #fff; }
+.tile[data-state="absent"]  { background: var(--absent);  border-color: var(--absent);  color: #fff; }
+.tile.reveal { animation: flip .5s ease forwards; }
+
+@keyframes pop { from { transform: scale(.8); } to { transform: scale(1); } }
+@keyframes flip { 0% { transform: rotateX(0); } 50% { transform: rotateX(-90deg); } 100% { transform: rotateX(0); } }
+@keyframes shake { 10%,90% { transform: translateX(-1px); } 20%,80% { transform: translateX(2px); }
+                   30%,50%,70% { transform: translateX(-4px); } 40%,60% { transform: translateX(4px); } }
+.row.shake { animation: shake .6s; }
+
+#keyboard { width: 500px; max-width: 100%; margin-bottom: 8px; flex: none; }
+.kb-row { display: flex; gap: 6px; margin-bottom: 8px; touch-action: manipulation; }
+.kb-row .spacer { flex: .5; }
+button.key {
+  flex: 1; height: 58px; border: 0; border-radius: 4px; background: var(--key-bg);
+  color: var(--fg); font-weight: 700; font-size: 1.05rem; text-transform: uppercase;
+  cursor: pointer; font-family: inherit;
+}
+button.key.wide { flex: 1.5; font-size: .75rem; }
+button.key[data-state="correct"] { background: var(--correct); color: #fff; }
+button.key[data-state="present"] { background: var(--present); color: #fff; }
+button.key[data-state="absent"]  { background: var(--absent);  color: #fff; }
+
+#toaster { position: fixed; top: 70px; left: 50%; transform: translateX(-50%);
+           display: flex; flex-direction: column; align-items: center; gap: 8px; z-index: 30; }
+.toast { background: var(--fg); color: #fff; padding: 12px 16px; border-radius: 4px;
+         font-weight: 600; animation: fade .3s; }
+@keyframes fade { from { opacity: 0; } to { opacity: 1; } }
+
+@media (max-width: 500px) {
+  #board { width: 100%; height: min(60vh, 420px); height: min(60dvh, 420px); }
+  button.key { height: 48px; }
+  .header-right { gap: 6px; font-size: .7rem; }
+  #mode-label { max-width: 60px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+}
+
+/* Short-viewport compaction (landscape phones, e.g. 844x320 rotated iPhone 13): the
+   width-keyed query above never fires here (landscape phones are wide, not narrow), and a
+   `dvh`-derived board height still over-commits the tiny vertical budget. Shrink every fixed
+   cost, then let #board take whatever is left via flex/min-height:0 rather than any
+   fixed/dvh-derived height — `main`'s overflow-y:auto (above) is the safety net if it still
+   doesn't all fit. */
+@media (max-height: 600px) {
+  header { height: 36px; }
+  h1 { font-size: 20px; }
+  #board { width: auto; height: auto; max-height: none; flex: 1 1 0; min-height: 0; }
+  .tile { font-size: 1.3rem; }
+  button.key { height: 32px; }
+  .kb-row { gap: 4px; margin-bottom: 4px; }
+  #keyboard { margin-bottom: 4px; }
+  #footer { min-height: 0; gap: 4px; }
+  #practice-btn, #daily-btn { padding: 6px 12px; }
+}
+
+header { position: relative; }
+.header-right { position: absolute; right: 12px; display: flex; align-items: center;
+                 gap: 10px; font-size: .8rem; color: var(--absent); }
+#footer { min-height: 42px; display: flex; flex-direction: column; align-items: center;
+          gap: 6px; font-size: .85rem; flex: none; }
+#countdown { font-variant-numeric: tabular-nums; color: var(--absent); }
+#practice-btn { border: 0; border-radius: 4px; background: var(--fg); color: #fff;
+                font-family: inherit; font-weight: 700; padding: 10px 16px; cursor: pointer; }
+#daily-btn { border: 1px solid var(--border-filled); border-radius: 4px; background: none;
+             color: var(--fg); font-family: inherit; font-weight: 700; padding: 9px 16px;
+             cursor: pointer; }
+
+#stats-btn { background: none; border: 0; font-size: 1.1rem; cursor: pointer; padding: 0; }
+
+#modal-backdrop { position: fixed; inset: 0; background: rgba(0,0,0,.5);
+                  display: flex; align-items: center; justify-content: center; z-index: 20; }
+/* An explicit display beats the UA rule for [hidden], so restore it by hand.
+   Without this line the modal can never be hidden. */
+#modal-backdrop[hidden] { display: none; }
+#stats-modal { position: relative; background: var(--bg); border-radius: 8px; padding: 16px;
+               width: 320px; max-width: 92vw; box-shadow: 0 4px 23px rgba(0,0,0,.2); }
+#stats-modal h2 { font-size: .9rem; text-transform: uppercase; text-align: center;
+                  letter-spacing: .05em; margin: 12px 0; }
+.modal-close { position: absolute; top: 8px; right: 10px; border: 0; background: none;
+               font-size: 1.5rem; line-height: 1; cursor: pointer; color: var(--fg); }
+#stat-numbers { display: flex; justify-content: center; }
+.stat { flex: 1; text-align: center; }
+.stat .value { font-size: 2rem; }
+.stat .label { font-size: .7rem; }
+.dist-row { display: flex; align-items: center; gap: 6px; margin-bottom: 4px; font-size: .8rem; }
+.dist-bar { background: var(--absent); color: #fff; text-align: right; padding: 2px 6px;
+            min-width: 20px; font-weight: 700; }
+.dist-bar.best { background: var(--correct); }
+#modal-footer { display: flex; align-items: center; gap: 12px; margin-top: 16px;
+                border-top: 1px solid var(--border); padding-top: 16px; }
+#modal-countdown { flex: 1; text-align: center; }
+#modal-countdown .label { font-size: .7rem; text-transform: uppercase; }
+#modal-countdown .clock { font-size: 1.6rem; font-variant-numeric: tabular-nums; }
+#share-btn { flex: 1; background: var(--correct); color: #fff; border: 0; border-radius: 4px;
+             height: 52px; font-family: inherit; font-weight: 700; font-size: 1.1rem;
+             text-transform: uppercase; cursor: pointer; }
+
+#help-modal { position: relative; background: var(--bg); border-radius: 8px; padding: 16px;
+              width: 340px; max-width: 92vw; box-shadow: 0 4px 23px rgba(0,0,0,.2); }
+#help-modal p { font-size: .9rem; line-height: 1.4; }
+#help-modal .fine { border-top: 1px solid var(--border); padding-top: 12px; font-size: .8rem; }
+#help-btn { background: none; border: 0; font-size: 1.1rem; font-weight: 700; cursor: pointer;
+            color: var(--fg); padding: 0; }
+.example { display: flex; gap: 4px; margin: 8px 0; }
+.example .tile { width: 40px; height: 40px; font-size: 1.5rem; }
