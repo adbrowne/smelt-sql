@@ -130,6 +130,13 @@ export function letterTray(word, words, rng) {
   return shuffle(tray, rng);
 }
 
+/** Frames usable for a word: drop `a {}` frames for vowel-initial words, mass nouns and numbers. */
+export function framesFor(word, frames) {
+  const needsThe = word.noA || /^[aeiou]/.test(word.w);
+  const ok = needsThe ? frames.filter(f => !/\ba \{\}/.test(f)) : frames;
+  return ok.length ? ok : frames;
+}
+
 export function makeTurn(word, level, words, frames, rng) {
   const activity = ACTIVITY_FOR_LEVEL[Math.min(level, ACTIVITY_FOR_LEVEL.length - 1)];
   switch (activity) {
@@ -140,13 +147,22 @@ export function makeTurn(word, level, words, frames, rng) {
     case 'build':
       return { activity, word, tray: letterTray(word, words, rng) };
     case 'sentence':
-    default:
+    default: {
+      const usable = framesFor(word, frames);
       return {
         activity: 'sentence', word,
-        frame: frames[Math.floor(rng() * frames.length)],
+        frame: usable[Math.floor(rng() * usable.length)],
         options: shuffle([word, ...distractors(word, words, 2)], rng),
       };
+    }
   }
+}
+
+/** Re-derive a planned turn if the word's level has moved since planning, so each level is earned
+ *  through its own activity rather than being skipped when a word repeats within one round. */
+export function refreshTurn(turn, state, words, frames, rng) {
+  const level = Math.min(state.levels[turn.word.w] ?? 0, MAX_LEVEL);
+  return ACTIVITY_FOR_LEVEL[level] === turn.activity ? turn : makeTurn(turn.word, level, words, frames, rng);
 }
 
 export function isCorrect(turn, answer) {

@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { emptyState, shuffle, editDistance, distractors, letterTray, makeTurn, isCorrect,
-         planRound, ROUND_LENGTH, ACTIVITY_FOR_LEVEL } from '../docs/maes-words/game.js';
+         planRound, ROUND_LENGTH, ACTIVITY_FOR_LEVEL, refreshTurn, framesFor } from '../docs/maes-words/game.js';
 
 const mk = (w, tier) => ({ w, e: w.toUpperCase(), tier });
 const BANK = [
@@ -154,4 +154,46 @@ test('planRound weights lower levels more heavily', () => {
 
 test('planRound returns an empty list for an empty state', () => {
   assert.deepEqual(planRound(emptyState(), BANK, FRAMES, seeded(1)), []);
+});
+
+test('refreshTurn re-derives a turn whose word has moved to a new level since planning', () => {
+  const turn = makeTurn(byName('cat'), 0, BANK, FRAMES, seeded(1));
+  assert.equal(turn.activity, 'read');
+  const state = withLevels({ cat: 1 });
+  const refreshed = refreshTurn(turn, state, BANK, FRAMES, seeded(2));
+  assert.equal(refreshed.activity, 'pick');
+  assert.equal(refreshed.word.w, 'cat');
+});
+
+test('refreshTurn returns the same object when the activity still matches the current level', () => {
+  const turn = makeTurn(byName('cat'), 0, BANK, FRAMES, seeded(1));
+  const state = withLevels({ cat: 0 });
+  const refreshed = refreshTurn(turn, state, BANK, FRAMES, seeded(2));
+  assert.equal(refreshed, turn);
+});
+
+test('framesFor drops "a {}" frames for vowel-initial words and returns non-empty', () => {
+  const usable = framesFor({ w: 'egg' }, ['I like the {}', 'Here is a {}', 'The {} is here', 'I have a {}']);
+  assert.ok(usable.length > 0);
+  for (const f of usable) assert.doesNotMatch(f, /\ba \{\}/);
+});
+
+test('framesFor drops "a {}" frames for noA words and returns non-empty', () => {
+  const usable = framesFor({ w: 'milk', noA: true }, ['I like the {}', 'Here is a {}', 'The {} is here', 'I have a {}']);
+  assert.ok(usable.length > 0);
+  for (const f of usable) assert.doesNotMatch(f, /\ba \{\}/);
+});
+
+test('framesFor returns all frames unchanged for a normal consonant-initial word', () => {
+  const frames = ['I like the {}', 'Here is a {}'];
+  assert.deepEqual(framesFor({ w: 'cat' }, frames), frames);
+});
+
+test('makeTurn never picks an "a {}" frame for a vowel-initial word, across many seeds', () => {
+  const egg = { w: 'egg', e: '🥚', tier: 1 };
+  const bank = [egg, ...BANK];
+  for (let seed = 1; seed <= 50; seed++) {
+    const t = makeTurn(egg, 3, bank, FRAMES, seeded(seed));
+    assert.doesNotMatch(t.frame, /\ba \{\}/, `seed ${seed}: ${t.frame}`);
+  }
 });

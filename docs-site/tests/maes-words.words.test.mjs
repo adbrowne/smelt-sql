@@ -31,3 +31,12 @@ test('every frame has exactly one blank', () => {
   assert.ok(FRAMES.length >= 4);
   for (const f of FRAMES) assert.equal((f.match(/\{\}/g) || []).length, 1, `bad frame ${f}`);
 });
+
+test('noA is only ever true where present', () => {
+  for (const w of WORDS) if ('noA' in w) assert.equal(w.noA, true, `${w.w} has noA !== true`);
+});
+
+test('at least three frames use "the" so vowel/noA words still get variety', () => {
+  const theFrames = FRAMES.filter(f => /\bthe\b/i.test(f));
+  assert.ok(theFrames.length >= 3, `only ${theFrames.length} "the" frames`);
+});
