@@ -73,6 +73,8 @@ main {
 .slot { width: 84px; height: 96px; border-radius: 16px; border: 4px dashed var(--pink); background: var(--tile);
         display: flex; align-items: center; justify-content: center; font-size: 52px; font-weight: 800; cursor: pointer; }
 .slot.filled { border-style: solid; }
+.slot.correct { border-color: var(--correct); background: var(--correct); color: #fff; }
+.slot.wrong { border-color: var(--wrong); animation: shake .5s ease; }
 .tray { display: flex; flex-wrap: wrap; gap: 12px; justify-content: center; }
 .tray .tile { width: 84px; min-height: 96px; }
 .tray .tile.used { visibility: hidden; }

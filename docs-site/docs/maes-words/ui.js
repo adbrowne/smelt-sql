@@ -84,8 +84,70 @@ function renderPick(turn) {
   }
 }
 
-// Filled in by later tasks.
-function renderBuild(turn) { renderPick(turn); }
+function renderBuild(turn) {
+  const prompt = $('prompt');
+  prompt.className = 'prompt emoji';
+  prompt.textContent = turn.word.e;
+
+  const slotsEl = $('slots');
+  slotsEl.hidden = false;
+  slotsEl.innerHTML = '';
+  const placed = Array(turn.word.w.length).fill(null); // index into tray, or null
+
+  const opts = $('options');
+  opts.className = 'tray';
+  opts.innerHTML = '';
+  const trayTiles = turn.tray.map((ch, i) => {
+    const b = tile(ch);
+    b.dataset.tray = String(i);
+    b.addEventListener('click', () => {
+      if (busy || b.classList.contains('used')) return;
+      const slot = placed.indexOf(null);
+      if (slot < 0) return;
+      placed[slot] = i;
+      b.classList.add('used');
+      paint();
+      if (!placed.includes(null)) check();
+    });
+    opts.append(b);
+    return b;
+  });
+
+  const slotEls = placed.map((_, s) => {
+    const d = document.createElement('div');
+    d.className = 'slot';
+    d.addEventListener('click', () => {
+      if (busy || placed[s] === null) return;
+      trayTiles[placed[s]].classList.remove('used');
+      placed[s] = null;
+      paint();
+    });
+    slotsEl.append(d);
+    return d;
+  });
+
+  function paint() {
+    placed.forEach((ti, s) => {
+      slotEls[s].textContent = ti === null ? '' : turn.tray[ti];
+      slotEls[s].classList.toggle('filled', ti !== null);
+    });
+  }
+
+  function check() {
+    const letters = placed.map(ti => turn.tray[ti]);
+    const correct = letters.join('') === turn.word.w;
+    if (!correct) {
+      // Show the right spelling in the slots before moving on.
+      slotEls.forEach((el, s) => { el.classList.add('wrong'); setTimeout(() => {
+        el.classList.remove('wrong'); el.textContent = turn.word.w[s]; el.classList.add('filled', 'correct');
+      }, 500); });
+    } else {
+      slotEls.forEach(el => el.classList.add('correct'));
+    }
+    answer(letters, null);
+  }
+}
+
 function renderSentence(turn) { renderPick(turn); }
 
 const RENDER = { read: renderRead, pick: renderPick, build: renderBuild, sentence: renderSentence };
