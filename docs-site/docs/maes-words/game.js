@@ -142,11 +142,26 @@ export function letterTray(word, words, rng) {
   return shuffle(tray, rng);
 }
 
-/** Frames usable for a word: drop `a {}` frames for vowel-initial words, mass nouns and numbers. */
+export const posOf = word => word.pos ?? 'noun';
+
+/** Frames usable for a word: same part of speech; and no "a {noun}" for vowel-initial, mass-noun or number words. */
 export function framesFor(word, frames) {
+  const samePos = frames.filter(f => (f.pos ?? 'noun') === posOf(word));
   const needsThe = word.noA || /^[aeiou]/.test(word.w);
-  const ok = needsThe ? frames.filter(f => !/\ba \{\}/.test(f)) : frames;
-  return ok.length ? ok : frames;
+  const ok = needsThe ? samePos.filter(f => !/\ba \{noun\}/.test(f.text)) : samePos;
+  if (ok.length) return ok;
+  return samePos.length ? samePos : frames;
+}
+
+const capitalise = s => s.charAt(0).toUpperCase() + s.slice(1);
+
+/** Fill in the sight slot (capitalised if it opens the sentence) and leave `{}` where the pictured word goes. */
+export function resolveFrame(frame, sight) {
+  let text = frame.text;
+  if (sight !== null && sight !== undefined) {
+    text = text.startsWith('{sight}') ? text.replace('{sight}', capitalise(sight)) : text.replace('{sight}', sight);
+  }
+  return text.replace('{noun}', '{}');
 }
 
 export function makeTurn(word, level, words, frames, rng) {
@@ -161,9 +176,11 @@ export function makeTurn(word, level, words, frames, rng) {
     case 'sentence':
     default: {
       const usable = framesFor(word, frames);
+      const frame = usable[Math.floor(rng() * usable.length)];
+      const sight = frame.fits.length ? frame.fits[Math.floor(rng() * frame.fits.length)] : null;
       return {
         activity: 'sentence', word,
-        frame: usable[Math.floor(rng() * usable.length)],
+        frame: resolveFrame(frame, sight),
         options: shuffle([word, ...distractors(word, words, 2)], rng),
       };
     }

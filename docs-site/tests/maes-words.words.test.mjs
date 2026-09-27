@@ -47,16 +47,23 @@ test('no plurals', () => {
   for (const { w } of WORDS) assert.ok(!/[^s]s$/.test(w) || ['bus', 'gas'].includes(w), `plural? ${w}`);
 });
 
-test('every frame has exactly one blank', () => {
-  assert.ok(FRAMES.length >= 4);
-  for (const f of FRAMES) assert.equal((f.match(/\{\}/g) || []).length, 1, `bad frame ${f}`);
+test('every frame has one {noun}, at most one {sight}, a fits list of SIGHT words, and a known pos', () => {
+  assert.ok(FRAMES.length >= 6);
+  for (const f of FRAMES) {
+    assert.equal((f.text.match(/\{noun\}/g) || []).length, 1, `bad frame ${f.text}`);
+    assert.ok((f.text.match(/\{sight\}/g) || []).length <= 1, `two sights in ${f.text}`);
+    assert.ok(Array.isArray(f.fits), `no fits on ${f.text}`);
+    if (f.text.includes('{sight}')) assert.ok(f.fits.length >= 1, `templated frame with empty fits: ${f.text}`);
+    else assert.equal(f.fits.length, 0, `fits on an untemplated frame: ${f.text}`);
+    assert.ok(['noun', 'verb', 'adj'].includes(f.pos ?? 'noun'), `bad pos on ${f.text}`);
+  }
 });
 
 test('noA is only ever true where present', () => {
   for (const w of WORDS) if ('noA' in w) assert.equal(w.noA, true, `${w.w} has noA !== true`);
 });
 
-test('at least three frames use "the" so vowel/noA words still get variety', () => {
-  const theFrames = FRAMES.filter(f => /\bthe\b/i.test(f));
+test('at least three noun frames use "the" so vowel/noA words still get variety', () => {
+  const theFrames = FRAMES.filter(f => (f.pos ?? 'noun') === 'noun' && /\bthe\b/i.test(f.text));
   assert.ok(theFrames.length >= 3, `only ${theFrames.length} "the" frames`);
 });

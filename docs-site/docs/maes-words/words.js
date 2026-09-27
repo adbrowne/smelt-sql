@@ -101,11 +101,21 @@ export const WORDS = [
   { w: 'bowl', tier: 3, pic: { kind: 'emoji', text: '🥣' } },
 ];
 
+// Frames: `{noun}` is the pictured word's slot (any part of speech named by `pos`, default noun);
+// `{sight}` is an optional sight-word slot and `fits` lists EVERY sight word that makes the sentence right.
 export const FRAMES = [
-  'I like the {}',
-  'Here is a {}',
-  'The {} is here',
-  'I can see a {}',
-  'Look at the {}',
-  'I have a {}',
+  { text: 'I {sight} the {noun}',   fits: ['like', 'see', 'have'] },
+  { text: 'We {sight} the {noun}',  fits: ['like', 'see', 'have'] },
+  { text: '{sight} is a {noun}',    fits: ['here', 'this', 'it'] },
+  { text: 'The {noun} is {sight}',  fits: ['here', 'up', 'in'] },
+  { text: 'I like {sight} {noun}',  fits: ['my', 'the'] },
+  { text: 'Here is {sight} {noun}', fits: ['my', 'the'] },
+  { text: 'The {noun} {sight} here', fits: ['is', 'was'] },
+  { text: 'I can see a {noun}',     fits: [] },
+  { text: 'Look at the {noun}',     fits: [] },
+  { text: 'I can {noun}',           fits: [], pos: 'verb' },
+  { text: 'We {sight} {noun}',      fits: ['can'], pos: 'verb' },
+  { text: 'Look at me {noun}',      fits: [], pos: 'verb' },
+  { text: 'It is {noun}',           fits: [], pos: 'adj' },
+  { text: '{sight} is {noun}',      fits: ['it', 'this'], pos: 'adj' },
 ];

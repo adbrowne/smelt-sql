@@ -1,14 +1,20 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { emptyState, shuffle, editDistance, distractors, letterTray, makeTurn, isCorrect,
-         planRound, ROUND_LENGTH, ACTIVITY_FOR_LEVEL, refreshTurn, framesFor } from '../docs/maes-words/game.js';
+         planRound, ROUND_LENGTH, ACTIVITY_FOR_LEVEL, refreshTurn, framesFor, resolveFrame } from '../docs/maes-words/game.js';
 
 const mk = (w, tier) => ({ w, e: w.toUpperCase(), tier });
 const BANK = [
   ...['cat', 'cot', 'cut', 'dog', 'dig', 'sun', 'bed', 'pig', 'bus', 'egg', 'hat', 'ox'].map(w => mk(w, 1)),
   ...['frog', 'milk', 'duck', 'bell'].map(w => mk(w, 2)),
 ];
-const FRAMES = ['I like the {}', 'Here is a {}'];
+const FRAMES = [
+  { text: 'I {sight} the {noun}', fits: ['like', 'see'] },
+  { text: 'Here is a {noun}', fits: [] },
+  { text: '{sight} is a {noun}', fits: ['here', 'this'] },
+  { text: 'I can {noun}', fits: [], pos: 'verb' },
+  { text: 'It is {noun}', fits: [], pos: 'adj' },
+];
 const byName = w => BANK.find(x => x.w === w);
 const withLevels = levels => ({ ...emptyState(), levels: { ...levels } });
 
@@ -86,7 +92,8 @@ test('makeTurn picks the activity from the level and always includes the answer 
 
   const sent = makeTurn(byName('cat'), 3, BANK, FRAMES, rng);
   assert.equal(sent.activity, 'sentence');
-  assert.ok(FRAMES.includes(sent.frame));
+  assert.ok(sent.frame.includes('{}'));
+  assert.equal((sent.frame.match(/\{\}/g) || []).length, 1);
   assert.equal(sent.options.length, 3);
   assert.equal(sent.options.filter(x => x.w === 'cat').length, 1);
   assert.deepEqual(ACTIVITY_FOR_LEVEL, ['read', 'pick', 'build', 'sentence']);
@@ -172,21 +179,60 @@ test('refreshTurn returns the same object when the activity still matches the cu
   assert.equal(refreshed, turn);
 });
 
-test('framesFor drops "a {}" frames for vowel-initial words and returns non-empty', () => {
-  const usable = framesFor({ w: 'egg' }, ['I like the {}', 'Here is a {}', 'The {} is here', 'I have a {}']);
+test('framesFor drops "a {noun}" frames for vowel-initial words and returns non-empty', () => {
+  const frames = [
+    { text: 'I like the {noun}', fits: [] },
+    { text: 'Here is a {noun}', fits: [] },
+    { text: 'The {noun} is here', fits: [] },
+    { text: 'I have a {noun}', fits: [] },
+  ];
+  const usable = framesFor({ w: 'egg' }, frames);
   assert.ok(usable.length > 0);
-  for (const f of usable) assert.doesNotMatch(f, /\ba \{\}/);
+  for (const f of usable) assert.doesNotMatch(f.text, /\ba \{noun\}/);
 });
 
-test('framesFor drops "a {}" frames for noA words and returns non-empty', () => {
-  const usable = framesFor({ w: 'milk', noA: true }, ['I like the {}', 'Here is a {}', 'The {} is here', 'I have a {}']);
+test('framesFor drops "a {noun}" frames for noA words and returns non-empty', () => {
+  const frames = [
+    { text: 'I like the {noun}', fits: [] },
+    { text: 'Here is a {noun}', fits: [] },
+    { text: 'The {noun} is here', fits: [] },
+    { text: 'I have a {noun}', fits: [] },
+  ];
+  const usable = framesFor({ w: 'milk', noA: true }, frames);
   assert.ok(usable.length > 0);
-  for (const f of usable) assert.doesNotMatch(f, /\ba \{\}/);
+  for (const f of usable) assert.doesNotMatch(f.text, /\ba \{noun\}/);
 });
 
 test('framesFor returns all frames unchanged for a normal consonant-initial word', () => {
-  const frames = ['I like the {}', 'Here is a {}'];
+  const frames = [
+    { text: 'I like the {noun}', fits: [] },
+    { text: 'Here is a {noun}', fits: [] },
+  ];
   assert.deepEqual(framesFor({ w: 'cat' }, frames), frames);
+});
+
+test('resolveFrame substitutes the sight word, capitalises when sentence-initial, and leaves one {} for the noun', () => {
+  assert.equal(resolveFrame({ text: 'I {sight} the {noun}', fits: ['like'] }, 'like'), 'I like the {}');
+  assert.equal(resolveFrame({ text: '{sight} is a {noun}', fits: ['here'] }, 'here'), 'Here is a {}');
+  assert.equal(resolveFrame({ text: 'Here is a {noun}', fits: [] }, null), 'Here is a {}');
+});
+
+test('framesFor only returns frames whose pos matches the word', () => {
+  const verb = framesFor({ w: 'run', pos: 'verb' }, FRAMES);
+  assert.ok(verb.length > 0);
+  assert.ok(verb.every(f => f.pos === 'verb'));
+  const noun = framesFor({ w: 'cat' }, FRAMES);
+  assert.ok(noun.every(f => (f.pos ?? 'noun') === 'noun'));
+  const adj = framesFor({ w: 'red', pos: 'adj' }, FRAMES);
+  assert.deepEqual(adj.map(f => f.text), ['It is {noun}']);
+});
+
+test('a sentence turn for a templated frame uses one of its fits', () => {
+  for (let seed = 1; seed <= 30; seed++) {
+    const t = makeTurn(byName('cat'), 3, BANK, FRAMES, seeded(seed));
+    assert.equal((t.frame.match(/\{\}/g) || []).length, 1, t.frame);
+    assert.doesNotMatch(t.frame, /\{sight\}|\{noun\}/);
+  }
 });
 
 test('makeTurn never picks an "a {}" frame for a vowel-initial word, across many seeds', () => {
