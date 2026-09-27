@@ -148,7 +148,24 @@ function renderBuild(turn) {
   }
 }
 
-function renderSentence(turn) { renderPick(turn); }
+function renderSentence(turn) {
+  const prompt = $('prompt');
+  prompt.className = 'prompt sentence';
+  prompt.innerHTML = '';
+  const [before, after] = turn.frame.split('{}');
+  const blank = document.createElement('span');
+  blank.className = 'blank';
+  blank.textContent = turn.word.e;
+  prompt.append(document.createTextNode(before), blank, document.createTextNode(after));
+  const opts = $('options');
+  opts.className = 'options three';
+  opts.innerHTML = '';
+  for (const o of turn.options) {
+    const b = tile(o.w);
+    b.addEventListener('click', () => answer(o.w, b));
+    opts.append(b);
+  }
+}
 
 const RENDER = { read: renderRead, pick: renderPick, build: renderBuild, sentence: renderSentence };
 
@@ -235,3 +252,39 @@ $('speak-btn').addEventListener('click', () => {
 });
 
 goHome();
+
+// --- grown-up corner ---------------------------------------------------------
+function renderGrownup() {
+  const tbody = $('grownup-table').querySelector('tbody');
+  tbody.innerHTML = '';
+  for (const w of WORDS) {
+    const lvl = state.levels[w.w];
+    const tr = document.createElement('tr');
+    const lvlText = lvl === undefined ? '–' : String(lvl);
+    tr.innerHTML = `<td>${w.e} ${w.w}</td><td>${w.tier}</td><td class="lvl-${lvl ?? 'none'}">${lvlText}</td>`;
+    tbody.append(tr);
+  }
+  // Reset guard: the adult must tap the written word "reset" among look-alikes.
+  const box = $('reset-options');
+  box.innerHTML = '';
+  for (const label of ['rest', 'reset', 'resit']) {
+    const b = tile(label);
+    b.addEventListener('click', () => {
+      if (label !== 'reset') { b.classList.add('wrong'); setTimeout(() => b.classList.remove('wrong'), 600); return; }
+      state = initialState(WORDS);
+      writeSave(state);
+      goHome();
+    });
+    box.append(b);
+  }
+  showScreen('screen-grownup');
+}
+
+let pressTimer = null;
+const title = $('title');
+const startPress = () => { pressTimer = setTimeout(renderGrownup, 1200); };
+const cancelPress = () => { clearTimeout(pressTimer); pressTimer = null; };
+title.addEventListener('pointerdown', startPress);
+for (const ev of ['pointerup', 'pointerleave', 'pointercancel']) title.addEventListener(ev, cancelPress);
+title.addEventListener('contextmenu', e => e.preventDefault());
+$('grownup-back').addEventListener('click', goHome);
