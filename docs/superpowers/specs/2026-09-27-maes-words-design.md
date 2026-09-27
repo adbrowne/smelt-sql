@@ -1,7 +1,7 @@
 # Mae's Words — Design
 
 **Date:** 2026-09-27
-**Status:** Draft, awaiting review
+**Status:** Approved
 
 ## Goal
 
@@ -31,6 +31,7 @@ the repo's spec/plan/ROADMAP workflow and its Rust CI gates.
 | Persistence | `localStorage`, one versioned key |
 | Failure | None. A wrong answer shows the right one and moves on. No timers, no lives, no losing |
 | Grown-up corner | Hidden screen (long-press the title) with per-word status and reset |
+| Theme | Pink. Primary accent a warm pink (around `#e91e8c`), soft pink backgrounds, white tiles, green for correct and grey for wrong |
 | Out of scope | Accounts, server, analytics, build step, npm dependencies, audio assets, multiple profiles, dark mode |
 
 ## Word bank
@@ -166,7 +167,7 @@ layout as Anne's Words so the two are maintained the same way.
 ```
 docs-site/docs/maes-words/
   index.html    markup shell: screens as <section>s, one visible at a time
-  style.css     big friendly tiles, pop/shake/confetti keyframes
+  style.css     pink theme, big friendly tiles, pop/shake/confetti keyframes
   words.js      data only: WORDS, FRAMES
   game.js       pure logic, zero DOM — the unit under test
   storage.js    pure serialisation of state; caller owns localStorage
