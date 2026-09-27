@@ -227,6 +227,11 @@ test('framesFor only returns frames whose pos matches the word', () => {
   assert.deepEqual(adj.map(f => f.text), ['It is {noun}']);
 });
 
+test('framesFor returns [] rather than falling back to a different pos when none of that pos exist', () => {
+  const nounFrameOnly = [{ text: 'Here is a {noun}', fits: [] }];
+  assert.deepEqual(framesFor({ w: 'zzz', pos: 'verb' }, nounFrameOnly), []);
+});
+
 test('a sentence turn for a templated frame uses one of its fits', () => {
   for (let seed = 1; seed <= 30; seed++) {
     const t = makeTurn(byName('cat'), 3, BANK, FRAMES, seeded(seed));

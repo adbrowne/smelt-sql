@@ -67,3 +67,9 @@ test('at least three noun frames use "the" so vowel/noA words still get variety'
   const theFrames = FRAMES.filter(f => (f.pos ?? 'noun') === 'noun' && /\bthe\b/i.test(f.text));
   assert.ok(theFrames.length >= 3, `only ${theFrames.length} "the" frames`);
 });
+
+test('every pos used by a word has at least one frame, so framesFor never returns []', () => {
+  const wordPoses = new Set(WORDS.map(w => w.pos ?? 'noun'));
+  const framePoses = new Set(FRAMES.map(f => f.pos ?? 'noun'));
+  for (const pos of wordPoses) assert.ok(framePoses.has(pos), `no frame has pos ${pos}`);
+});
