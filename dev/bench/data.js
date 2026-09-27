@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790474541966,
+  "lastUpdate": 1790474545604,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -94,6 +94,37 @@ window.BENCHMARK_DATA = {
             "name": "Parser / Batch (1000)",
             "value": 13.91044,
             "unit": "ms"
+          }
+        ]
+      }
+    ],
+    "Smelt Throughput Benchmarks": [
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": false,
+          "id": "ef1a0b317335a8c48807c06c3d1b87e3911e07a0",
+          "message": "fix(maes-words): final review — ladder per activity, sentence articles, reset guard, polish\n\nEight review findings: refreshTurn re-derives a planned turn's activity from\nthe word's current level so a repeated word in one round earns each rung\nthrough its own activity; framesFor + noA flags stop \"a egg\"/\"a milk\"/\"a six\"\nby dropping a-frames for vowel-initial and mass-noun/number words; a wrong\ntap on the grown-up reset guard now exits home instead of shaking in place;\nheader uses min-height so it doesn't clip under the safe-area inset;\nstartRound guards against a double-tap starting two rounds; gift/rat/van\nremoved from the word bank for image ambiguity; the speaker only cancels an\nin-flight utterance instead of unconditionally, avoiding an iOS race.\n\nCo-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>\nClaude-Session: https://claude.ai/code/session_01ADN4LtXLVBhtLTgmfpNPfe",
+          "timestamp": "2026-09-27T11:55:55+10:00",
+          "tree_id": "722f31f478c8a876cc5235febfe504bf60911c7c",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/ef1a0b317335a8c48807c06c3d1b87e3911e07a0"
+        },
+        "date": 1790474544351,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.781818547795762,
+            "unit": "MB/s"
           }
         ]
       }
