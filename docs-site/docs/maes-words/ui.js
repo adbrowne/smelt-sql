@@ -182,17 +182,23 @@ function renderBuild(turn) {
     }
     const canRetry = retryAllowed(turn, attempts + 1);
     slotEls.forEach(el => el.classList.add('wrong'));
+    // answer() first: it does the scoring/attempts accounting, and (only when retries are
+    // exhausted) sets busy itself and schedules the turn advance. Setting busy before this call
+    // would trip answer()'s own `if (busy) return;` guard and skip the accounting entirely.
+    answer(letters, null);
+    busy = true; // hold slots/tray inert until the retry-reset (or reveal) below resolves
     setTimeout(() => {
       slotEls.forEach(el => el.classList.remove('wrong'));
       if (canRetry) {
         // slide letters back to the tray, empty the slots, let her rebuild
         placed.forEach((ti, s) => { if (ti !== null) trayTiles[ti].classList.remove('used'); placed[s] = null; });
         paint();
+        busy = false;
       } else {
+        // out of retries: answer()'s own timeout is about to advance the turn, so leave busy true.
         slotEls.forEach((el, s) => { el.textContent = turn.word.w[s]; el.classList.add('filled', 'correct'); });
       }
     }, 500);
-    answer(letters, null);
   }
 }
 
