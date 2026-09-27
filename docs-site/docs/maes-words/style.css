@@ -9,6 +9,10 @@
   --wrong: #b0b0b0;
   --star: #ffc107;
 }
+/* Author rules of equal specificity (e.g. .screen, .slots) otherwise beat the UA
+   [hidden] rule, leaving a hidden element visible — !important restores [hidden]
+   as the final word regardless of what else targets the element. */
+[hidden] { display: none !important; }
 * { box-sizing: border-box; }
 html, body { height: 100%; }
 body {
@@ -35,9 +39,6 @@ main {
   padding-bottom: calc(16px + env(safe-area-inset-bottom, 0px));
 }
 .screen { width: 100%; max-width: 560px; display: flex; flex-direction: column; align-items: center; gap: 20px; flex: 1; }
-/* An explicit display beats the UA rule for [hidden], so restore it by hand.
-   Without this line inactive screens stay visible and stack on top of each other. */
-.screen[hidden] { display: none; }
 .big-btn {
   font-size: 32px; font-weight: 800; color: #fff; background: var(--pink); border: 0;
   border-radius: 24px; padding: 20px 40px; min-height: 80px; min-width: 200px; cursor: pointer;

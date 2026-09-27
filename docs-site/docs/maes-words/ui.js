@@ -1,7 +1,7 @@
 // docs-site/docs/maes-words/ui.js
 import { WORDS, FRAMES } from './words.js';
 import { initialState, introduceWords, applyAnswer, planRound, isCorrect, learnedWords,
-         ROUND_LENGTH } from './game.js';
+         shuffle, ROUND_LENGTH } from './game.js';
 import { KEY, load, serialize } from './storage.js';
 
 const $ = id => document.getElementById(id);
@@ -99,7 +99,6 @@ function renderBuild(turn) {
   opts.innerHTML = '';
   const trayTiles = turn.tray.map((ch, i) => {
     const b = tile(ch);
-    b.dataset.tray = String(i);
     b.addEventListener('click', () => {
       if (busy || b.classList.contains('used')) return;
       const slot = placed.indexOf(null);
@@ -135,7 +134,7 @@ function renderBuild(turn) {
 
   function check() {
     const letters = placed.map(ti => turn.tray[ti]);
-    const correct = letters.join('') === turn.word.w;
+    const correct = isCorrect(turn, letters);
     if (!correct) {
       // Show the right spelling in the slots before moving on.
       slotEls.forEach((el, s) => { el.classList.add('wrong'); setTimeout(() => {
@@ -267,7 +266,7 @@ function renderGrownup() {
   // Reset guard: the adult must tap the written word "reset" among look-alikes.
   const box = $('reset-options');
   box.innerHTML = '';
-  for (const label of ['rest', 'reset', 'resit']) {
+  for (const label of shuffle(['rest', 'reset', 'resit'], Math.random)) {
     const b = tile(label);
     b.addEventListener('click', () => {
       if (label !== 'reset') { b.classList.add('wrong'); setTimeout(() => b.classList.remove('wrong'), 600); return; }
