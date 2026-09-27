@@ -30,7 +30,7 @@ function renderWall(el) {
   for (const w of learnedWords(state, WORDS)) {
     const chip = document.createElement('div');
     chip.className = 'chip';
-    chip.innerHTML = `<span class="e">${w.e}</span><span>${w.w}</span>`;
+    chip.append(renderPic(w.pic, { size: 'chip' }), Object.assign(document.createElement('span'), { textContent: w.w }));
     el.append(chip);
   }
 }
@@ -48,11 +48,48 @@ function renderProgress() {
   });
 }
 
-function tile(label, { emoji = false } = {}) {
+function tile(label) {
   const b = document.createElement('button');
   b.type = 'button';
-  b.className = 'tile' + (emoji ? ' emoji' : '');
+  b.className = 'tile';
   b.textContent = label;
+  b.dataset.w = label;
+  return b;
+}
+
+/** The one place a word's picture becomes DOM. `size` is 'tile' | 'prompt' | 'chip'.
+ *  The size class is namespaced `pic-<size>` rather than the bare word, since 'tile'/
+ *  'prompt'/'chip' are already global component classes elsewhere in style.css — an
+ *  unprefixed class here would make the pic itself match those unrelated rules. */
+function renderPic(pic, { size = 'tile' } = {}) {
+  if (!pic) { const s = document.createElement('span'); s.className = `pic pic-none pic-${size}`; return s; }
+  if (pic.kind === 'emoji') {
+    const s = document.createElement('span');
+    s.className = `pic pic-emoji pic-${size}`;
+    s.textContent = pic.text;
+    return s;
+  }
+  if (pic.kind === 'colour') {
+    const d = document.createElement('div');
+    d.className = `pic pic-colour pic-${size}`;
+    d.style.background = pic.css;
+    return d;
+  }
+  const img = document.createElement('img');
+  img.className = `pic pic-img pic-${size}`;
+  img.src = pic.src;
+  img.alt = '';
+  img.draggable = false;
+  return img;
+}
+
+/** A tile showing a word's picture. Tap target stays ≥64px. */
+function picTile(word) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'tile pic-tile';
+  b.dataset.w = word.w;
+  b.append(renderPic(word.pic, { size: 'tile' }));
   return b;
 }
 
@@ -64,7 +101,7 @@ function renderRead(turn) {
   opts.className = 'options';
   opts.innerHTML = '';
   for (const o of turn.options) {
-    const b = tile(o.e, { emoji: true });
+    const b = picTile(o);
     b.addEventListener('click', () => answer(o.w, b));
     opts.append(b);
   }
@@ -72,8 +109,9 @@ function renderRead(turn) {
 
 function renderPick(turn) {
   const prompt = $('prompt');
-  prompt.className = 'prompt emoji';
-  prompt.textContent = turn.word.e;
+  prompt.className = 'prompt pic';
+  prompt.innerHTML = '';
+  prompt.append(renderPic(turn.word.pic, { size: 'prompt' }));
   const opts = $('options');
   opts.className = 'options three';
   opts.innerHTML = '';
@@ -86,8 +124,9 @@ function renderPick(turn) {
 
 function renderBuild(turn) {
   const prompt = $('prompt');
-  prompt.className = 'prompt emoji';
-  prompt.textContent = turn.word.e;
+  prompt.className = 'prompt pic';
+  prompt.innerHTML = '';
+  prompt.append(renderPic(turn.word.pic, { size: 'prompt' }));
 
   const slotsEl = $('slots');
   slotsEl.hidden = false;
@@ -154,7 +193,8 @@ function renderSentence(turn) {
   const [before, after] = turn.frame.split('{}');
   const blank = document.createElement('span');
   blank.className = 'blank';
-  blank.textContent = turn.word.e;
+  blank.innerHTML = '';
+  blank.append(renderPic(turn.word.pic, { size: 'prompt' }));
   prompt.append(document.createTextNode(before), blank, document.createTextNode(after));
   const opts = $('options');
   opts.className = 'options three';
@@ -196,7 +236,7 @@ function answer(value, chosenEl) {
     celebrate();
   } else {
     if (chosenEl) chosenEl.classList.add('wrong');
-    const right = tiles.find(t => t.textContent === turn.word.w || t.textContent === turn.word.e);
+    const right = tiles.find(t => t.dataset.w === turn.word.w);
     if (right) right.classList.add('correct');
   }
   setTimeout(() => { turnIndex += 1; showTurn(); }, correct ? 900 : 1500);
@@ -262,7 +302,10 @@ function renderGrownup() {
     const lvl = state.levels[w.w];
     const tr = document.createElement('tr');
     const lvlText = lvl === undefined ? '–' : String(lvl);
-    tr.innerHTML = `<td>${w.e} ${w.w}</td><td>${w.tier}</td><td class="lvl-${lvl ?? 'none'}">${lvlText}</td>`;
+    const nameTd = document.createElement('td');
+    nameTd.append(renderPic(w.pic, { size: 'chip' }), document.createTextNode(` ${w.w}`));
+    tr.append(nameTd);
+    tr.insertAdjacentHTML('beforeend', `<td>${w.tier}</td><td class="lvl-${lvl ?? 'none'}">${lvlText}</td>`);
     tbody.append(tr);
   }
   // Reset guard: the adult must tap the written word "reset" among look-alikes.

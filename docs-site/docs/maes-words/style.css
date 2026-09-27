@@ -52,7 +52,6 @@ main {
 .progress .dot.star { background: var(--star); border-color: var(--star); }
 
 .prompt { font-size: 72px; font-weight: 800; text-align: center; min-height: 110px; display: flex; align-items: center; justify-content: center; letter-spacing: .04em; }
-.prompt.emoji { font-size: 120px; min-height: 150px; }
 .prompt.sentence { font-size: 40px; line-height: 1.3; flex-wrap: wrap; gap: 8px; }
 .prompt.sentence .blank { font-size: 64px; }
 
@@ -65,7 +64,6 @@ main {
   justify-content: center; cursor: pointer; letter-spacing: .04em; color: var(--fg);
   font-family: inherit;
 }
-.tile.emoji { font-size: 72px; min-height: 120px; }
 .tile.correct { background: var(--correct); border-color: var(--correct); color: #fff; animation: pop .35s ease; }
 .tile.wrong { background: var(--wrong); border-color: var(--wrong); color: #fff; animation: shake .5s ease; }
 .tile[disabled] { pointer-events: none; }
@@ -83,7 +81,6 @@ main {
 .wall { display: flex; flex-wrap: wrap; gap: 10px; justify-content: center; }
 .wall .chip { background: var(--tile); border: 3px solid var(--soft); border-radius: 16px; padding: 8px 14px;
               font-size: 22px; font-weight: 700; display: flex; align-items: center; gap: 8px; }
-.wall .chip .e { font-size: 32px; }
 .end-stars { font-size: 56px; font-weight: 800; text-align: center; }
 
 .muted { color: #7a5a6a; font-size: 16px; }
@@ -103,3 +100,18 @@ main {
 @keyframes fall { to { transform: translateY(110vh) rotate(540deg); opacity: .6; } }
 
 @media (min-width: 700px) { .options { grid-template-columns: repeat(4, 1fr); } .options.three { grid-template-columns: repeat(3, 1fr); } }
+
+.pic-emoji.pic-tile { font-size: 72px; line-height: 1; }
+.pic-emoji.pic-prompt { font-size: 120px; line-height: 1; }
+.pic-emoji.pic-chip { font-size: 32px; line-height: 1; }
+.pic-img.pic-tile { width: 96px; height: 96px; object-fit: contain; }
+.pic-img.pic-prompt { width: 160px; height: 160px; object-fit: contain; }
+.pic-img.pic-chip { width: 36px; height: 36px; object-fit: contain; }
+.pic-colour { border-radius: 14px; border: 3px solid rgba(0,0,0,.08); }
+.pic-colour.pic-tile { width: 96px; height: 96px; }
+.pic-colour.pic-prompt { width: 160px; height: 160px; }
+.pic-colour.pic-chip { width: 36px; height: 36px; }
+.tile.pic-tile { min-height: 120px; }
+.prompt.pic { min-height: 170px; }
+.prompt.sentence .blank .pic-img, .prompt.sentence .blank .pic-colour { width: 72px; height: 72px; vertical-align: middle; }
+.prompt.sentence .blank .pic-emoji { font-size: 64px; }

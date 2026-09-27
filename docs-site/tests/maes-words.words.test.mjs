@@ -1,19 +1,39 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { existsSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+import { dirname, join } from 'node:path';
 import { WORDS, FRAMES } from '../docs/maes-words/words.js';
 
-test('every word is 2-4 lowercase letters with an emoji and a tier', () => {
-  for (const { w, e, tier } of WORDS) {
+const HERE = dirname(fileURLToPath(import.meta.url));
+const GAME_DIR = join(HERE, '..', 'docs', 'maes-words');
+
+test('every word is 2-4 lowercase letters with a tier and a well-formed pic', () => {
+  for (const { w, tier, pic } of WORDS) {
     assert.match(w, /^[a-z]{2,4}$/, `bad word ${w}`);
-    assert.ok(typeof e === 'string' && e.length > 0, `no emoji for ${w}`);
     assert.ok([1, 2, 3].includes(tier), `bad tier for ${w}`);
+    assert.ok(pic && typeof pic === 'object', `no pic for ${w}`);
+    assert.ok(['emoji', 'svg', 'colour'].includes(pic.kind), `bad pic.kind for ${w}`);
+    if (pic.kind === 'emoji') assert.ok(typeof pic.text === 'string' && pic.text.length > 0, `no emoji text for ${w}`);
+    if (pic.kind === 'svg') assert.match(pic.src, /^img\/[a-z0-9_-]+\.(svg|png)$/, `bad src for ${w}`);
+    if (pic.kind === 'colour') assert.match(pic.css, /^#[0-9a-f]{6}$/, `bad css for ${w}`);
   }
 });
 
-test('words and emoji are unique', () => {
-  const ws = WORDS.map(x => x.w), es = WORDS.map(x => x.e);
+test('every svg/png src exists on disk', () => {
+  for (const { w, pic } of WORDS) {
+    if (pic.kind !== 'svg') continue;
+    assert.ok(existsSync(join(GAME_DIR, pic.src)), `${w}: ${pic.src} missing`);
+  }
+});
+
+test('words, emoji and image sources are unique', () => {
+  const ws = WORDS.map(x => x.w);
+  const es = WORDS.filter(x => x.pic.kind === 'emoji').map(x => x.pic.text);
+  const srcs = WORDS.filter(x => x.pic.kind === 'svg').map(x => x.pic.src);
   assert.equal(new Set(ws).size, ws.length, 'duplicate word');
   assert.equal(new Set(es).size, es.length, 'duplicate emoji');
+  assert.equal(new Set(srcs).size, srcs.length, 'duplicate src');
 });
 
 test('bank is big enough for the progression rules', () => {
