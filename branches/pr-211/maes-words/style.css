@@ -67,6 +67,7 @@ main {
 .tile.correct { background: var(--correct); border-color: var(--correct); color: #fff; animation: pop .35s ease; }
 .tile.wrong { background: var(--wrong); border-color: var(--wrong); color: #fff; animation: shake .5s ease; }
 .tile[disabled] { pointer-events: none; }
+.tile.wrong[disabled] { opacity: .55; }
 
 .slots { display: flex; gap: 12px; justify-content: center; }
 .slot { width: 84px; height: 96px; border-radius: 16px; border: 4px dashed var(--pink); background: var(--tile);
