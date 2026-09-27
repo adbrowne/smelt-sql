@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { emptyState, initialState, unlockedTier, introduceWords, applyAnswer,
          activeWords, learnedWords, INITIAL_INTRO, INTRO_BATCH, NEW_WORD_FLOOR,
-         MAX_LEVEL } from '../docs/maes-words/game.js';
+         MAX_LEVEL, applyAttempt, retryAllowed } from '../docs/maes-words/game.js';
 
 // A small bank: 8 tier-1, 4 tier-2, 4 tier-3.
 const mk = (w, tier) => ({ w, e: w.toUpperCase(), tier });
@@ -109,4 +109,31 @@ test('activeWords and learnedWords split introduced words by level, learned in l
   const s = { ...withLevels({ cat: 3, dog: 1, sun: 3, bed: 0 }), learnedOrder: ['sun', 'cat'] };
   assert.deepEqual(activeWords(s, BANK).map(x => x.w), ['dog', 'bed']);
   assert.deepEqual(learnedWords(s, BANK).map(x => x.w), ['sun', 'cat']);
+});
+
+test('applyAttempt: a wrong-then-right turn changes the level by exactly -1 and adds no star', () => {
+  let s = withLevels({ cat: 2 });
+  s = applyAttempt(s, byName('cat'), false, 0);
+  assert.equal(s.levels.cat, 1);
+  assert.equal(s.stars, 0);
+  s = applyAttempt(s, byName('cat'), false, 1);
+  assert.equal(s.levels.cat, 1, 'second wrong on the same turn does not count again');
+  s = applyAttempt(s, byName('cat'), true, 2);
+  assert.equal(s.levels.cat, 1, 'fixing it earns no level');
+  assert.equal(s.stars, 0, 'fixing it earns no star');
+});
+
+test('applyAttempt: a clean first try behaves like applyAnswer', () => {
+  const s = applyAttempt(withLevels({ cat: 0 }), byName('cat'), true, 0);
+  assert.equal(s.levels.cat, 1);
+  assert.equal(s.stars, 1);
+});
+
+test('retryAllowed allows exactly one Build retry and unlimited tile retries', () => {
+  assert.equal(retryAllowed({ activity: 'build' }, 1), true);
+  assert.equal(retryAllowed({ activity: 'build' }, 2), false);
+  for (const activity of ['read', 'pick', 'sentence', 'fill']) {
+    assert.equal(retryAllowed({ activity }, 1), true);
+    assert.equal(retryAllowed({ activity }, 3), true);
+  }
 });

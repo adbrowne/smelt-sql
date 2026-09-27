@@ -55,6 +55,18 @@ export function applyAnswer(state, word, correct) {
   return next;
 }
 
+export const BUILD_RETRIES = 1;
+
+/** Only the first attempt of a turn moves the ladder or earns a star. */
+export function applyAttempt(state, word, correct, attempts) {
+  return attempts === 0 ? applyAnswer(state, word, correct) : state;
+}
+
+/** May Mae have another go after `attempts` wrong answers on this turn? */
+export function retryAllowed(turn, attempts) {
+  return turn.activity === 'build' ? attempts <= BUILD_RETRIES : true;
+}
+
 export const activeWords = (state, words) =>
   words.filter(x => isIntroduced(state, x.w) && state.levels[x.w] < MAX_LEVEL);
 

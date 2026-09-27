@@ -1,7 +1,7 @@
 // docs-site/docs/maes-words/ui.js
 import { WORDS, FRAMES } from './words.js';
-import { initialState, introduceWords, applyAnswer, planRound, isCorrect, learnedWords,
-         shuffle, ROUND_LENGTH, refreshTurn } from './game.js';
+import { initialState, introduceWords, planRound, isCorrect, learnedWords,
+         shuffle, ROUND_LENGTH, refreshTurn, applyAttempt, retryAllowed } from './game.js';
 import { KEY, load, serialize } from './storage.js';
 
 const $ = id => document.getElementById(id);
@@ -17,6 +17,7 @@ let turnIndex = 0;
 let roundStars = 0;
 let busy = false;
 let results = [];
+let attempts = 0;
 
 function showScreen(id) {
   for (const s of screens) $(s).hidden = s !== id;
@@ -174,14 +175,23 @@ function renderBuild(turn) {
   function check() {
     const letters = placed.map(ti => turn.tray[ti]);
     const correct = isCorrect(turn, letters);
-    if (!correct) {
-      // Show the right spelling in the slots before moving on.
-      slotEls.forEach((el, s) => { el.classList.add('wrong'); setTimeout(() => {
-        el.classList.remove('wrong'); el.textContent = turn.word.w[s]; el.classList.add('filled', 'correct');
-      }, 500); });
-    } else {
+    if (correct) {
       slotEls.forEach(el => el.classList.add('correct'));
+      answer(letters, null);
+      return;
     }
+    const canRetry = retryAllowed(turn, attempts + 1);
+    slotEls.forEach(el => el.classList.add('wrong'));
+    setTimeout(() => {
+      slotEls.forEach(el => el.classList.remove('wrong'));
+      if (canRetry) {
+        // slide letters back to the tray, empty the slots, let her rebuild
+        placed.forEach((ti, s) => { if (ti !== null) trayTiles[ti].classList.remove('used'); placed[s] = null; });
+        paint();
+      } else {
+        slotEls.forEach((el, s) => { el.textContent = turn.word.w[s]; el.classList.add('filled', 'correct'); });
+      }
+    }, 500);
     answer(letters, null);
   }
 }
@@ -211,6 +221,7 @@ const RENDER = { read: renderRead, pick: renderPick, build: renderBuild, sentenc
 function showTurn() {
   if (turnIndex >= turns.length) return endRound();
   busy = false;
+  attempts = 0;
   $('slots').hidden = true;
   turns[turnIndex] = refreshTurn(turns[turnIndex], state, WORDS, FRAMES, rng);
   renderProgress();
@@ -220,26 +231,33 @@ function showTurn() {
 /** Resolve the current turn. `chosenEl` is the tapped tile (or null for build); marks it and advances. */
 function answer(value, chosenEl) {
   if (busy) return;
-  busy = true;
   const turn = turns[turnIndex];
   const correct = isCorrect(turn, value);
-  results[turnIndex] = correct;
-  state = applyAnswer(state, turn.word, correct);
+  state = applyAttempt(state, turn.word, correct, attempts);
   writeSave(state);
   renderStars();
   const tiles = [...$('options').querySelectorAll('.tile')];
-  for (const t of tiles) t.disabled = true;
   if (correct) {
-    roundStars += 1;
+    busy = true;
+    results[turnIndex] = attempts === 0;          // starred only when clean
+    for (const t of tiles) t.disabled = true;
     if (chosenEl) chosenEl.classList.add('correct');
-    $('progress').children[turnIndex]?.classList.add('star');
-    celebrate();
-  } else {
-    if (chosenEl) chosenEl.classList.add('wrong');
-    const right = tiles.find(t => t.dataset.w === turn.word.w);
-    if (right) right.classList.add('correct');
+    if (attempts === 0) {
+      roundStars += 1;
+      $('progress').children[turnIndex]?.classList.add('star');
+      celebrate();
+    }
+    setTimeout(() => { turnIndex += 1; showTurn(); }, 900);
+    return;
   }
-  setTimeout(() => { turnIndex += 1; showTurn(); }, correct ? 900 : 1500);
+  attempts += 1;
+  results[turnIndex] = false;
+  if (chosenEl) { chosenEl.classList.add('wrong'); chosenEl.disabled = true; }
+  if (retryAllowed(turn, attempts)) return;      // tiles: keep going on the same turn
+  // Build only: out of retries — reveal and move on.
+  busy = true;
+  for (const t of tiles) t.disabled = true;
+  setTimeout(() => { turnIndex += 1; showTurn(); }, 1500);
 }
 
 function celebrate() {
