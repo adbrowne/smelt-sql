@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1790550918219,
+  "lastUpdate": 1790550921371,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -94,6 +94,37 @@ window.BENCHMARK_DATA = {
             "name": "Parser / Batch (1000)",
             "value": 13.943461,
             "unit": "ms"
+          }
+        ]
+      }
+    ],
+    "Smelt Throughput Benchmarks": [
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "0893f780b673bd2f86a5cd61090f434320203258",
+          "message": "docs(maes-words): spec — pictogram bank, colour tiles, Fill activity, try-again\n\nCo-Authored-By: Claude Fable 5.1 <noreply@anthropic.com>\nClaude-Session: https://claude.ai/code/session_01ADN4LtXLVBhtLTgmfpNPfe",
+          "timestamp": "2026-09-28T09:10:54+10:00",
+          "tree_id": "155e02536ee7a3745e8b2f5932d2a08d4cef47e7",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/0893f780b673bd2f86a5cd61090f434320203258"
+        },
+        "date": 1790550920338,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.72313007509398,
+            "unit": "MB/s"
           }
         ]
       }
