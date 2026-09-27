@@ -16,6 +16,7 @@ let turns = [];
 let turnIndex = 0;
 let roundStars = 0;
 let busy = false;
+let results = [];
 
 function showScreen(id) {
   for (const s of screens) $(s).hidden = s !== id;
@@ -39,7 +40,10 @@ function renderProgress() {
   el.innerHTML = '';
   turns.forEach((_, i) => {
     const d = document.createElement('div');
-    d.className = 'dot' + (i < turnIndex ? ' done' : '');
+    let cls = 'dot';
+    if (results[i] === true) cls += ' star';
+    if (i < turnIndex) cls += ' done';
+    d.className = cls;
     el.append(d);
   });
 }
@@ -100,6 +104,7 @@ function answer(value, chosenEl) {
   busy = true;
   const turn = turns[turnIndex];
   const correct = isCorrect(turn, value);
+  results[turnIndex] = correct;
   state = applyAnswer(state, turn.word, correct);
   writeSave(state);
   renderStars();
@@ -138,6 +143,7 @@ function startRound() {
   turns = planRound(state, WORDS, FRAMES, rng);
   turnIndex = 0;
   roundStars = 0;
+  results = [];
   showScreen('screen-turn');
   showTurn();
 }
