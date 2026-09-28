@@ -8,15 +8,31 @@ export const INTRO_BATCH = 2;
 export const NEW_WORD_FLOOR = 6;
 export const UNLOCK_FRACTION = 0.75;
 export const ACTIVITY_FOR_LEVEL = Object.freeze(['read', 'pick', 'build', 'sentence']);
+export const SIGHT_INITIAL_INTRO = 2;
+export const SIGHT_INTRO_BATCH = 1;
+export const SIGHT_NEW_WORD_FLOOR = 2;
+export const SIGHT_ACTIVITY_FOR_LEVEL = Object.freeze(['fill', 'fill', 'build', 'fill']);
 
 export const emptyState = () => ({ levels: {}, stars: 0, learnedOrder: [] });
 
 const cloneState = s => ({ levels: { ...s.levels }, stars: s.stars, learnedOrder: [...s.learnedOrder] });
 const isIntroduced = (state, w) => Object.prototype.hasOwnProperty.call(state.levels, w);
 
+/** A bank entry is a sight word (taught by Fill) rather than a pictured noun/verb/adj. */
+export const isSight = word => word.sight === true;
+const nouns = bank => bank.filter(x => !isSight(x));
+const sights = bank => bank.filter(isSight);
+
+/** Activity ladder for a word's current level: sight words use the Fill ladder, everything else the picture ladder. */
+export function activityFor(word, level) {
+  const ladder = isSight(word) ? SIGHT_ACTIVITY_FOR_LEVEL : ACTIVITY_FOR_LEVEL;
+  return ladder[Math.min(level, ladder.length - 1)];
+}
+
 export function initialState(words) {
   const s = emptyState();
-  for (const word of words.filter(x => x.tier === 1).slice(0, INITIAL_INTRO)) s.levels[word.w] = 0;
+  for (const word of nouns(words).filter(x => x.tier === 1).slice(0, INITIAL_INTRO)) s.levels[word.w] = 0;
+  for (const word of sights(words).filter(x => x.tier === 1).slice(0, SIGHT_INITIAL_INTRO)) s.levels[word.w] = 0;
   return s;
 }
 
@@ -33,16 +49,24 @@ export function unlockedTier(state, words) {
   return tier;
 }
 
-/** One trickle step: if fewer than NEW_WORD_FLOOR introduced words sit at level 0, bring in up to INTRO_BATCH more. */
-export function introduceWords(state, words) {
-  const atZero = Object.values(state.levels).filter(l => l === 0).length;
-  if (atZero >= NEW_WORD_FLOOR) return state;
-  const tier = unlockedTier(state, words);
-  const fresh = words.filter(x => x.tier <= tier && !isIntroduced(state, x.w)).slice(0, INTRO_BATCH);
+/** One trickle step over a single kind's pool: if fewer than `floor` introduced words of that kind sit at
+ *  level 0, bring in up to `batch` more from the pool's own unlocked tier. */
+function trickle(state, pool, floor, batch) {
+  const atZero = pool.filter(x => state.levels[x.w] === 0).length;
+  if (atZero >= floor) return state;
+  const tier = unlockedTier(state, pool);
+  const fresh = pool.filter(x => x.tier <= tier && !isIntroduced(state, x.w)).slice(0, batch);
   if (fresh.length === 0) return state;
   const next = cloneState(state);
   for (const word of fresh) next.levels[word.w] = 0;
   return next;
+}
+
+/** Trickle nouns/verbs/adjs and sight words independently, each against its own floor and batch size,
+ *  so a burst of sight words never crowds out pictured words (or vice versa). */
+export function introduceWords(state, words) {
+  const afterNouns = trickle(state, nouns(words), NEW_WORD_FLOOR, INTRO_BATCH);
+  return trickle(afterNouns, sights(words), SIGHT_NEW_WORD_FLOOR, SIGHT_INTRO_BATCH);
 }
 
 export function applyAnswer(state, word, correct) {
@@ -53,6 +77,18 @@ export function applyAnswer(state, word, correct) {
   if (correct) next.stars += 1;
   if (level === MAX_LEVEL && !next.learnedOrder.includes(word.w)) next.learnedOrder.push(word.w);
   return next;
+}
+
+export const BUILD_RETRIES = 1;
+
+/** Only the first attempt of a turn moves the ladder or earns a star. */
+export function applyAttempt(state, word, correct, attempts) {
+  return attempts === 0 ? applyAnswer(state, word, correct) : state;
+}
+
+/** May Mae have another go after `attempts` wrong answers on this turn? */
+export function retryAllowed(turn, attempts) {
+  return turn.activity === 'build' ? attempts <= BUILD_RETRIES : true;
 }
 
 export const activeWords = (state, words) =>
@@ -88,9 +124,16 @@ export function editDistance(a, b) {
   return dp[a.length][b.length];
 }
 
-/** Look-alike words from the bank, closest first, ties by length difference then bank order. */
-export function distractors(word, words, n) {
-  return words
+/** Look-alike words from the bank, closest first, ties by length difference then bank order. Always
+ *  drawn from the word's own kind (sight words draw sight distractors; pictured words draw pictured ones).
+ *  When pictured is true and the word is a colour with ≥n other colours, returns only colours. */
+export function distractors(word, words, n, { pictured = false } = {}) {
+  const kind = words.filter(x => isSight(x) === isSight(word));
+  const isColour = x => x.pic?.kind === 'colour';
+  const pool = pictured && isColour(word) && kind.filter(x => isColour(x) && x.w !== word.w).length >= n
+    ? kind.filter(isColour)
+    : kind;
+  return pool
     .map((x, i) => ({ x, i }))
     .filter(({ x }) => x.w !== word.w)
     .sort((p, q) =>
@@ -118,7 +161,10 @@ const canSpell = (tray, w) => {
 export function letterTray(word, words, rng) {
   const letters = word.w.split('');
   const wanted = word.w.length <= 3 ? 1 : 2;
-  const others = words.filter(x => x.w !== word.w && x.w.length === word.w.length).map(x => x.w);
+  const trayLen = letters.length + wanted;
+  // Guard both against a same-length word spellable from a subset of the final tray (e.g. "cot" from
+  // "cat"+o) and against a longer word spelled by the *whole* tray (e.g. "then" from "the"+n).
+  const others = words.filter(x => x.w !== word.w && (x.w.length === word.w.length || x.w.length === trayLen)).map(x => x.w);
   const tray = [...letters];
   const candidates = shuffle(ALPHABET.filter(ch => !letters.includes(ch)), rng);
   for (const ch of candidates) {
@@ -130,28 +176,100 @@ export function letterTray(word, words, rng) {
   return shuffle(tray, rng);
 }
 
-/** Frames usable for a word: drop `a {}` frames for vowel-initial words, mass nouns and numbers. */
+export const posOf = word => word.pos ?? 'noun';
+
+/** Does this frame admit this word: same part of speech, and no "a {noun}" (sentence-initial "A {noun}"
+ *  included) for vowel-initial, mass-noun or number words (those need "the {noun}" instead). */
+export const frameAdmits = (word, frame) =>
+  (frame.pos ?? 'noun') === posOf(word) && !((word.noA || /^[aeiou]/.test(word.w)) && /\ba \{noun\}/i.test(frame.text));
+
+/** Frames usable for a word: same part of speech; and no "a {noun}" for vowel-initial, mass-noun or number words. */
 export function framesFor(word, frames) {
-  const needsThe = word.noA || /^[aeiou]/.test(word.w);
-  const ok = needsThe ? frames.filter(f => !/\ba \{\}/.test(f)) : frames;
-  return ok.length ? ok : frames;
+  const samePos = frames.filter(f => (f.pos ?? 'noun') === posOf(word));
+  const ok = samePos.filter(f => frameAdmits(word, f));
+  return ok.length ? ok : samePos;
 }
 
-export function makeTurn(word, level, words, frames, rng) {
-  const activity = ACTIVITY_FOR_LEVEL[Math.min(level, ACTIVITY_FOR_LEVEL.length - 1)];
+const capitalise = s => s.charAt(0).toUpperCase() + s.slice(1);
+
+/** Fill in the sight slot (capitalised if it opens the sentence) and leave `{}` where the pictured word goes. */
+export function resolveFrame(frame, sight) {
+  let text = frame.text;
+  if (sight !== null && sight !== undefined) {
+    text = text.startsWith('{sight}') ? text.replace('{sight}', capitalise(sight)) : text.replace('{sight}', sight);
+  }
+  return text.replace('{noun}', '{}');
+}
+
+/** Sight words that do NOT fit the frame; easy (level 0) ranks a *different* length from the target
+ *  first (largest length gap first), ties broken by bank order; otherwise (level >= 1) ranks by edit
+ *  distance, i.e. genuine look-alikes. */
+export function fillDistractors(sight, frame, sightBank, level, n) {
+  const pool = sightBank.filter(x => x.w !== sight.w && !frame.fits.includes(x.w));
+  if (level === 0) {
+    const ranked = pool.map((x, i) => ({ x, i }))
+      .sort((p, q) => (p.x.w.length === sight.w.length) - (q.x.w.length === sight.w.length)
+        || Math.abs(q.x.w.length - sight.w.length) - Math.abs(p.x.w.length - sight.w.length)
+        || p.i - q.i);
+    return ranked.slice(0, n).map(({ x }) => x);
+  }
+  return distractors(sight, pool.concat([sight]), n);
+}
+
+/** Choose a (frame, noun) pair for a Fill turn on `sight`: the frame's `fits` must include the sight
+ *  word and the noun must obey the frame's part of speech and article (`frameAdmits`) — the two are
+ *  resolved together so a frame's own "a {noun}" is never rewritten, only ever paired with a noun it
+ *  already admits. Nouns from `introduced` are preferred; if none of them admits any fitting frame,
+ *  every noun of the matching part of speech is considered instead. Picks uniformly among whichever
+ *  set of pairs applies. */
+function pickFillFrameAndNoun(sight, words, frames, introduced, rng) {
+  const fitting = frames.filter(f => f.fits.includes(sight.w));
+  const pairsOver = pool => {
+    const pairs = [];
+    for (const frame of fitting) {
+      const pos = frame.pos ?? 'noun';
+      for (const noun of pool.filter(x => posOf(x) === pos && frameAdmits(x, frame))) pairs.push({ frame, noun });
+    }
+    return pairs;
+  };
+  const introducedNouns = nouns(words).filter(x => introduced.has(x.w));
+  const preferred = pairsOver(introducedNouns);
+  const pairs = preferred.length ? preferred : pairsOver(nouns(words));
+  return pairs[Math.floor(rng() * pairs.length)];
+}
+
+/** A Fill turn: the sight word is the answer, blanked out of a sentence that also carries a pictured
+ *  noun/verb/adj chosen jointly with the frame so the article always agrees (see `pickFillFrameAndNoun`). */
+function makeFillTurn(sight, level, words, frames, rng, ctx) {
+  const introduced = ctx.introduced ?? new Set(nouns(words).map(x => x.w));
+  const { frame, noun } = pickFillFrameAndNoun(sight, words, frames, introduced, rng);
+  return {
+    activity: 'fill', word: sight, noun, fits: frame.fits,
+    frame: frame.text.replace('{sight}', '{}'),
+    capitalise: frame.text.startsWith('{sight}'),
+    options: shuffle([sight, ...fillDistractors(sight, frame, sights(words), level, 2)], rng),
+  };
+}
+
+export function makeTurn(word, level, words, frames, rng, ctx = {}) {
+  const activity = activityFor(word, level);
   switch (activity) {
     case 'read':
-      return { activity, word, options: shuffle([word, ...distractors(word, words, 3)], rng) };
+      return { activity, word, options: shuffle([word, ...distractors(word, words, 3, { pictured: true })], rng) };
     case 'pick':
       return { activity, word, options: shuffle([word, ...distractors(word, words, 2)], rng) };
     case 'build':
       return { activity, word, tray: letterTray(word, words, rng) };
+    case 'fill':
+      return makeFillTurn(word, level, words, frames, rng, ctx);
     case 'sentence':
     default: {
       const usable = framesFor(word, frames);
+      const frame = usable[Math.floor(rng() * usable.length)];
+      const sight = frame.fits.length ? frame.fits[Math.floor(rng() * frame.fits.length)] : null;
       return {
         activity: 'sentence', word,
-        frame: usable[Math.floor(rng() * usable.length)],
+        frame: resolveFrame(frame, sight),
         options: shuffle([word, ...distractors(word, words, 2)], rng),
       };
     }
@@ -162,7 +280,8 @@ export function makeTurn(word, level, words, frames, rng) {
  *  through its own activity rather than being skipped when a word repeats within one round. */
 export function refreshTurn(turn, state, words, frames, rng) {
   const level = Math.min(state.levels[turn.word.w] ?? 0, MAX_LEVEL);
-  return ACTIVITY_FOR_LEVEL[level] === turn.activity ? turn : makeTurn(turn.word, level, words, frames, rng);
+  const ctx = { introduced: new Set(Object.keys(state.levels)) };
+  return activityFor(turn.word, level) === turn.activity ? turn : makeTurn(turn.word, level, words, frames, rng, ctx);
 }
 
 export function isCorrect(turn, answer) {
@@ -197,17 +316,18 @@ function weightedPicks(pool, weightOf, count, rng) {
 export function planRound(state, words, frames, rng) {
   const active = activeWords(state, words);
   const learned = learnedWords(state, words);
+  const ctx = { introduced: new Set(Object.keys(state.levels)) };
   if (active.length === 0 && learned.length === 0) return [];
   if (active.length === 0) {
-    return weightedPicks(learned, () => 1, ROUND_LENGTH, rng).map(w => makeTurn(w, MAX_LEVEL, words, frames, rng));
+    return weightedPicks(learned, () => 1, ROUND_LENGTH, rng).map(w => makeTurn(w, MAX_LEVEL, words, frames, rng, ctx));
   }
   const reviewSlots = learned.length > 0 ? 1 : 0;
   const picks = weightedPicks(active, w => 4 - state.levels[w.w], ROUND_LENGTH - reviewSlots, rng)
-    .map(w => makeTurn(w, state.levels[w.w], words, frames, rng));
+    .map(w => makeTurn(w, state.levels[w.w], words, frames, rng, ctx));
   if (reviewSlots) {
     const review = learned[Math.floor(rng() * learned.length)];
     const at = Math.floor(rng() * (picks.length + 1));
-    picks.splice(at, 0, makeTurn(review, MAX_LEVEL, words, frames, rng));
+    picks.splice(at, 0, makeTurn(review, MAX_LEVEL, words, frames, rng, ctx));
   }
   return picks;
 }

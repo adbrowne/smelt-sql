@@ -1,22 +1,26 @@
 // docs-site/docs/maes-words/ui.js
-import { WORDS, FRAMES } from './words.js';
-import { initialState, introduceWords, applyAnswer, planRound, isCorrect, learnedWords,
-         shuffle, ROUND_LENGTH, refreshTurn } from './game.js';
+import { WORDS, SIGHT, FRAMES } from './words.js';
+import { initialState, introduceWords, planRound, isCorrect, learnedWords,
+         shuffle, ROUND_LENGTH, refreshTurn, applyAttempt, retryAllowed } from './game.js';
 import { KEY, load, serialize } from './storage.js';
+
+const ALL = [...WORDS, ...SIGHT];
 
 const $ = id => document.getElementById(id);
 const screens = ['screen-home', 'screen-turn', 'screen-end', 'screen-grownup'];
 const rng = () => Math.random();
 
-const readSave = () => { try { return load(localStorage.getItem(KEY), WORDS); } catch { return null; } };
+const readSave = () => { try { return load(localStorage.getItem(KEY), ALL); } catch { return null; } };
 const writeSave = s => { try { localStorage.setItem(KEY, serialize(s)); } catch { /* private mode: play in memory */ } };
 
-let state = readSave() ?? initialState(WORDS);
+let state = readSave() ?? initialState(ALL);
 let turns = [];
 let turnIndex = 0;
 let roundStars = 0;
 let busy = false;
 let results = [];
+let attempts = 0;
+let lookTimer = null; // sight-word Build's look-then-spell reveal timer
 
 function showScreen(id) {
   for (const s of screens) $(s).hidden = s !== id;
@@ -27,10 +31,10 @@ function renderStars() { $('star-count').textContent = String(state.stars); }
 
 function renderWall(el) {
   el.innerHTML = '';
-  for (const w of learnedWords(state, WORDS)) {
+  for (const w of learnedWords(state, ALL)) {
     const chip = document.createElement('div');
     chip.className = 'chip';
-    chip.innerHTML = `<span class="e">${w.e}</span><span>${w.w}</span>`;
+    chip.append(renderPic(w.pic, { size: 'chip' }), Object.assign(document.createElement('span'), { textContent: w.w }));
     el.append(chip);
   }
 }
@@ -48,11 +52,48 @@ function renderProgress() {
   });
 }
 
-function tile(label, { emoji = false } = {}) {
+function tile(label) {
   const b = document.createElement('button');
   b.type = 'button';
-  b.className = 'tile' + (emoji ? ' emoji' : '');
+  b.className = 'tile';
   b.textContent = label;
+  b.dataset.w = label;
+  return b;
+}
+
+/** The one place a word's picture becomes DOM. `size` is 'tile' | 'prompt' | 'chip'.
+ *  The size class is namespaced `pic-<size>` rather than the bare word, since 'tile'/
+ *  'prompt'/'chip' are already global component classes elsewhere in style.css — an
+ *  unprefixed class here would make the pic itself match those unrelated rules. */
+function renderPic(pic, { size = 'tile' } = {}) {
+  if (!pic) { const s = document.createElement('span'); s.className = `pic pic-none pic-${size}`; return s; }
+  if (pic.kind === 'emoji') {
+    const s = document.createElement('span');
+    s.className = `pic pic-emoji pic-${size}`;
+    s.textContent = pic.text;
+    return s;
+  }
+  if (pic.kind === 'colour') {
+    const d = document.createElement('div');
+    d.className = `pic pic-colour pic-${size}`;
+    d.style.background = pic.css;
+    return d;
+  }
+  const img = document.createElement('img');
+  img.className = `pic pic-img pic-${size}`;
+  img.src = pic.src;
+  img.alt = '';
+  img.draggable = false;
+  return img;
+}
+
+/** A tile showing a word's picture. Tap target stays ≥64px. */
+function picTile(word) {
+  const b = document.createElement('button');
+  b.type = 'button';
+  b.className = 'tile pic-tile';
+  b.dataset.w = word.w;
+  b.append(renderPic(word.pic, { size: 'tile' }));
   return b;
 }
 
@@ -64,7 +105,7 @@ function renderRead(turn) {
   opts.className = 'options';
   opts.innerHTML = '';
   for (const o of turn.options) {
-    const b = tile(o.e, { emoji: true });
+    const b = picTile(o);
     b.addEventListener('click', () => answer(o.w, b));
     opts.append(b);
   }
@@ -72,8 +113,9 @@ function renderRead(turn) {
 
 function renderPick(turn) {
   const prompt = $('prompt');
-  prompt.className = 'prompt emoji';
-  prompt.textContent = turn.word.e;
+  prompt.className = 'prompt pic';
+  prompt.innerHTML = '';
+  prompt.append(renderPic(turn.word.pic, { size: 'prompt' }));
   const opts = $('options');
   opts.className = 'options three';
   opts.innerHTML = '';
@@ -86,15 +128,13 @@ function renderPick(turn) {
 
 function renderBuild(turn) {
   const prompt = $('prompt');
-  prompt.className = 'prompt emoji';
-  prompt.textContent = turn.word.e;
-
   const slotsEl = $('slots');
-  slotsEl.hidden = false;
+  const opts = $('options');
+  const sight = !turn.word.pic;
+
   slotsEl.innerHTML = '';
   const placed = Array(turn.word.w.length).fill(null); // index into tray, or null
 
-  const opts = $('options');
   opts.className = 'tray';
   opts.innerHTML = '';
   const trayTiles = turn.tray.map((ch, i) => {
@@ -125,6 +165,29 @@ function renderBuild(turn) {
     return d;
   });
 
+  if (sight) {
+    // Look-then-spell: show the word briefly, then hide it and reveal the tray.
+    const thisTurn = turn;
+    prompt.className = 'prompt';
+    prompt.textContent = turn.word.w;
+    slotsEl.hidden = true;
+    opts.hidden = true;
+    lookTimer = setTimeout(() => {
+      // The round may have moved on (or been left) before this fires: only reveal if this
+      // is still the turn on screen, so a stale timer never wipes a later turn's prompt.
+      if (turns[turnIndex] !== thisTurn || $('screen-turn').hidden) return;
+      prompt.textContent = '';
+      slotsEl.hidden = false;
+      opts.hidden = false;
+    }, 1200);
+  } else {
+    prompt.className = 'prompt pic';
+    prompt.innerHTML = '';
+    prompt.append(renderPic(turn.word.pic, { size: 'prompt' }));
+    slotsEl.hidden = false;
+    opts.hidden = false;
+  }
+
   function paint() {
     placed.forEach((ti, s) => {
       slotEls[s].textContent = ti === null ? '' : turn.tray[ti];
@@ -135,15 +198,30 @@ function renderBuild(turn) {
   function check() {
     const letters = placed.map(ti => turn.tray[ti]);
     const correct = isCorrect(turn, letters);
-    if (!correct) {
-      // Show the right spelling in the slots before moving on.
-      slotEls.forEach((el, s) => { el.classList.add('wrong'); setTimeout(() => {
-        el.classList.remove('wrong'); el.textContent = turn.word.w[s]; el.classList.add('filled', 'correct');
-      }, 500); });
-    } else {
+    if (correct) {
       slotEls.forEach(el => el.classList.add('correct'));
+      answer(letters, null);
+      return;
     }
+    const canRetry = retryAllowed(turn, attempts + 1);
+    slotEls.forEach(el => el.classList.add('wrong'));
+    // answer() first: it does the scoring/attempts accounting, and (only when retries are
+    // exhausted) sets busy itself and schedules the turn advance. Setting busy before this call
+    // would trip answer()'s own `if (busy) return;` guard and skip the accounting entirely.
     answer(letters, null);
+    busy = true; // hold slots/tray inert until the retry-reset (or reveal) below resolves
+    setTimeout(() => {
+      slotEls.forEach(el => el.classList.remove('wrong'));
+      if (canRetry) {
+        // slide letters back to the tray, empty the slots, let her rebuild
+        placed.forEach((ti, s) => { if (ti !== null) trayTiles[ti].classList.remove('used'); placed[s] = null; });
+        paint();
+        busy = false;
+      } else {
+        // out of retries: answer()'s own timeout is about to advance the turn, so leave busy true.
+        slotEls.forEach((el, s) => { el.textContent = turn.word.w[s]; el.classList.add('filled', 'correct'); });
+      }
+    }, 500);
   }
 }
 
@@ -154,7 +232,8 @@ function renderSentence(turn) {
   const [before, after] = turn.frame.split('{}');
   const blank = document.createElement('span');
   blank.className = 'blank';
-  blank.textContent = turn.word.e;
+  blank.innerHTML = '';
+  blank.append(renderPic(turn.word.pic, { size: 'prompt' }));
   prompt.append(document.createTextNode(before), blank, document.createTextNode(after));
   const opts = $('options');
   opts.className = 'options three';
@@ -166,13 +245,47 @@ function renderSentence(turn) {
   }
 }
 
-const RENDER = { read: renderRead, pick: renderPick, build: renderBuild, sentence: renderSentence };
+function renderFill(turn) {
+  const prompt = $('prompt');
+  prompt.className = 'prompt sentence';
+  prompt.innerHTML = '';
+  for (const part of turn.frame.split(/(\{\}|\{noun\})/)) {
+    if (part === '{}') {
+      const blank = document.createElement('span');
+      blank.className = 'blank sight-blank';
+      blank.textContent = '    ';
+      prompt.append(blank);
+    } else if (part === '{noun}') {
+      const n = document.createElement('span');
+      n.className = 'blank';
+      n.append(renderPic(turn.noun.pic, { size: 'prompt' }));
+      prompt.append(n);
+    } else if (part) {
+      prompt.append(document.createTextNode(part));
+    }
+  }
+  const opts = $('options');
+  opts.className = 'options three';
+  opts.innerHTML = '';
+  for (const o of turn.options) {
+    const label = turn.capitalise ? o.w.charAt(0).toUpperCase() + o.w.slice(1) : o.w;
+    const b = tile(label);
+    b.dataset.w = o.w;                       // answer compares the lowercase word
+    b.addEventListener('click', () => answer(o.w, b));
+    opts.append(b);
+  }
+}
+
+const RENDER = { read: renderRead, pick: renderPick, build: renderBuild, sentence: renderSentence, fill: renderFill };
 
 function showTurn() {
+  clearTimeout(lookTimer);
   if (turnIndex >= turns.length) return endRound();
   busy = false;
+  attempts = 0;
   $('slots').hidden = true;
-  turns[turnIndex] = refreshTurn(turns[turnIndex], state, WORDS, FRAMES, rng);
+  $('options').hidden = false;
+  turns[turnIndex] = refreshTurn(turns[turnIndex], state, ALL, FRAMES, rng);
   renderProgress();
   RENDER[turns[turnIndex].activity](turns[turnIndex]);
 }
@@ -180,26 +293,36 @@ function showTurn() {
 /** Resolve the current turn. `chosenEl` is the tapped tile (or null for build); marks it and advances. */
 function answer(value, chosenEl) {
   if (busy) return;
-  busy = true;
   const turn = turns[turnIndex];
   const correct = isCorrect(turn, value);
-  results[turnIndex] = correct;
-  state = applyAnswer(state, turn.word, correct);
+  state = applyAttempt(state, turn.word, correct, attempts);
   writeSave(state);
   renderStars();
   const tiles = [...$('options').querySelectorAll('.tile')];
-  for (const t of tiles) t.disabled = true;
   if (correct) {
-    roundStars += 1;
+    busy = true;
+    results[turnIndex] = attempts === 0;          // starred only when clean
+    for (const t of tiles) t.disabled = true;
     if (chosenEl) chosenEl.classList.add('correct');
-    $('progress').children[turnIndex]?.classList.add('star');
-    celebrate();
-  } else {
-    if (chosenEl) chosenEl.classList.add('wrong');
-    const right = tiles.find(t => t.textContent === turn.word.w || t.textContent === turn.word.e);
-    if (right) right.classList.add('correct');
+    if (turn.activity === 'fill' && chosenEl) {
+      $('prompt').querySelector('.sight-blank').textContent = chosenEl.textContent;
+    }
+    if (attempts === 0) {
+      roundStars += 1;
+      $('progress').children[turnIndex]?.classList.add('star');
+      celebrate();
+    }
+    setTimeout(() => { turnIndex += 1; showTurn(); }, 900);
+    return;
   }
-  setTimeout(() => { turnIndex += 1; showTurn(); }, correct ? 900 : 1500);
+  attempts += 1;
+  results[turnIndex] = false;
+  if (chosenEl) { chosenEl.classList.add('wrong'); chosenEl.disabled = true; }
+  if (retryAllowed(turn, attempts)) return;      // tiles: keep going on the same turn
+  // Build only: out of retries — reveal and move on.
+  busy = true;
+  for (const t of tiles) t.disabled = true;
+  setTimeout(() => { turnIndex += 1; showTurn(); }, 1500);
 }
 
 function celebrate() {
@@ -218,9 +341,9 @@ function celebrate() {
 
 function startRound() {
   if (turns.length && turnIndex < turns.length && !$('screen-turn').hidden) return;
-  state = introduceWords(state, WORDS);
+  state = introduceWords(state, ALL);
   writeSave(state);
-  turns = planRound(state, WORDS, FRAMES, rng);
+  turns = planRound(state, ALL, FRAMES, rng);
   turnIndex = 0;
   roundStars = 0;
   results = [];
@@ -236,6 +359,7 @@ function endRound() {
 }
 
 function goHome() {
+  clearTimeout(lookTimer);
   renderStars();
   renderWall($('home-wall'));
   showScreen('screen-home');
@@ -256,15 +380,22 @@ goHome();
 
 // --- grown-up corner ---------------------------------------------------------
 function renderGrownup() {
+  clearTimeout(lookTimer);
   const tbody = $('grownup-table').querySelector('tbody');
   tbody.innerHTML = '';
-  for (const w of WORDS) {
+  const addRow = w => {
     const lvl = state.levels[w.w];
     const tr = document.createElement('tr');
     const lvlText = lvl === undefined ? '–' : String(lvl);
-    tr.innerHTML = `<td>${w.e} ${w.w}</td><td>${w.tier}</td><td class="lvl-${lvl ?? 'none'}">${lvlText}</td>`;
+    const nameTd = document.createElement('td');
+    nameTd.append(renderPic(w.pic, { size: 'chip' }), document.createTextNode(` ${w.w}`));
+    tr.append(nameTd);
+    tr.insertAdjacentHTML('beforeend', `<td>${w.tier}</td><td class="lvl-${lvl ?? 'none'}">${lvlText}</td>`);
     tbody.append(tr);
-  }
+  };
+  for (const w of WORDS) addRow(w);
+  tbody.insertAdjacentHTML('beforeend', '<tr class="section"><td colspan="3">Sight words</td></tr>');
+  for (const w of SIGHT) addRow(w);
   // Reset guard: the adult must tap the written word "reset" among look-alikes.
   const box = $('reset-options');
   box.innerHTML = '';
@@ -272,7 +403,7 @@ function renderGrownup() {
     const b = tile(label);
     b.addEventListener('click', () => {
       if (label !== 'reset') { goHome(); return; }
-      state = initialState(WORDS);
+      state = initialState(ALL);
       writeSave(state);
       goHome();
     });
