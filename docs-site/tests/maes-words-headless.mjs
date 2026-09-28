@@ -57,7 +57,8 @@ for (let i = 0; i < 10; i++) {
   }
   if (isFill) {
     const blankText = await page.locator('#prompt .sight-blank').innerText();
-    assert.ok(blankText.trim().length > 0, 'a correct Fill answer writes the word into the blank');
+    const correctLabel = await page.locator('#options .tile.correct').innerText();
+    assert.equal(blankText.trim(), correctLabel.trim(), 'the blank shows exactly the answered tile\'s label');
   }
   await page.waitForTimeout(1100);
 }
@@ -81,6 +82,67 @@ const sectionCount = await page.locator('#grownup-table tr.section').count();
 assert.equal(sectionCount, 1, 'grown-up table has exactly one Sight words section row');
 const sectionText = await page.locator('#grownup-table tr.section').innerText();
 assert.equal(sectionText.trim(), 'Sight words');
+
+// Regression for the stale-lookTimer race: leave a sight-word Build's 1200ms look phase
+// (via the Grown-up corner) before it fires, then start a fresh round and confirm the new
+// turn's prompt is intact rather than wiped/force-revealed by the old timer firing late.
+{
+  const page3 = await browser.newPage({ viewport: { width: 390, height: 844 } });
+  const p3errors = [];
+  page3.on('pageerror', e => p3errors.push(String(e)));
+  await page3.goto('http://localhost:8000/maes-words/');
+  await page3.evaluate(() => localStorage.setItem('maes-words:v1', JSON.stringify({
+    version: 1, stars: 0, learnedOrder: [], levels: { cat: 2, dog: 2, the: 2 } })));
+  await page3.reload();
+  await page3.click('#play-btn');
+
+  const isSightBuildLook = async () => {
+    const cls = await page3.locator('#options').getAttribute('class').catch(() => '');
+    if (!cls.includes('tray')) return false;
+    const slotsHidden = await page3.locator('#slots').evaluate(e => e.hidden).catch(() => false);
+    if (!slotsHidden) return false;
+    const text = await page3.locator('#prompt').innerText().catch(() => '');
+    return text.trim().length > 0;
+  };
+  let hitLookPhase = false;
+  for (let step = 0; step < 200 && !hitLookPhase; step++) {
+    if (await isSightBuildLook()) { hitLookPhase = true; break; }
+    const cls = await page3.locator('#options').getAttribute('class').catch(() => '');
+    if (cls.includes('tray')) {
+      const slotsHidden = await page3.locator('#slots').evaluate(e => e.hidden).catch(() => true);
+      if (!slotsHidden) {
+        const btn = page3.locator('#options .tile:not(.used):not([disabled])').first();
+        if (await btn.count() > 0) await btn.click({ timeout: 1000 }).catch(() => {});
+      }
+    } else {
+      const t = page3.locator('#options .tile:not([disabled])').first();
+      if (await t.count() > 0) await t.click({ timeout: 1000 }).catch(() => {});
+    }
+    await page3.waitForTimeout(100);
+  }
+  assert.ok(hitLookPhase, 'never reached the sight-word build look phase to test the race fix');
+
+  // Leave mid-look-phase (well before the 1200ms reveal) via the Grown-up corner's long-press.
+  await page3.evaluate(() => document.getElementById('title').dispatchEvent(new PointerEvent('pointerdown')));
+  await page3.waitForSelector('#screen-grownup:not([hidden])', { timeout: 3000 });
+  await page3.evaluate(() => document.getElementById('title').dispatchEvent(new PointerEvent('pointerup')));
+
+  // Wait past when the stale timer would have fired, then start a brand new round.
+  await page3.waitForTimeout(1500);
+  await page3.locator('#grownup-back').click();
+  await page3.locator('#play-btn').click();
+  await page3.waitForSelector('#options .tile, #options .tray .tile');
+
+  // The new turn's prompt must not have been wiped/force-revealed by the stale timer: it
+  // must show real content (a word, a sentence, or a picture), and slots must not be a
+  // spuriously-revealed empty bar with no tray tiles selectable.
+  const promptText = (await page3.locator('#prompt').innerText()).trim();
+  const promptHasPic = await page3.locator('#prompt .pic').count() > 0;
+  assert.ok(promptText.length > 0 || promptHasPic, 'stale look-timer wiped the new turn\'s prompt');
+  assert.deepEqual(p3errors, []);
+  await page3.close();
+  console.log('stale look-timer regression check passed');
+}
 
 // credits.html: no page errors.
 const creditsErrors = [];
