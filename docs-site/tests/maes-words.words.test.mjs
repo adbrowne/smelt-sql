@@ -73,3 +73,14 @@ test('every pos used by a word has at least one frame, so framesFor never return
   const framePoses = new Set(FRAMES.map(f => f.pos ?? 'noun'));
   for (const pos of wordPoses) assert.ok(framePoses.has(pos), `no frame has pos ${pos}`);
 });
+
+test('the colour words are present as colour tiles and adjectives', () => {
+  for (const c of ['red', 'blue', 'pink', 'grey']) {
+    const e = WORDS.find(x => x.w === c);
+    assert.ok(e, `missing ${c}`);
+    assert.equal(e.pic.kind, 'colour');
+    assert.equal(e.pos, 'adj');
+    assert.equal(e.noA, true);
+  }
+  for (const e of WORDS) if (e.pic.kind === 'colour') assert.equal(e.pos, 'adj', `${e.w} colour but not adj`);
+});

@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { emptyState, shuffle, editDistance, distractors, letterTray, makeTurn, isCorrect,
          planRound, ROUND_LENGTH, ACTIVITY_FOR_LEVEL, refreshTurn, framesFor, resolveFrame } from '../docs/maes-words/game.js';
 
-const mk = (w, tier) => ({ w, e: w.toUpperCase(), tier });
+const mk = (w, tier, extra = {}) => ({ w, e: w.toUpperCase(), tier, ...extra });
 const BANK = [
   ...['cat', 'cot', 'cut', 'dog', 'dig', 'sun', 'bed', 'pig', 'bus', 'egg', 'hat', 'ox'].map(w => mk(w, 1)),
   ...['frog', 'milk', 'duck', 'bell'].map(w => mk(w, 2)),
@@ -247,4 +247,12 @@ test('makeTurn never picks an "a {}" frame for a vowel-initial word, across many
     const t = makeTurn(egg, 3, bank, FRAMES, seeded(seed));
     assert.doesNotMatch(t.frame, /\ba \{\}/, `seed ${seed}: ${t.frame}`);
   }
+});
+
+test('a colour word in Read is shown among the other colours', () => {
+  const colours = ['red', 'blue', 'pink', 'grey'].map(w => mk(w, 1, { pic: { kind: 'colour', css: '#000000' }, pos: 'adj', noA: true }));
+  const bank = [...BANK, ...colours];
+  const t = makeTurn(colours[0], 0, bank, FRAMES, seeded(3));
+  assert.equal(t.options.length, 4);
+  assert.ok(t.options.every(o => o.pic?.kind === 'colour'), t.options.map(o => o.w).join(','));
 });

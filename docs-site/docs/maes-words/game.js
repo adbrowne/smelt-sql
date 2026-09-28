@@ -102,7 +102,11 @@ export function editDistance(a, b) {
 
 /** Look-alike words from the bank, closest first, ties by length difference then bank order. */
 export function distractors(word, words, n) {
-  return words
+  const isColour = x => x.pic?.kind === 'colour';
+  const pool = isColour(word) && words.filter(x => isColour(x) && x.w !== word.w).length >= n
+    ? words.filter(isColour)
+    : words;
+  return pool
     .map((x, i) => ({ x, i }))
     .filter(({ x }) => x.w !== word.w)
     .sort((p, q) =>
