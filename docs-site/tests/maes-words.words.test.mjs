@@ -74,7 +74,7 @@ test('every pos used by a word has at least one frame, so framesFor never return
   for (const pos of wordPoses) assert.ok(framePoses.has(pos), `no frame has pos ${pos}`);
 });
 
-test('pos is only ever verb or adj where present, and verbs/adjs never take noA-less "a" frames by accident', () => {
+test('pos is only ever verb or adj where present', () => {
   for (const x of WORDS) if ('pos' in x) assert.ok(['verb', 'adj'].includes(x.pos), `${x.w} pos ${x.pos}`);
 });
 
