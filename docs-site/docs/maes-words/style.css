@@ -116,3 +116,6 @@ main {
 .prompt.pic { min-height: 170px; }
 .prompt.sentence .blank .pic-img, .prompt.sentence .blank .pic-colour { width: 72px; height: 72px; vertical-align: middle; }
 .prompt.sentence .blank .pic-emoji { font-size: 64px; }
+
+.sight-blank { border-bottom: 5px solid var(--pink); min-width: 96px; display: inline-block; }
+#grownup-table tr.section td { font-weight: 800; color: var(--pink-dark); padding-top: 14px; }

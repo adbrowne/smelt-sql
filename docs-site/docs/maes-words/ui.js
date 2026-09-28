@@ -1,17 +1,19 @@
 // docs-site/docs/maes-words/ui.js
-import { WORDS, FRAMES } from './words.js';
+import { WORDS, SIGHT, FRAMES } from './words.js';
 import { initialState, introduceWords, planRound, isCorrect, learnedWords,
          shuffle, ROUND_LENGTH, refreshTurn, applyAttempt, retryAllowed } from './game.js';
 import { KEY, load, serialize } from './storage.js';
+
+const ALL = [...WORDS, ...SIGHT];
 
 const $ = id => document.getElementById(id);
 const screens = ['screen-home', 'screen-turn', 'screen-end', 'screen-grownup'];
 const rng = () => Math.random();
 
-const readSave = () => { try { return load(localStorage.getItem(KEY), WORDS); } catch { return null; } };
+const readSave = () => { try { return load(localStorage.getItem(KEY), ALL); } catch { return null; } };
 const writeSave = s => { try { localStorage.setItem(KEY, serialize(s)); } catch { /* private mode: play in memory */ } };
 
-let state = readSave() ?? initialState(WORDS);
+let state = readSave() ?? initialState(ALL);
 let turns = [];
 let turnIndex = 0;
 let roundStars = 0;
@@ -28,7 +30,7 @@ function renderStars() { $('star-count').textContent = String(state.stars); }
 
 function renderWall(el) {
   el.innerHTML = '';
-  for (const w of learnedWords(state, WORDS)) {
+  for (const w of learnedWords(state, ALL)) {
     const chip = document.createElement('div');
     chip.className = 'chip';
     chip.append(renderPic(w.pic, { size: 'chip' }), Object.assign(document.createElement('span'), { textContent: w.w }));
@@ -125,16 +127,13 @@ function renderPick(turn) {
 
 function renderBuild(turn) {
   const prompt = $('prompt');
-  prompt.className = 'prompt pic';
-  prompt.innerHTML = '';
-  prompt.append(renderPic(turn.word.pic, { size: 'prompt' }));
-
   const slotsEl = $('slots');
-  slotsEl.hidden = false;
+  const opts = $('options');
+  const sight = !turn.word.pic;
+
   slotsEl.innerHTML = '';
   const placed = Array(turn.word.w.length).fill(null); // index into tray, or null
 
-  const opts = $('options');
   opts.className = 'tray';
   opts.innerHTML = '';
   const trayTiles = turn.tray.map((ch, i) => {
@@ -164,6 +163,25 @@ function renderBuild(turn) {
     slotsEl.append(d);
     return d;
   });
+
+  if (sight) {
+    // Look-then-spell: show the word briefly, then hide it and reveal the tray.
+    prompt.className = 'prompt';
+    prompt.textContent = turn.word.w;
+    slotsEl.hidden = true;
+    opts.hidden = true;
+    setTimeout(() => {
+      prompt.textContent = '';
+      slotsEl.hidden = false;
+      opts.hidden = false;
+    }, 1200);
+  } else {
+    prompt.className = 'prompt pic';
+    prompt.innerHTML = '';
+    prompt.append(renderPic(turn.word.pic, { size: 'prompt' }));
+    slotsEl.hidden = false;
+    opts.hidden = false;
+  }
 
   function paint() {
     placed.forEach((ti, s) => {
@@ -222,14 +240,46 @@ function renderSentence(turn) {
   }
 }
 
-const RENDER = { read: renderRead, pick: renderPick, build: renderBuild, sentence: renderSentence };
+function renderFill(turn) {
+  const prompt = $('prompt');
+  prompt.className = 'prompt sentence';
+  prompt.innerHTML = '';
+  for (const part of turn.frame.split(/(\{\}|\{noun\})/)) {
+    if (part === '{}') {
+      const blank = document.createElement('span');
+      blank.className = 'blank sight-blank';
+      blank.textContent = '    ';
+      prompt.append(blank);
+    } else if (part === '{noun}') {
+      const n = document.createElement('span');
+      n.className = 'blank';
+      n.append(renderPic(turn.noun.pic, { size: 'prompt' }));
+      prompt.append(n);
+    } else if (part) {
+      prompt.append(document.createTextNode(part));
+    }
+  }
+  const opts = $('options');
+  opts.className = 'options three';
+  opts.innerHTML = '';
+  for (const o of turn.options) {
+    const label = turn.capitalise ? o.w.charAt(0).toUpperCase() + o.w.slice(1) : o.w;
+    const b = tile(label);
+    b.dataset.w = o.w;                       // answer compares the lowercase word
+    b.addEventListener('click', () => answer(o.w, b));
+    opts.append(b);
+  }
+}
+
+const RENDER = { read: renderRead, pick: renderPick, build: renderBuild, sentence: renderSentence, fill: renderFill };
 
 function showTurn() {
   if (turnIndex >= turns.length) return endRound();
   busy = false;
   attempts = 0;
   $('slots').hidden = true;
-  turns[turnIndex] = refreshTurn(turns[turnIndex], state, WORDS, FRAMES, rng);
+  $('options').hidden = false;
+  turns[turnIndex] = refreshTurn(turns[turnIndex], state, ALL, FRAMES, rng);
   renderProgress();
   RENDER[turns[turnIndex].activity](turns[turnIndex]);
 }
@@ -248,6 +298,9 @@ function answer(value, chosenEl) {
     results[turnIndex] = attempts === 0;          // starred only when clean
     for (const t of tiles) t.disabled = true;
     if (chosenEl) chosenEl.classList.add('correct');
+    if (turn.activity === 'fill' && chosenEl) {
+      $('prompt').querySelector('.sight-blank').textContent = chosenEl.textContent;
+    }
     if (attempts === 0) {
       roundStars += 1;
       $('progress').children[turnIndex]?.classList.add('star');
@@ -282,9 +335,9 @@ function celebrate() {
 
 function startRound() {
   if (turns.length && turnIndex < turns.length && !$('screen-turn').hidden) return;
-  state = introduceWords(state, WORDS);
+  state = introduceWords(state, ALL);
   writeSave(state);
-  turns = planRound(state, WORDS, FRAMES, rng);
+  turns = planRound(state, ALL, FRAMES, rng);
   turnIndex = 0;
   roundStars = 0;
   results = [];
@@ -322,7 +375,7 @@ goHome();
 function renderGrownup() {
   const tbody = $('grownup-table').querySelector('tbody');
   tbody.innerHTML = '';
-  for (const w of WORDS) {
+  const addRow = w => {
     const lvl = state.levels[w.w];
     const tr = document.createElement('tr');
     const lvlText = lvl === undefined ? '–' : String(lvl);
@@ -331,7 +384,10 @@ function renderGrownup() {
     tr.append(nameTd);
     tr.insertAdjacentHTML('beforeend', `<td>${w.tier}</td><td class="lvl-${lvl ?? 'none'}">${lvlText}</td>`);
     tbody.append(tr);
-  }
+  };
+  for (const w of WORDS) addRow(w);
+  tbody.insertAdjacentHTML('beforeend', '<tr class="section"><td colspan="3">Sight words</td></tr>');
+  for (const w of SIGHT) addRow(w);
   // Reset guard: the adult must tap the written word "reset" among look-alikes.
   const box = $('reset-options');
   box.innerHTML = '';
@@ -339,7 +395,7 @@ function renderGrownup() {
     const b = tile(label);
     b.addEventListener('click', () => {
       if (label !== 'reset') { goHome(); return; }
-      state = initialState(WORDS);
+      state = initialState(ALL);
       writeSave(state);
       goHome();
     });
