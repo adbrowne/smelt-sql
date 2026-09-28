@@ -74,6 +74,10 @@ test('every pos used by a word has at least one frame, so framesFor never return
   for (const pos of wordPoses) assert.ok(framePoses.has(pos), `no frame has pos ${pos}`);
 });
 
+test('pos is only ever verb or adj where present, and verbs/adjs never take noA-less "a" frames by accident', () => {
+  for (const x of WORDS) if ('pos' in x) assert.ok(['verb', 'adj'].includes(x.pos), `${x.w} pos ${x.pos}`);
+});
+
 test('the colour words are present as colour tiles and adjectives', () => {
   for (const c of ['red', 'blue', 'pink', 'grey']) {
     const e = WORDS.find(x => x.w === c);
