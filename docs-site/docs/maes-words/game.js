@@ -100,10 +100,11 @@ export function editDistance(a, b) {
   return dp[a.length][b.length];
 }
 
-/** Look-alike words from the bank, closest first, ties by length difference then bank order. */
-export function distractors(word, words, n) {
+/** Look-alike words from the bank, closest first, ties by length difference then bank order.
+ *  When pictured is true and the word is a colour with ≥n other colours, returns only colours. */
+export function distractors(word, words, n, { pictured = false } = {}) {
   const isColour = x => x.pic?.kind === 'colour';
-  const pool = isColour(word) && words.filter(x => isColour(x) && x.w !== word.w).length >= n
+  const pool = pictured && isColour(word) && words.filter(x => isColour(x) && x.w !== word.w).length >= n
     ? words.filter(isColour)
     : words;
   return pool
@@ -171,7 +172,7 @@ export function makeTurn(word, level, words, frames, rng) {
   const activity = ACTIVITY_FOR_LEVEL[Math.min(level, ACTIVITY_FOR_LEVEL.length - 1)];
   switch (activity) {
     case 'read':
-      return { activity, word, options: shuffle([word, ...distractors(word, words, 3)], rng) };
+      return { activity, word, options: shuffle([word, ...distractors(word, words, 3, { pictured: true })], rng) };
     case 'pick':
       return { activity, word, options: shuffle([word, ...distractors(word, words, 2)], rng) };
     case 'build':

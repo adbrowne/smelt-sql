@@ -256,3 +256,19 @@ test('a colour word in Read is shown among the other colours', () => {
   assert.equal(t.options.length, 4);
   assert.ok(t.options.every(o => o.pic?.kind === 'colour'), t.options.map(o => o.w).join(','));
 });
+
+test('a colour word in Pick is shown among edit-distance look-alikes, not only colours', () => {
+  const colours = ['red', 'blue', 'pink', 'grey'].map(w => mk(w, 1, { pic: { kind: 'colour', css: '#000000' }, pos: 'adj', noA: true }));
+  const bank = [...BANK, ...colours];
+  const t = makeTurn(colours[0], 1, bank, FRAMES, seeded(5));
+  assert.equal(t.options.length, 3);
+  assert.ok(t.options.some(o => o.pic?.kind !== 'colour'), `all colours: ${t.options.map(o => o.w).join(',')}`);
+});
+
+test('a colour word in Sentence is shown among edit-distance look-alikes, not only colours', () => {
+  const colours = ['red', 'blue', 'pink', 'grey'].map(w => mk(w, 1, { pic: { kind: 'colour', css: '#000000' }, pos: 'adj', noA: true }));
+  const bank = [...BANK, ...colours];
+  const t = makeTurn(colours[0], 3, bank, FRAMES, seeded(7));
+  assert.equal(t.options.length, 3);
+  assert.ok(t.options.some(o => o.pic?.kind !== 'colour'), `all colours: ${t.options.map(o => o.w).join(',')}`);
+});
