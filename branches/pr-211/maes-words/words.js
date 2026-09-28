@@ -45,6 +45,11 @@ export const WORDS = [
   { w: 'two', tier: 1, pic: { kind: 'emoji', text: '2️⃣' }, noA: true },
   { w: 'six', tier: 1, pic: { kind: 'emoji', text: '6️⃣' }, noA: true },
   { w: 'ten', tier: 1, pic: { kind: 'emoji', text: '🔟' }, noA: true },
+  // colours: shown as a solid tile, never an image
+  { w: 'red',  tier: 1, pic: { kind: 'colour', css: '#e53935' }, pos: 'adj', noA: true },
+  { w: 'blue', tier: 2, pic: { kind: 'colour', css: '#1e88e5' }, pos: 'adj', noA: true },
+  { w: 'pink', tier: 2, pic: { kind: 'colour', css: '#f06292' }, pos: 'adj', noA: true },
+  { w: 'grey', tier: 3, pic: { kind: 'colour', css: '#9e9e9e' }, pos: 'adj', noA: true },
   // tier 2
   { w: 'frog', tier: 2, pic: { kind: 'emoji', text: '🐸' } },
   { w: 'milk', tier: 2, pic: { kind: 'emoji', text: '🥛' }, noA: true },
