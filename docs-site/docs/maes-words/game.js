@@ -178,10 +178,10 @@ export function letterTray(word, words, rng) {
 
 export const posOf = word => word.pos ?? 'noun';
 
-/** Does this frame admit this word: same part of speech, and no "a {noun}" for vowel-initial,
- *  mass-noun or number words (those need "the {noun}" instead). */
+/** Does this frame admit this word: same part of speech, and no "a {noun}" (sentence-initial "A {noun}"
+ *  included) for vowel-initial, mass-noun or number words (those need "the {noun}" instead). */
 export const frameAdmits = (word, frame) =>
-  (frame.pos ?? 'noun') === posOf(word) && !((word.noA || /^[aeiou]/.test(word.w)) && /\ba \{noun\}/.test(frame.text));
+  (frame.pos ?? 'noun') === posOf(word) && !((word.noA || /^[aeiou]/.test(word.w)) && /\ba \{noun\}/i.test(frame.text));
 
 /** Frames usable for a word: same part of speech; and no "a {noun}" for vowel-initial, mass-noun or number words. */
 export function framesFor(word, frames) {
@@ -201,8 +201,9 @@ export function resolveFrame(frame, sight) {
   return text.replace('{noun}', '{}');
 }
 
-/** Sight words that do NOT fit the frame; easy (level 0) = different length first, then closest remaining
- *  by bank order; otherwise (level >= 1) closest by edit distance, i.e. genuine look-alikes. */
+/** Sight words that do NOT fit the frame; easy (level 0) ranks a *different* length from the target
+ *  first (largest length gap first), ties broken by bank order; otherwise (level >= 1) ranks by edit
+ *  distance, i.e. genuine look-alikes. */
 export function fillDistractors(sight, frame, sightBank, level, n) {
   const pool = sightBank.filter(x => x.w !== sight.w && !frame.fits.includes(x.w));
   if (level === 0) {
@@ -215,25 +216,36 @@ export function fillDistractors(sight, frame, sightBank, level, n) {
   return distractors(sight, pool.concat([sight]), n);
 }
 
+/** Choose a (frame, noun) pair for a Fill turn on `sight`: the frame's `fits` must include the sight
+ *  word and the noun must obey the frame's part of speech and article (`frameAdmits`) — the two are
+ *  resolved together so a frame's own "a {noun}" is never rewritten, only ever paired with a noun it
+ *  already admits. Nouns from `introduced` are preferred; if none of them admits any fitting frame,
+ *  every noun of the matching part of speech is considered instead. Picks uniformly among whichever
+ *  set of pairs applies. */
+function pickFillFrameAndNoun(sight, words, frames, introduced, rng) {
+  const fitting = frames.filter(f => f.fits.includes(sight.w));
+  const pairsOver = pool => {
+    const pairs = [];
+    for (const frame of fitting) {
+      const pos = frame.pos ?? 'noun';
+      for (const noun of pool.filter(x => posOf(x) === pos && frameAdmits(x, frame))) pairs.push({ frame, noun });
+    }
+    return pairs;
+  };
+  const introducedNouns = nouns(words).filter(x => introduced.has(x.w));
+  const preferred = pairsOver(introducedNouns);
+  const pairs = preferred.length ? preferred : pairsOver(nouns(words));
+  return pairs[Math.floor(rng() * pairs.length)];
+}
+
 /** A Fill turn: the sight word is the answer, blanked out of a sentence that also carries a pictured
- *  noun/verb/adj. The noun is preferred from `ctx.introduced` and must obey the frame's part of speech
- *  and article; when no introduced word admits the frame's article ("a" vs vowel/noA), the frame's own
- *  "a {noun}" is rewritten to "the {noun}" rather than reading ungrammatically. */
+ *  noun/verb/adj chosen jointly with the frame so the article always agrees (see `pickFillFrameAndNoun`). */
 function makeFillTurn(sight, level, words, frames, rng, ctx) {
-  const usableFrames = frames.filter(f => f.fits.includes(sight.w));
-  const frame = usableFrames[Math.floor(rng() * usableFrames.length)];
-  const pos = frame.pos ?? 'noun';
   const introduced = ctx.introduced ?? new Set(nouns(words).map(x => x.w));
-  const byPos = nouns(words).filter(x => posOf(x) === pos);
-  const introducedPool = byPos.filter(x => introduced.has(x.w));
-  const preferred = introducedPool.length ? introducedPool : byPos;
-  const admitting = preferred.filter(x => frameAdmits(x, frame));
-  const pool = admitting.length ? admitting : preferred;
-  const noun = pool[Math.floor(rng() * pool.length)];
-  const text = frameAdmits(noun, frame) ? frame.text : frame.text.replace(/\ba \{noun\}/, 'the {noun}');
+  const { frame, noun } = pickFillFrameAndNoun(sight, words, frames, introduced, rng);
   return {
     activity: 'fill', word: sight, noun, fits: frame.fits,
-    frame: text.replace('{sight}', '{}'),
+    frame: frame.text.replace('{sight}', '{}'),
     capitalise: frame.text.startsWith('{sight}'),
     options: shuffle([sight, ...fillDistractors(sight, frame, sights(words), level, 2)], rng),
   };

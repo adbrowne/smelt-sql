@@ -13,6 +13,7 @@ const FRAMES = [
   { text: 'I {sight} the {noun}', fits: ['like', 'see'] },
   { text: 'Here is a {noun}', fits: [] },
   { text: '{sight} is a {noun}', fits: ['here', 'this'] },
+  { text: '{sight} is the {noun}', fits: ['here', 'this'] },
   { text: 'I can {noun}', fits: [], pos: 'verb' },
   { text: 'It is {noun}', fits: [], pos: 'adj' },
   { text: '{sight} {noun} is big', fits: ['the'] },
@@ -324,6 +325,18 @@ test('a Fill noun obeys the frame\'s article', () => {
   for (let seed = 1; seed <= 40; seed++) {
     const t = makeTurn(sightByName('here'), 0, ALL, FRAMES, seeded(seed), { introduced });
     assert.doesNotMatch(t.frame, /\ba \{noun\}/, t.frame);
+  }
+});
+
+test('when the only fitting frame needs "a {noun}" and every introduced noun is vowel-initial, the noun ' +
+     'comes from the wider pool (never the introduced one) and the frame text is unchanged', () => {
+  const frames = [{ text: 'A {noun} is {sight}', fits: ['here'] }];
+  const introduced = new Set(['egg']);
+  for (let seed = 1; seed <= 40; seed++) {
+    const t = makeTurn(sightByName('here'), 0, ALL, frames, seeded(seed), { introduced });
+    assert.notEqual(t.noun.w, 'egg', `seed ${seed}: introduced vowel noun used`);
+    assert.doesNotMatch(t.noun.w, /^[aeiou]/, `seed ${seed}: noun ${t.noun.w} still vowel-initial`);
+    assert.equal(t.frame, 'A {noun} is {}', `seed ${seed}: frame text was rewritten`);
   }
 });
 
