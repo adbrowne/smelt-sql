@@ -58,8 +58,7 @@ export const PICS = [
   { w: 'lock', tier: 2, src: 'arasaac', id: 3261 },
   { w: 'bull', tier: 2, src: 'arasaac', id: 2595 },
   { w: 'paw',  tier: 2, src: 'mulberry', id: 'paw' },
-  { w: 'salt', tier: 2, src: 'mulberry', id: 'salt' },
-  { w: 'cart', tier: 2, src: 'mulberry', id: 'cart' },
+  { w: 'salt', tier: 2, src: 'mulberry', id: 'salt', noA: true },
   // tier 3 nouns
   { w: 'soup', tier: 3, src: 'mulberry', id: 'soup', noA: true },
   { w: 'comb', tier: 3, src: 'mulberry', id: 'comb' },
@@ -79,7 +78,7 @@ export const PICS = [
   { w: 'jeep', tier: 3, src: 'mulberry', id: 'jeep' },
   { w: 'cage', tier: 3, src: 'mulberry', id: 'cage' },
   { w: 'tie',  tier: 3, src: 'mulberry', id: 'tie' },
-  { w: 'glue', tier: 3, src: 'mulberry', id: 'glue' },
+  { w: 'glue', tier: 3, src: 'mulberry', id: 'glue', noA: true },
   // verbs (Mulberry names verbs "<verb>_,_to")
   { w: 'run',  tier: 1, src: 'mulberry', id: 'run_,_to', pos: 'verb' },
   { w: 'sit',  tier: 1, src: 'mulberry', id: 'sit_,_to', pos: 'verb' },
