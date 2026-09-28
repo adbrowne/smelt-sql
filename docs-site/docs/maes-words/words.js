@@ -175,6 +175,13 @@ export const WORDS = [
 // END GENERATED PICS
 ];
 
+// Sight words: taught by Fill, never pictured. `a` and `I` appear only as frame text.
+export const SIGHT = [
+  ...['the', 'is', 'and', 'my', 'in', 'on', 'up', 'it', 'at', 'go', 'we', 'to'].map(w => ({ w, tier: 1, sight: true })),
+  ...['here', 'like', 'see', 'you', 'has', 'can', 'this', 'are', 'was'].map(w => ({ w, tier: 2, sight: true })),
+  ...['look', 'come', 'for', 'said', 'they', 'with', 'have'].map(w => ({ w, tier: 3, sight: true })),
+];
+
 // Frames: `{noun}` is the pictured word's slot (any part of speech named by `pos`, default noun);
 // `{sight}` is an optional sight-word slot and `fits` lists EVERY sight word that makes the sentence right.
 export const FRAMES = [
@@ -192,4 +199,24 @@ export const FRAMES = [
   { text: 'Look at me {noun}',      fits: [], pos: 'verb' },
   { text: 'It is {noun}',           fits: [], pos: 'adj' },
   { text: '{sight} is {noun}',      fits: ['it', 'this'], pos: 'adj' },
+  // sentences built around the sight bank: `fits` covers every sight word that reads correctly
+  { text: 'The {noun} {sight} big',        fits: ['is', 'was'] },
+  { text: 'Come {sight} see the {noun}',   fits: ['and'] },
+  { text: '{sight} like the {noun}',       fits: ['we', 'you', 'they'] },
+  { text: 'Look {sight} the {noun}',       fits: ['at'] },
+  { text: 'I {sight} to the {noun}',       fits: ['go', 'come'] },
+  { text: 'This is {sight} the {noun}',    fits: ['for'] },
+  { text: '{sight} {noun} is here',        fits: ['my', 'the', 'this'] },
+  { text: 'I {sight} a {noun}',            fits: ['see', 'like', 'have'] },
+  { text: 'The {noun} {sight} a hat',      fits: ['has'] },
+  { text: 'Here {sight} the {noun}',       fits: ['is'] },
+  { text: 'I {sight} see the {noun}',      fits: ['can'] },
+  { text: 'The {noun} is {sight} the box', fits: ['in', 'on'] },
+  { text: 'The {noun} {sight} up',         fits: ['is', 'was'] },
+  { text: 'The {noun} {sight} with me',    fits: ['is', 'was'] },
+  { text: '"Look," {sight} the {noun}',    fits: ['said'] },
+  { text: 'The {noun} is {sight} me',      fits: ['with', 'for'] },
+  { text: 'You {sight} very {noun}',       fits: ['are'], pos: 'adj' },
+  { text: '{sight} at the {noun}',         fits: ['look'] },
+  { text: 'I go {sight} the {noun}',       fits: ['to'] },
 ];

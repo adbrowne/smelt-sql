@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { WORDS, FRAMES } from '../docs/maes-words/words.js';
+import { WORDS, SIGHT, FRAMES } from '../docs/maes-words/words.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const GAME_DIR = join(HERE, '..', 'docs', 'maes-words');
@@ -76,6 +76,26 @@ test('every pos used by a word has at least one frame, so framesFor never return
 
 test('pos is only ever verb or adj where present', () => {
   for (const x of WORDS) if ('pos' in x) assert.ok(['verb', 'adj'].includes(x.pos), `${x.w} pos ${x.pos}`);
+});
+
+test('sight words are 2-4 lowercase letters, unique, tiered, flagged, and disjoint from WORDS', () => {
+  assert.ok(SIGHT.length >= 20, `only ${SIGHT.length} sight words`);
+  const ws = new Set(WORDS.map(x => x.w));
+  const seen = new Set();
+  for (const s of SIGHT) {
+    assert.match(s.w, /^[a-z]{2,4}$/, `bad sight word ${s.w}`);
+    assert.equal(s.sight, true, `${s.w} not flagged`);
+    assert.ok([1, 2, 3].includes(s.tier), `bad tier ${s.w}`);
+    assert.ok(!ws.has(s.w), `${s.w} is in both banks`);
+    assert.ok(!seen.has(s.w), `duplicate sight ${s.w}`); seen.add(s.w);
+  }
+  assert.ok(SIGHT.filter(s => s.tier === 1).length >= 6, 'tier-1 sight too small');
+});
+
+test('every frame fit is a SIGHT word, and every sight word fits at least one frame', () => {
+  const sight = new Set(SIGHT.map(s => s.w));
+  for (const f of FRAMES) for (const s of f.fits) assert.ok(sight.has(s), `${s} in fits of "${f.text}" is not a SIGHT word`);
+  for (const s of SIGHT) assert.ok(FRAMES.some(f => f.fits.includes(s.w)), `no frame for sight word ${s.w}`);
 });
 
 test('the colour words are present as colour tiles and adjectives', () => {

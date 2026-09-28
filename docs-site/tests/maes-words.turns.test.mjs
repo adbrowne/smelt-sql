@@ -1,7 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { emptyState, shuffle, editDistance, distractors, letterTray, makeTurn, isCorrect,
-         planRound, ROUND_LENGTH, ACTIVITY_FOR_LEVEL, refreshTurn, framesFor, resolveFrame } from '../docs/maes-words/game.js';
+         planRound, ROUND_LENGTH, ACTIVITY_FOR_LEVEL, refreshTurn, framesFor, resolveFrame,
+         activityFor, SIGHT_ACTIVITY_FOR_LEVEL, fillDistractors } from '../docs/maes-words/game.js';
 
 const mk = (w, tier, extra = {}) => ({ w, e: w.toUpperCase(), tier, ...extra });
 const BANK = [
@@ -14,9 +15,14 @@ const FRAMES = [
   { text: '{sight} is a {noun}', fits: ['here', 'this'] },
   { text: 'I can {noun}', fits: [], pos: 'verb' },
   { text: 'It is {noun}', fits: [], pos: 'adj' },
+  { text: '{sight} {noun} is big', fits: ['the'] },
+  { text: 'The {noun} {sight} here', fits: ['is'] },
 ];
 const byName = w => BANK.find(x => x.w === w);
 const withLevels = levels => ({ ...emptyState(), levels: { ...levels } });
+const SIGHTS = ['the', 'is', 'my', 'in', 'on', 'it', 'here', 'like', 'see', 'can', 'this', 'up', 'have', 'was'].map(w => ({ w, tier: 1, sight: true }));
+const ALL = [...BANK, ...SIGHTS];
+const sightByName = w => SIGHTS.find(x => x.w === w);
 
 // mulberry32: deterministic rng for tests
 const seeded = seed => () => { seed |= 0; seed = seed + 0x6D2B79F5 | 0;
@@ -271,4 +277,84 @@ test('a colour word in Sentence is shown among edit-distance look-alikes, not on
   const t = makeTurn(colours[0], 3, bank, FRAMES, seeded(7));
   assert.equal(t.options.length, 3);
   assert.ok(t.options.some(o => o.pic?.kind !== 'colour'), `all colours: ${t.options.map(o => o.w).join(',')}`);
+});
+
+test('activityFor: nouns use the noun ladder, sight words the sight ladder', () => {
+  assert.deepEqual([0, 1, 2, 3].map(l => activityFor(byName('cat'), l)), ['read', 'pick', 'build', 'sentence']);
+  assert.deepEqual([0, 1, 2, 3].map(l => activityFor(sightByName('the'), l)), SIGHT_ACTIVITY_FOR_LEVEL);
+  assert.deepEqual(SIGHT_ACTIVITY_FOR_LEVEL, ['fill', 'fill', 'build', 'fill']);
+});
+
+test('a Fill turn blanks the sight word, fills a noun, and offers exactly one fitting option', () => {
+  const introduced = new Set(['cat', 'dog', 'egg']);
+  for (let seed = 1; seed <= 40; seed++) {
+    const t = makeTurn(sightByName('like'), 0, ALL, FRAMES, seeded(seed), { introduced });
+    assert.equal(t.activity, 'fill');
+    assert.equal((t.frame.match(/\{\}/g) || []).length, 1, t.frame);
+    assert.equal((t.frame.match(/\{noun\}/g) || []).length, 1, t.frame);
+    assert.ok(introduced.has(t.noun.w), `noun ${t.noun.w} not introduced`);
+    assert.equal(t.options.length, 3);
+    assert.equal(t.options.filter(o => o.w === 'like').length, 1);
+    assert.ok(t.fits.includes('like'));
+    for (const o of t.options) if (o.w !== 'like') assert.ok(!t.fits.includes(o.w), `${o.w} also fits "${t.frame}"`);
+    assert.equal(isCorrect(t, 'like'), true);
+    assert.equal(isCorrect(t, 'see'), false);
+  }
+});
+
+test('fill distractors are never in the frame\'s fits', () => {
+  const frame = { text: 'I {sight} the {noun}', fits: ['like', 'see', 'have'] };
+  for (const level of [0, 1, 3]) {
+    const d = fillDistractors(sightByName('like'), frame, SIGHTS, level, 2).map(x => x.w);
+    assert.equal(d.length, 2);
+    for (const w of d) assert.ok(!frame.fits.includes(w), `${w} fits`);
+  }
+});
+
+test('fill distractors at level 0 differ in length; at level 1 they are look-alikes', () => {
+  const frame = { text: 'The {noun} is {sight}', fits: ['here', 'up', 'in'] };
+  const easy = fillDistractors(sightByName('it'), frame, SIGHTS, 0, 2).map(x => x.w);
+  assert.ok(easy.every(w => w.length !== 2), `easy ${easy}`);
+  const hard = fillDistractors(sightByName('it'), frame, SIGHTS, 1, 2).map(x => x.w);
+  assert.ok(hard.includes('is'), `hard ${hard}`);   // 'in' fits, so excluded; 'is' is the closest remaining
+});
+
+test('a Fill noun obeys the frame\'s article', () => {
+  const introduced = new Set(['egg', 'ox']);            // vowel-initial only
+  for (let seed = 1; seed <= 40; seed++) {
+    const t = makeTurn(sightByName('here'), 0, ALL, FRAMES, seeded(seed), { introduced });
+    assert.doesNotMatch(t.frame, /\ba \{noun\}/, t.frame);
+  }
+});
+
+test('a Fill turn capitalises options when the blank opens the sentence', () => {
+  const frames = [{ text: '{sight} is a {noun}', fits: ['here', 'this'] }];
+  const t = makeTurn(sightByName('here'), 0, ALL, frames, seeded(1), { introduced: new Set(['cat']) });
+  assert.equal(t.capitalise, true);
+  assert.equal(t.frame, '{} is a {noun}');
+});
+
+test('sight-word distractors come only from SIGHT and noun distractors only from WORDS', () => {
+  assert.ok(distractors(sightByName('the'), ALL, 3).every(x => x.sight));
+  assert.ok(distractors(byName('cat'), ALL, 3).every(x => !x.sight));
+});
+
+test('letterTray for a sight word never spells another word of either bank', () => {
+  const bank = [...ALL, { w: 'then', tier: 2, sight: true }, { w: 'than', tier: 2, sight: true }];
+  for (let seed = 1; seed <= 100; seed++) {
+    const tray = letterTray(sightByName('the'), bank, seeded(seed));
+    const extra = tray.filter(ch => !'the'.includes(ch));
+    assert.equal(extra.length, 1);
+    assert.ok(!['n'].includes(extra[0]), `seed ${seed} admitted n`);
+  }
+});
+
+test('planRound mixes nouns and sight words and refreshTurn uses the sight ladder', () => {
+  const levels = { cat: 0, dog: 0, sun: 0, the: 0, is: 0 };
+  const turns = planRound(withLevels(levels), ALL, FRAMES, seeded(3));
+  assert.equal(turns.length, ROUND_LENGTH);
+  assert.ok(turns.some(t => t.activity === 'fill'));
+  const fill = turns.find(t => t.activity === 'fill');
+  const moved = refreshTurn(fill, withLevels({ ...levels, [fill.word.w]: 2 }), ALL, FRAMES, seeded(4));
+  assert.equal(moved.activity, 'build');
 });

@@ -2,7 +2,8 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { emptyState, initialState, unlockedTier, introduceWords, applyAnswer,
          activeWords, learnedWords, INITIAL_INTRO, INTRO_BATCH, NEW_WORD_FLOOR,
-         MAX_LEVEL, applyAttempt, retryAllowed } from '../docs/maes-words/game.js';
+         MAX_LEVEL, applyAttempt, retryAllowed,
+         SIGHT_INITIAL_INTRO, SIGHT_INTRO_BATCH, SIGHT_NEW_WORD_FLOOR, isSight } from '../docs/maes-words/game.js';
 
 // A small bank: 8 tier-1, 4 tier-2, 4 tier-3.
 const mk = (w, tier) => ({ w, e: w.toUpperCase(), tier });
@@ -13,6 +14,9 @@ const BANK = [
 ];
 const byName = w => BANK.find(x => x.w === w);
 const withLevels = levels => ({ ...emptyState(), levels: { ...levels } });
+const SIGHTS = [...['the', 'is', 'my', 'in', 'on', 'it'].map(w => ({ w, tier: 1, sight: true })),
+                ...['here', 'like', 'see', 'can'].map(w => ({ w, tier: 2, sight: true }))];
+const ALL = [...BANK, ...SIGHTS];
 
 test('initialState introduces the first INITIAL_INTRO tier-1 words at level 0', () => {
   const s = initialState(BANK);
@@ -136,4 +140,24 @@ test('retryAllowed allows exactly one Build retry and unlimited tile retries', (
     assert.equal(retryAllowed({ activity }, 1), true);
     assert.equal(retryAllowed({ activity }, 3), true);
   }
+});
+
+test('initialState introduces 6 tier-1 nouns and 2 tier-1 sight words', () => {
+  const s = initialState(ALL);
+  assert.deepEqual(Object.keys(s.levels), ['cat', 'dog', 'sun', 'bed', 'pig', 'bus', 'the', 'is']);
+  assert.equal(SIGHT_INITIAL_INTRO, 2);
+});
+
+test('sight words trickle independently: one at a time when fewer than 2 are at level 0', () => {
+  const s0 = withLevels({ cat: 0, dog: 0, sun: 0, bed: 0, pig: 0, bus: 0, the: 1, is: 0 });
+  const s1 = introduceWords(s0, ALL);
+  assert.deepEqual(Object.keys(s1.levels).filter(w => isSight(ALL.find(x => x.w === w))), ['the', 'is', 'my']);
+  assert.equal(Object.keys(s1.levels).length, 9, 'nouns untouched because 6 sit at level 0');
+  assert.equal(SIGHT_INTRO_BATCH, 1); assert.equal(SIGHT_NEW_WORD_FLOOR, 2);
+});
+
+test('sight tier 2 unlocks on the 75% rule over SIGHT only', () => {
+  const s = withLevels({ the: 2, is: 2, my: 2, in: 2, on: 2, it: 0, cat: 0 });  // 5/6 tier-1 sight mastered
+  const next = introduceWords(s, ALL);
+  assert.ok('here' in next.levels, 'tier-2 sight word introduced');
 });
