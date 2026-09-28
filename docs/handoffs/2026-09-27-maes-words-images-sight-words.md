@@ -159,7 +159,7 @@ The 🐸 is ___      choices: here / up / in
 ## Shipped 2026-09-28
 
 The work this handoff scoped is done and merged: the word bank grew from 87
-emoji-only words to **158 words** (67 vendored pictograms from Mulberry
+emoji-only words to **152 words** (61 vendored pictograms from Mulberry
 Symbols and ARASAAC, 4 colour tiles, 87 emoji), a 28-word `SIGHT` bank was
 added, and the Fill activity teaches those sight words directly against a
 32-frame template set. Try-again (a wrong answer stays live until Mae gets
@@ -202,12 +202,21 @@ What landed, by piece:
 5. Run `node --test 'docs-site/tests/maes-words.*.test.mjs'` before
    committing.
 
+A player with an existing v1 save (no sight-word entries in `state.levels`
+yet) never goes through `initialState`'s one-time `SIGHT_INITIAL_INTRO`
+batch — that only runs for a brand-new save. Instead each round's
+`introduceWords` call trickles sight words in via `SIGHT_INTRO_BATCH` (1 per
+round, once the at-level-0 count drops below `SIGHT_NEW_WORD_FLOOR`), so an
+upgraded v1 save is introduced to sight words one at a time rather than the
+two a fresh save gets up front.
+
 ### Borderline words for Andrew to judge on the preview
 
 These passed review but are worth a second look by an actual five-year-old
 (or Andrew's judgment of one) against the rendered pictogram, since some
-concepts read differently in AAC symbol style than in emoji: **mop, bull,
-sofa, leek, lock, wet, jam, read, play, paw**. If any fails the ambiguity
+concepts read differently in AAC symbol style than in emoji: **rat, boot,
+lime, leek, hop, bad, cot, mop, sofa, lock, wet, jam, read, play, paw**
+(bull has been dropped — it read as "cow"). If any fails the ambiguity
 rule in practice, drop its row from `PICS`, remove the corresponding image
 under `docs-site/docs/maes-words/img/`, and re-run the generator.
 

@@ -26,12 +26,10 @@ export const PICS = [
   // tier 1 nouns
   { w: 'mum', tier: 1, src: 'mulberry', id: 'mum_parent' },
   { w: 'dad', tier: 1, src: 'mulberry', id: 'dad_parent' },
-  { w: 'man', tier: 1, src: 'arasaac', id: 4665 },
   { w: 'boy', tier: 1, src: 'arasaac', id: 7176 },
   { w: 'girl', tier: 1, src: 'arasaac', id: 27509 },
   { w: 'baby', tier: 3, src: 'mulberry', id: 'baby' },
   { w: 'cup', tier: 1, src: 'mulberry', id: 'cup_non_spill' },
-  { w: 'mug', tier: 1, src: 'mulberry', id: 'mug_2' },
   { w: 'jug', tier: 1, src: 'arasaac', id: 2435 },
   { w: 'tap', tier: 1, src: 'mulberry', id: 'tap' },
   { w: 'cot', tier: 1, src: 'mulberry', id: 'cot' },
@@ -40,7 +38,6 @@ export const PICS = [
   { w: 'jar', tier: 1, src: 'mulberry', id: 'jar' },
   { w: 'rat', tier: 1, src: 'mulberry', id: 'rat' },
   { w: 'van', tier: 1, src: 'mulberry', id: 'van' },
-  { w: 'hen', tier: 1, src: 'arasaac', id: 2403 },
   { w: 'pan', tier: 1, src: 'mulberry', id: 'frying_pan' },
   { w: 'peg', tier: 1, src: 'mulberry', id: 'clothes_peg' },
   { w: 'fan', tier: 1, src: 'arasaac', id: 2612 },
@@ -49,14 +46,12 @@ export const PICS = [
   // tier 2 nouns
   { w: 'nest', tier: 2, src: 'mulberry', id: 'nest' },
   { w: 'lamp', tier: 2, src: 'mulberry', id: 'lamp' },
-  { w: 'sack', tier: 2, src: 'mulberry', id: 'sack' },
   { w: 'belt', tier: 2, src: 'mulberry', id: 'belt' },
   { w: 'vest', tier: 2, src: 'mulberry', id: 'vest' },
   { w: 'slug', tier: 2, src: 'mulberry', id: 'slug' },
   { w: 'swan', tier: 2, src: 'mulberry', id: 'swan' },
   { w: 'sink', tier: 2, src: 'mulberry', id: 'sink' },
   { w: 'lock', tier: 2, src: 'arasaac', id: 3261 },
-  { w: 'bull', tier: 2, src: 'arasaac', id: 2595 },
   { w: 'paw',  tier: 2, src: 'mulberry', id: 'paw' },
   { w: 'salt', tier: 2, src: 'mulberry', id: 'salt', noA: true },
   // tier 3 nouns
@@ -75,7 +70,6 @@ export const PICS = [
   { w: 'sofa', tier: 3, src: 'arasaac', id: 25479 },
   { w: 'rope', tier: 3, src: 'arasaac', id: 7006 },
   { w: 'tray', tier: 3, src: 'mulberry', id: 'tray' },
-  { w: 'jeep', tier: 3, src: 'mulberry', id: 'jeep' },
   { w: 'cage', tier: 3, src: 'mulberry', id: 'cage' },
   { w: 'tie',  tier: 3, src: 'mulberry', id: 'tie' },
   { w: 'glue', tier: 3, src: 'mulberry', id: 'glue', noA: true },
@@ -131,8 +125,11 @@ function replaceBlock(text, begin, end, body) {
 }
 
 const SOURCE_NAME = { mulberry: 'Mulberry Symbols (CC BY-SA 2.0 UK)', arasaac: 'ARASAAC (CC BY-NC-SA 4.0)' };
+// Mulberry has no per-symbol page, so its credit links straight to the raw source file;
+// ARASAAC's per-symbol page is friendlier than linking the raw PNG asset.
+const creditUrlFor = (r) => r.src === 'mulberry' ? urlFor(r) : `https://arasaac.org/pictograms/en/${r.id}`;
 const creditsRows = () => PICS.map(r =>
-  `<tr><td><img src="img/${fileFor(r)}" alt="" width="64" height="64"></td><td>${r.w}</td><td>${SOURCE_NAME[r.src]}</td><td><a href="${urlFor(r)}">${r.id}</a></td></tr>`).join('\n');
+  `<tr><td><img src="img/${fileFor(r)}" alt="" width="64" height="64"></td><td>${r.w}</td><td>${SOURCE_NAME[r.src]}</td><td><a href="${creditUrlFor(r)}">${r.id}</a></td></tr>`).join('\n');
 
 async function main() {
   const seen = new Set();

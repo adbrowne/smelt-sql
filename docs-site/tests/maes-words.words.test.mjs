@@ -4,6 +4,7 @@ import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { WORDS, SIGHT, FRAMES } from '../docs/maes-words/words.js';
+import { frameAdmits } from '../docs/maes-words/game.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const GAME_DIR = join(HERE, '..', 'docs', 'maes-words');
@@ -96,6 +97,14 @@ test('every frame fit is a SIGHT word, and every sight word fits at least one fr
   const sight = new Set(SIGHT.map(s => s.w));
   for (const f of FRAMES) for (const s of f.fits) assert.ok(sight.has(s), `${s} in fits of "${f.text}" is not a SIGHT word`);
   for (const s of SIGHT) assert.ok(FRAMES.some(f => f.fits.includes(s.w)), `no frame for sight word ${s.w}`);
+});
+
+test('every sight word has a fitting frame with at least one admitted word, so Fill never sees an empty pair space', () => {
+  for (const s of SIGHT) {
+    const fittingFrames = FRAMES.filter(f => f.fits.includes(s.w));
+    const hasPair = fittingFrames.some(f => WORDS.some(w => frameAdmits(w, f)));
+    assert.ok(hasPair, `sight word "${s.w}" fits a frame but no WORDS entry is admitted by any of them`);
+  }
 });
 
 test('the colour words are present as colour tiles and adjectives', () => {

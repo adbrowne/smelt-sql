@@ -1,12 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync, existsSync, statSync, readdirSync } from 'node:fs';
+import { spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { WORDS } from '../docs/maes-words/words.js';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const GAME = join(HERE, '..', 'docs', 'maes-words');
+const REPO_ROOT = join(HERE, '..', '..');
 
 test('generated block markers are present in words.js and credits.html', () => {
   const words = readFileSync(join(GAME, 'words.js'), 'utf8');
@@ -29,6 +31,14 @@ test('every image in img/ is referenced by exactly one word and is small', () =>
   }
   const total = files.reduce((s, f) => s + statSync(join(GAME, 'img', f)).size, 0);
   assert.ok(total < 6_000_000, `img/ totals ${total} bytes`);
+});
+
+test('the generated blocks and credits.html are up to date with the PICS table (network-free)', () => {
+  const result = spawnSync(process.execPath, [join(REPO_ROOT, 'docs-site', 'tools', 'generate-maes-pics.mjs'), '--check'], {
+    cwd: REPO_ROOT,
+    encoding: 'utf8',
+  });
+  assert.equal(result.status, 0, `--check exited ${result.status}\nstdout: ${result.stdout}\nstderr: ${result.stderr}`);
 });
 
 test('the bank has grown and every pictogram word is credited', () => {
