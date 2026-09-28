@@ -20,6 +20,7 @@ let roundStars = 0;
 let busy = false;
 let results = [];
 let attempts = 0;
+let lookTimer = null; // sight-word Build's look-then-spell reveal timer
 
 function showScreen(id) {
   for (const s of screens) $(s).hidden = s !== id;
@@ -166,11 +167,15 @@ function renderBuild(turn) {
 
   if (sight) {
     // Look-then-spell: show the word briefly, then hide it and reveal the tray.
+    const thisTurn = turn;
     prompt.className = 'prompt';
     prompt.textContent = turn.word.w;
     slotsEl.hidden = true;
     opts.hidden = true;
-    setTimeout(() => {
+    lookTimer = setTimeout(() => {
+      // The round may have moved on (or been left) before this fires: only reveal if this
+      // is still the turn on screen, so a stale timer never wipes a later turn's prompt.
+      if (turns[turnIndex] !== thisTurn || $('screen-turn').hidden) return;
       prompt.textContent = '';
       slotsEl.hidden = false;
       opts.hidden = false;
@@ -274,6 +279,7 @@ function renderFill(turn) {
 const RENDER = { read: renderRead, pick: renderPick, build: renderBuild, sentence: renderSentence, fill: renderFill };
 
 function showTurn() {
+  clearTimeout(lookTimer);
   if (turnIndex >= turns.length) return endRound();
   busy = false;
   attempts = 0;
@@ -353,6 +359,7 @@ function endRound() {
 }
 
 function goHome() {
+  clearTimeout(lookTimer);
   renderStars();
   renderWall($('home-wall'));
   showScreen('screen-home');
@@ -373,6 +380,7 @@ goHome();
 
 // --- grown-up corner ---------------------------------------------------------
 function renderGrownup() {
+  clearTimeout(lookTimer);
   const tbody = $('grownup-table').querySelector('tbody');
   tbody.innerHTML = '';
   const addRow = w => {
