@@ -149,8 +149,7 @@ export function framesFor(word, frames) {
   const samePos = frames.filter(f => (f.pos ?? 'noun') === posOf(word));
   const needsThe = word.noA || /^[aeiou]/.test(word.w);
   const ok = needsThe ? samePos.filter(f => !/\ba \{noun\}/.test(f.text)) : samePos;
-  if (ok.length) return ok;
-  return samePos.length ? samePos : frames;
+  return ok.length ? ok : samePos;
 }
 
 const capitalise = s => s.charAt(0).toUpperCase() + s.slice(1);
