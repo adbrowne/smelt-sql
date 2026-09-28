@@ -155,3 +155,75 @@ The 🐸 is ___      choices: here / up / in
   fast-forward, don't merge-commit.
 - Reviewers found real problems every round; don't skip the per-task review
   to save time.
+
+## Shipped 2026-09-28
+
+The work this handoff scoped is done and merged: the word bank grew from 87
+emoji-only words to **158 words** (67 vendored pictograms from Mulberry
+Symbols and ARASAAC, 4 colour tiles, 87 emoji), a 28-word `SIGHT` bank was
+added, and the Fill activity teaches those sight words directly against a
+32-frame template set. Try-again (a wrong answer stays live until Mae gets
+it, earning no level and no star) shipped alongside. Spec:
+`docs/superpowers/specs/2026-09-27-maes-words-design.md` (updated in the same
+work to describe `pos` on words/frames, `fits` exhaustiveness, and the
+sight-word Build look-then-spell reveal).
+
+What landed, by piece:
+
+- `pic` descriptor (`emoji` / `svg` / `colour`) unified how every activity
+  renders a word, via the single `renderPic(pic)` in `ui.js`.
+- `pos` (`'verb'` | `'adj'`, default noun) on word and frame entries, so
+  Fill/Sentence only pair a word with a frame of its own part of speech.
+  Colour words are `pos: 'adj'` and always `noA`.
+- `SIGHT` bank + `FRAMES.fits` (exhaustive per frame) drive the Fill
+  activity; `pickFillFrameAndNoun` in `game.js` chooses the frame and the
+  pictured word jointly so the article rule ("a" vs "the") never has to
+  rewrite frame text.
+- The generator, `docs-site/tools/generate-maes-pics.mjs`, fetches and
+  optimises the vendored images and writes the `// BEGIN/END GENERATED
+  PICS` block in `words.js` and the matching block in `credits.html`.
+
+### How to add a word
+
+1. Add a row to the `PICS` table at the top of
+   `docs-site/tools/generate-maes-pics.mjs` — `{ w, tier, src: 'mulberry' |
+   'arasaac', id, pos?, noA? }`.
+2. Run `node docs-site/tools/generate-maes-pics.mjs` to fetch, optimise, and
+   rewrite the generated blocks in `words.js` and `credits.html`.
+3. Run `node docs-site/tools/generate-maes-pics.mjs --check` to confirm the
+   generator is idempotent against what's checked in (it exits non-zero if
+   the generated blocks would change — useful after hand-editing the table
+   or after a source image changes upstream).
+4. Open `docs-site/docs/maes-words/credits.html` in a browser and use it as
+   a contact sheet: every pictogram is listed there next to its word, so a
+   full-page skim catches ambiguity problems (the ambiguity rule: shown only
+   the picture, a five-year-old says exactly that word) that are easy to
+   miss reviewing the `PICS` table as text.
+5. Run `node --test 'docs-site/tests/maes-words.*.test.mjs'` before
+   committing.
+
+### Borderline words for Andrew to judge on the preview
+
+These passed review but are worth a second look by an actual five-year-old
+(or Andrew's judgment of one) against the rendered pictogram, since some
+concepts read differently in AAC symbol style than in emoji: **mop, bull,
+sofa, leek, lock, wet, jam, read, play, paw**. If any fails the ambiguity
+rule in practice, drop its row from `PICS`, remove the corresponding image
+under `docs-site/docs/maes-words/img/`, and re-run the generator.
+
+### Test and headless commands
+
+```bash
+node --test 'docs-site/tests/maes-words.*.test.mjs'   # unit suite
+
+cd docs-site/docs && python3 -m http.server 8000      # serve for headless/manual play
+# in another shell:
+NODE_PATH=docs/demos/node_modules node docs-site/tests/maes-words-headless.mjs
+```
+
+The headless script now also covers the sight-word Build look phase: it
+leaves a Build turn mid-look (before the 1200ms reveal) via the Grown-up
+corner's long-press, waits past when the old timer would have fired, and
+asserts a new round's prompt isn't wiped or force-revealed by it — the
+regression a stale `setTimeout` produced when `turnIndex`/the visible screen
+had already moved on.

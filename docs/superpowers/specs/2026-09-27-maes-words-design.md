@@ -44,8 +44,8 @@ has a word, a tier and a `pic` describing how it is shown:
 export const WORDS = [
   { w: 'cat',  tier: 1, pic: { kind: 'emoji',  text: '🐱' } },
   { w: 'mum',  tier: 1, pic: { kind: 'svg',    src: 'img/mum.svg' } },
-  { w: 'jump', tier: 2, pic: { kind: 'svg',    src: 'img/jump.svg' } },
-  { w: 'red',  tier: 1, pic: { kind: 'colour', css: '#e53935' } },
+  { w: 'jump', tier: 2, pic: { kind: 'svg',    src: 'img/jump.svg' }, pos: 'verb' },
+  { w: 'red',  tier: 1, pic: { kind: 'colour', css: '#e53935' }, pos: 'adj', noA: true },
   { w: 'milk', tier: 2, pic: { kind: 'emoji',  text: '🥛' }, noA: true },
   // ...
 ];
@@ -53,6 +53,11 @@ export const WORDS = [
 
 `pic.kind` is one of `emoji`, `svg`, `colour`. `noA` marks words that never
 take the article "a" (mass nouns such as `milk`, `mud`, `jam`; numbers).
+`pos` is `'verb'` or `'adj'` for words that are not nouns; a word with no
+`pos` is a noun. Colour words are adjectives (`pos: 'adj'`) and always carry
+`noA`, since a colour tile stands in for "is red", not "a red". `pos` steers
+which frames a word can appear in (see Sight words, sentences and Fill) — it
+does not change how Read, Pick or Build present the word.
 The UI renders a `pic` in exactly one place, `renderPic(pic)`, used by Read
 tiles, the Pick/Build/Sentence/Fill prompt, the wall chips and the Grown-up
 table.
@@ -116,7 +121,10 @@ alternative correct answer.
 
 In Read, a colour word's distractors are the other colour words, so the
 options are four swatches rather than one swatch among emoji, which would
-give the answer away.
+give the answer away. This colour-only pool applies only where the options
+*are* pictures, i.e. Read; Pick and Sentence show one picture and rank their
+word-tile options by the normal edit-distance ranking regardless of colour,
+since a colour word among word tiles gives nothing away.
 
 ### Sight words, sentences and Fill
 
@@ -149,8 +157,9 @@ export const SIGHT = [
 A test asserts no word appears in both `WORDS` and `SIGHT`, so the two banks
 share the `levels` map without clashing.
 
-Frames are templates with a `{noun}` slot and a `{sight}` slot, and declare
-**every** sight word that fits the blank:
+Frames are templates with a `{noun}` slot (any part of speech, matched by
+`pos`) and an optional `{sight}` slot, and declare **every** sight word that
+fits the blank:
 
 ```js
 export const FRAMES = [
@@ -158,18 +167,37 @@ export const FRAMES = [
   { text: '{sight} is a {noun}',   fits: ['Here', 'This', 'It'] },
   { text: 'The {noun} is {sight}', fits: ['here', 'up', 'in'] },
   { text: 'I can see a {noun}',    fits: [] },   // Sentence-only
+  { text: 'I can {noun}',          fits: [], pos: 'verb' },
+  { text: 'It is {noun}',          fits: [], pos: 'adj' },
   // ...
 ];
 ```
 
+A frame with no `pos` takes a noun; `pos: 'verb'` or `pos: 'adj'` restricts
+it to words of that part of speech, matching the word's own `pos`
+(`framesFor`/Fill never pair a word with a frame for a different part of
+speech, so "I can dog" or "It is jump" can't be generated).
+
+`fits` is exhaustive: it lists **every** `SIGHT` word that reads correctly
+in the blank, not just the ones the frame was written to teach. This matters
+because Fill's distractors are drawn from the sight words *not* in `fits`
+(see below) — if a fitting word were missing from the list, a correct answer
+would be marked wrong the moment it was offered as a distractor.
+
 - A Sentence turn uses a frame with its sight word chosen from `fits` (or a
   fixed frame with an empty `fits`) and blanks the noun.
-- A Fill turn for sight word `s` uses a frame whose `fits` contains `s`, with
-  a noun drawn from the introduced words that the frame's article admits
-  (`framesFor` rules: no "a {noun}" for vowel-initial or `noA` words). The
-  distractors are sight words **not** in that frame's `fits`, so exactly one
-  option makes the sentence right. Capitalisation follows the frame: a
-  sentence-initial blank shows capitalised options.
+- A Fill turn for sight word `s` picks a frame and a noun (or verb/adjective)
+  together: the frame's `fits` must contain `s`, and the picked word must be
+  a word `framesFor` admits into that frame (same `pos`, and the frame's
+  article rules — no "a {noun}" for vowel-initial or `noA` words). Choosing
+  the pair jointly, rather than picking a frame and then forcing a word into
+  it, means a frame's own "a {noun}" is never rewritten to "the {noun}" to
+  fit an incompatible word — it is simply paired with a word it already
+  admits. Nouns/verbs/adjectives already introduced are preferred; if none of
+  them fits any matching frame, every word of the required part of speech is
+  considered. The distractors are sight words **not** in that frame's `fits`,
+  so exactly one option makes the sentence right. Capitalisation follows the
+  frame: a sentence-initial blank shows capitalised options.
 - Fill distractors at level 0 are drawn from sight words of a different
   length; at level 1 and for review they are the closest by edit distance
   (`the`/`then`/`they`, `is`/`it`/`in`), the same `distractors()` ranking used
@@ -234,7 +262,10 @@ review once learned.
    - **Build**: one large emoji; empty letter slots the length of the word;
      a tray of shuffled letter tiles (the word's letters plus 1–2
      distractors). Tap tiles to fill slots in order; tap a filled slot to
-     send its letter back. Auto-checks when all slots are full.
+     send its letter back. Auto-checks when all slots are full. A sight word
+     has no picture, so its Build turn shows the word itself in large type
+     for a moment (look), then hides it and reveals the empty slots and tray
+     (spell) — Mae reads it before she has to spell it from memory.
    - **Sentence**: the frame in large type with the picture in the blank;
      three word tiles below. Tap one.
    - **Fill**: the frame in large type with the picture noun shown and the
@@ -338,9 +369,12 @@ Covered:
 - Word bank invariants: every word 2–4 lowercase letters, unique, has a
   tier in 1–3 and a `pic` whose `kind` is `emoji`, `svg` or `colour`; every
   `svg` `src` exists on disk under `img/`; emoji text and `src` are unique;
-  every colour word's `pic.kind` is `colour`; no word is in both `WORDS` and
-  `SIGHT`; every frame has exactly one `{noun}` and at most one `{sight}`,
-  and every entry in `fits` is a `SIGHT` word.
+  every colour word's `pic.kind` is `colour` and `pos` is `adj`; no word is
+  in both `WORDS` and `SIGHT`; every frame has exactly one `{noun}` and at
+  most one `{sight}`, and every entry in `fits` is a `SIGHT` word; `pos` on a
+  word or frame, where present, is `verb` or `adj`; every `pos` used by a
+  word has at least one frame of that `pos`, so `framesFor` never comes back
+  empty.
 - Progression: level clamps at 0 and 3; trickle introduces 2 words only
   when fewer than 6 are at level 0; tier unlock at 75%; a round never
   repeats a word when the active set allows; at most one review word per
@@ -356,11 +390,19 @@ Covered:
   one retry for Build.
 - Storage: round-trips, repairs corrupt JSON, drops unknown words, resets
   on version mismatch.
+- Pictogram generation: the vendored images and the generated blocks in
+  `words.js`/`credits.html` are checked in, not built at test time, but the
+  generator that produced them is idempotent — `generate-maes-pics.mjs
+  --check` re-derives the blocks from its own word → source → asset-id table
+  and exits non-zero if the checked-in bank has drifted from it, so the two
+  never fall out of sync silently.
 
 UI behaviour is verified by playing it in a browser at each checkpoint,
 including on an iPad, and by a headless Playwright script
 (`NODE_PATH=docs/demos/node_modules`) that exercises each activity,
-including a wrong-then-right turn.
+including a wrong-then-right turn and a sight-word Build left mid-look-phase:
+navigating away and starting a new round before the look timer fires must
+not let the stale timer reveal or wipe the new turn's prompt.
 
 ## Checkpoints
 
